@@ -1,0 +1,147 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>NS Bot — embedded</title>
+<style>
+  :root{--bg:#0f1116;--edge:#2b313d;--dim:#8b94a7;--fg:#e6e9ef}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font:12px/1.45 ui-monospace,Menlo,monospace;overflow:hidden}
+  #wrap{display:flex;height:100%}
+  #stage{flex:0 0 auto;background:#000}
+  /* The game renders natively here. The dashboard's own JS cannot read this
+     cross-origin frame (same-origin policy) - but it never needs to: the bot
+     sees and clicks it over CDP, which is origin-agnostic. */
+  #game{width:960px;height:839px;border:0;display:block}
+  #side{flex:1;min-width:340px;max-width:380px;padding:10px 12px;overflow:auto;
+        border-left:1px solid var(--edge)}
+  h4{margin:0 0 6px;font-size:10px;letter-spacing:.09em;text-transform:uppercase;
+     color:var(--dim);font-weight:600;display:flex;justify-content:space-between}
+  .card{border:1px solid var(--edge);border-radius:8px;padding:8px 10px;margin-bottom:10px}
+  .r{display:flex;justify-content:space-between;gap:8px}
+  .d{color:var(--dim)} .hit{color:#4ade80} .warn{color:#fbbf24}
+  .bad{color:#f87171} .acc{color:#60a5fa}
+  button{font:inherit;background:#252b36;color:var(--fg);border:1px solid var(--edge);
+    border-radius:6px;padding:5px 10px;cursor:pointer;margin:0 4px 4px 0}
+  button:hover{border-color:#60a5fa}
+  label{display:block;cursor:pointer;padding:1px 0}
+  #log{max-height:200px;overflow:auto;white-space:pre-wrap;color:var(--dim);font-size:11px}
+  .note{color:var(--dim);font-size:11px;margin-top:4px}
+  code{color:#60a5fa}
+</style>
+
+<div id="wrap">
+  <div id="stage">
+    <!-- Loaded with this browser profile's own session cookie, so no credentials
+         are handled by the dashboard. If not signed in, sign in in this frame once. -->
+    <iframe id="game" src="https://ninjasaga.cc/play" allow="autoplay; fullscreen"></iframe>
+  </div>
+
+  <div id="side">
+    <div class="card">
+      <h4><span>NS Bot</span><span id="mode" class="d">—</span></h4>
+      <div class="r"><span class="d">state</span><span id="state">—</span></div>
+      <div class="r"><span class="d">cycle</span><span id="cycle">0</span></div>
+      <div class="r"><span class="d">scoring</span><span id="ms">—</span></div>
+      <div style="margin-top:8px">
+        <button onclick="ctl('run')">Resume</button>
+        <button onclick="ctl('pause')">Pause</button>
+        <button onclick="ctl('stop')">Stop</button>
+        <button onclick="focusGame()">Focus game</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h4>Arm states <span class="d">live clicking</span></h4>
+      <div id="arm"></div>
+      <div class="note">Unchecked = detect and log only. Claim / Wish / SPIN and
+        Delete stay on a hard never-click list regardless of these.</div>
+    </div>
+
+    <div class="card">
+      <h4>Next action</h4>
+      <div id="act">—</div>
+    </div>
+
+    <div class="card">
+      <h4>Combat</h4>
+      <div class="r"><span class="d">my turn</span><span id="turn">—</span></div>
+      <div class="r"><span class="d">round</span><span id="round">0</span></div>
+      <div class="r"><span class="d">watchdog</span><span id="wd">—</span></div>
+      <div id="bars" class="note">no enemy bars</div>
+    </div>
+
+    <div class="card"><h4>Templates</h4><div id="tpl"></div></div>
+    <div class="card"><h4>Activity</h4><div id="log"></div></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const ARMABLE = ['character_select', 'popup', 'daily_reward_popup', 'combat'];
+let armed = new Set();
+
+async function ctl(cmd){ await fetch('/api/control?cmd=' + cmd); }
+
+async function focusGame(){
+  const r = await (await fetch('/api/focus')).json();
+  if(!r.ok) alert('Focus failed: ' + (r.error || 'unknown'));
+}
+
+function renderArm(){
+  $('arm').innerHTML = ARMABLE.map(s =>
+    `<label><input type="checkbox" ${armed.has(s) ? 'checked' : ''}
+      onchange="toggleArm('${s}')"> ${s}</label>`).join('');
+}
+
+async function toggleArm(s){
+  armed.has(s) ? armed.delete(s) : armed.add(s);
+  await fetch('/api/arm?states=' + encodeURIComponent([...armed].join(',')));
+  renderArm();
+}
+
+async function tick(){
+  try{
+    const s = await (await fetch('/api/state')).json();
+    const d = s.decision || {};
+    const live = (s.mode || '').startsWith('LIVE');
+
+    $('mode').textContent = s.mode;
+    $('mode').className = live ? 'bad' : 'd';
+    $('state').textContent = s.state;
+    $('state').className = s.state === 'unknown' ? 'warn' : 'hit';
+    $('cycle').textContent = s.cycle;
+    $('ms').textContent = (s.score_ms || 0) + ' ms';
+
+    // keep the checkboxes in step with the server's actual armed set
+    const server = new Set(live ? s.mode.slice(5).split(',').filter(Boolean) : []);
+    if([...server].sort().join() !== [...armed].sort().join()){
+      armed = server; renderArm();
+    }
+
+    $('act').innerHTML = d.action
+      ? `<span class="acc"><b>${d.action}</b></span> ${d.target ? '<code>'+d.target+'</code>' : ''}
+         <div class="note">${d.reason || ''}</div>`
+      : '—';
+
+    $('turn').textContent = s.my_turn === null ? '—' : (s.my_turn ? 'YES' : 'no');
+    $('turn').className = s.my_turn ? 'hit' : 'd';
+    $('round').textContent = s.round;
+    $('wd').textContent = s.watchdog;
+    $('wd').className = ['stalled','regenerating'].includes(s.watchdog) ? 'bad' : 'd';
+
+    $('bars').innerHTML = (s.enemy_bars || []).length
+      ? s.enemy_bars.map(b => `<div class="r"><span class="d">y=${b.y}</span><span>${b.pct}%</span></div>`).join('')
+      : 'no enemy bars';
+
+    $('tpl').innerHTML = (s.templates || []).map(t =>
+      `<div class="r"><span class="${t.hit?'hit':'d'}">${t.hit?'●':'○'} ${t.name}</span>
+       <span class="${t.hit?'hit':'d'}">${t.conf.toFixed(3)}</span></div>`).join('');
+
+    $('log').textContent = (s.log || []).slice().reverse().join('\n');
+  }catch(e){ $('mode').textContent = 'server gone'; }
+}
+
+renderArm();
+tick();
+setInterval(tick, 1200);
+</script>

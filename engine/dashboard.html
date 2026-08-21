@@ -1,0 +1,140 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>NS Bot — dry run</title>
+<style>
+  :root{--bg:#14161c;--panel:#1c2029;--edge:#2b313d;--fg:#e6e9ef;--dim:#8b94a7;
+        --hit:#4ade80;--warn:#fbbf24;--bad:#f87171;--acc:#60a5fa}
+  *{box-sizing:border-box}
+  body{margin:0;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+       background:var(--bg);color:var(--fg)}
+  header{padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--edge);
+         display:flex;gap:16px;align-items:center}
+  header b{font-size:14px} .sp{flex:1}
+  .pill{padding:2px 9px;border-radius:99px;border:1px solid var(--edge);color:var(--dim)}
+  .pill.on{color:var(--hit);border-color:var(--hit)}
+  .pill.warn{color:var(--warn);border-color:var(--warn)}
+  main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:12px;padding:12px;
+       align-items:start}
+  @media(max-width:900px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--edge);border-radius:8px;
+        padding:10px 12px;margin-bottom:12px}
+  .card h3{margin:0 0 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+           color:var(--dim);font-weight:600}
+  #view{width:100%;display:block;background:#000;border-radius:6px;min-height:200px}
+  button{font:inherit;background:#252b36;color:var(--fg);border:1px solid var(--edge);
+         border-radius:6px;padding:7px 13px;cursor:pointer}
+  button:hover{border-color:var(--acc)} button.stop:hover{border-color:var(--bad)}
+  table{width:100%;border-collapse:collapse}
+  td{padding:2px 0;vertical-align:middle}
+  td.n{color:var(--dim)} td.v{text-align:right;font-variant-numeric:tabular-nums}
+  .bar{height:5px;background:#2a3140;border-radius:3px;overflow:hidden;margin-top:3px}
+  .bar i{display:block;height:100%;background:var(--acc)}
+  .hit{color:var(--hit)} .miss{color:var(--dim)}
+  .kv{display:flex;justify-content:space-between;gap:8px}
+  #log{max-height:190px;overflow:auto;white-space:pre-wrap;color:var(--dim);font-size:12px}
+  .note{color:var(--dim);font-size:12px;margin-top:6px}
+</style>
+
+<header>
+  <b>NS Bot</b>
+  <span id="mode" class="pill">dry-run</span>
+  <span id="status" class="pill">…</span>
+  <span id="state" class="pill on">—</span>
+  <span class="sp"></span>
+  <button onclick="ctl('run')">Resume</button>
+  <button onclick="ctl('pause')">Pause</button>
+  <button onclick="focusGame()">Focus game view</button>
+  <button class="stop" onclick="ctl('stop')">Stop</button>
+</header>
+
+<main>
+  <div>
+    <div class="card">
+      <h3>Live view — CDP capture, not an embedded iframe</h3>
+      <img id="view" alt="waiting for first frame">
+      <div class="note">Frames are polled over CDP. A cross-origin iframe could not be
+        read or clicked (same-origin policy), so the game is captured rather than embedded.</div>
+    </div>
+    <div class="card">
+      <h3>Template confidences <span id="tcount" style="color:var(--dim)"></span></h3>
+      <table id="tpl"></table>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h3>Next action (dry run)</h3>
+      <div id="act" class="note" style="color:var(--fg)">—</div>
+    </div>
+    <div class="card">
+      <h3>Combat</h3>
+      <table>
+        <tr><td class="n">my turn</td><td class="v" id="turn">—</td></tr>
+        <tr><td class="n">round</td><td class="v" id="round">0</td></tr>
+        <tr><td class="n">watchdog</td><td class="v" id="wd">—</td></tr>
+        <tr><td class="n">scoring</td><td class="v" id="ms">—</td></tr>
+      </table>
+      <div id="bars" class="note">no enemy bars</div>
+    </div>
+    <div class="card">
+      <h3>Counters</h3>
+      <table id="cnt"></table>
+    </div>
+    <div class="card">
+      <h3>Activity</h3>
+      <div id="log"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = i => document.getElementById(i);
+async function ctl(c){ await fetch('/api/control?cmd='+c); }
+async function focusGame(){
+  const r = await (await fetch('/api/focus')).json();
+  if(!r.ok) alert('Could not focus game: ' + (r.error||'unknown'));
+}
+
+function pill(el, text, cls){ el.textContent = text; el.className = 'pill' + (cls?' '+cls:''); }
+
+async function tick(){
+  try{
+    const s = await (await fetch('/api/state')).json();
+    pill($('mode'), s.mode);
+    pill($('status'), s.status, s.status==='running'?'on':(s.status==='paused'?'warn':''));
+    pill($('state'), s.state, s.state==='unknown'?'warn':'on');
+
+    const d = s.decision||{};
+    $('act').innerHTML = d.action
+      ? `<b style="color:var(--acc)">${d.action}</b> ${d.target?('<code>'+d.target+'</code>'):''}
+         ${d.at?('@ '+d.at.join(',')):''}<div class="note">${d.reason||''}</div>`
+      : '—';
+    $('turn').textContent  = s.my_turn===null? '—' : (s.my_turn? 'YES':'no');
+    $('turn').className    = 'v ' + (s.my_turn? 'hit':'miss');
+    $('round').textContent = s.round;
+    $('wd').textContent    = s.watchdog;
+    $('ms').textContent    = (s.score_ms||0) + ' ms';
+    $('wd').className      = 'v ' + (['stalled','regenerating'].includes(s.watchdog)?'':'miss');
+    if(['stalled','regenerating'].includes(s.watchdog)) $('wd').style.color='var(--bad)';
+    else $('wd').style.color='';
+
+    $('bars').innerHTML = s.enemy_bars.length
+      ? s.enemy_bars.map(b=>`<div class="kv"><span>y=${b.y}</span><span>${b.pct}%</span></div>
+          <div class="bar"><i style="width:${b.pct}%"></i></div>`).join('')
+      : 'no enemy bars';
+
+    $('cnt').innerHTML = Object.entries(s.counters)
+      .map(([k,v])=>`<tr><td class="n">${k}</td><td class="v">${v}</td></tr>`).join('');
+
+    $('tcount').textContent = '(top ' + s.templates.length + ')';
+    $('tpl').innerHTML = s.templates.map(t=>`
+      <tr><td class="n">${t.hit?'<span class="hit">●</span>':'<span class="miss">○</span>'} ${t.name}</td>
+          <td class="v ${t.hit?'hit':'miss'}">${t.conf.toFixed(3)}</td>
+          <td class="v n">×${t.scale}</td></tr>`).join('');
+
+    $('log').textContent = s.log.slice().reverse().join('\n');
+  }catch(e){ pill($('status'),'server gone','warn'); }
+  $('view').src = '/api/frame.jpg?t=' + Date.now();
+}
+tick(); setInterval(tick, 1500);
+</script>
