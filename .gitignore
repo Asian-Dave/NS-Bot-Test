@@ -1,0 +1,20 @@
+# virtualenv (149 MB; recreate with: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt)
+.venv/
+
+# runtime state. Contains the Chrome profile with a LIVE SESSION COOKIE, plus
+# logs and control files. Must never be committed.
+run/
+
+# third-party product binaries - not ours to redistribute
+*.exe
+
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Reference material from a third-party commercial product (its config format,
+# UI screenshot and installer). Kept locally for design reference only - not
+# ours to redistribute. Remove these lines if you want them in a private repo.
+BotSettings.json
+Configs/
+settings.png
