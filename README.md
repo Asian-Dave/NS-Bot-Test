@@ -1,7 +1,6 @@
 # NS Bot
 
-UI-level automation for Ninja Saga (`ninjasaga.cc`), a Flash game running on
-Ruffle. The bot looks at rendered pixels and clicks — it does not touch game
+UI-level automation for Ninja Saga, a Flash game running on Ruffle. The bot looks at rendered pixels and clicks — it does not touch game
 memory, network traffic or the server protocol.
 
 **Status: perception and control work end to end. One behaviour is armed.**
