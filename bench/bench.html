@@ -1,0 +1,18 @@
+<!doctype html><meta charset=utf-8><title>bench-pending</title>
+<body style="font:14px monospace;background:#111;color:#eee">
+<pre id=out>running…</pre>
+<script src="bench.js"></script>
+<script>
+(async () => {
+  const label = new URLSearchParams(location.search).get('label') || 'unknown';
+  let r;
+  try { r = await window.runBench({}); } catch (e) { r = { error: String(e) }; }
+  r.label = label;
+  document.getElementById('out').textContent = JSON.stringify(r, null, 2);
+  document.title = 'bench-done';
+  // Report back to the serving origin so the access log captures the numbers.
+  // This is how we extract results from inside the container without needing a
+  // websocket/CDP client in there.
+  try { await fetch('/RESULT?' + encodeURIComponent(JSON.stringify(r))); } catch (e) {}
+})();
+</script>
