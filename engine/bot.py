@@ -179,10 +179,18 @@ def _decide(state, scored, ctx=None):
         fight it cannot win (observed: enemy HP recovering 43.0 -> 47.2).
     """
     ctx = ctx or {}
-    c = {n: (conf, loc) for n, conf, _s, loc, _t in scored}
-    def at(name, thr=0.85):
+    # Keep each template's OWN configured threshold. Discarding it and applying a
+    # blanket 0.85 meant the policy silently disagreed with the classifier: the
+    # lucky-spin dismiss button scores 0.830, clearing its configured 0.76, so the
+    # state was recognised but the drain then reported "no known dismiss control".
+    c = {n: (conf, loc, th) for n, conf, _s, loc, th in scored}
+
+    def at(name, thr=None):
         v = c.get(name)
-        return v[1] if v and v[0] >= thr else None
+        if not v:
+            return None
+        limit = v[2] if thr is None else thr
+        return v[1] if v[0] >= limit else None
 
     if state == "loading":
         return {"action": "wait", "reason": "loading interstitial; 8-30s observed"}
