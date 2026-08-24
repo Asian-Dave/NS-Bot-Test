@@ -1,6 +1,6 @@
 # Ninja Saga — UI Map (Phase 1: observation)
 
-Observed live on 2026-08-21 against `https://ninjasaga.cc/play`, account `Tokiri` (Lv 57).
+Observed live on 2026-08-21 against the game server's `/play` page, account `Tokiri` (Lv 57).
 Everything below was seen on screen, not inferred. Items I could **not** observe are
 explicitly marked; nothing in this document is guessed.
 
@@ -11,8 +11,8 @@ explicitly marked; nothing in this document is guessed.
 The game is the **original Flash SWF running on Ruffle** (WASM + WebGL), not HTML/DOM:
 
 ```
-page  https://ninjasaga.cc/play
- └── iframe (same-origin, ninjasaga.cc)   960 x 839 CSS
+page  <server>/play
+ └── iframe (same-origin)                 960 x 839 CSS
       └── <ruffle-player>  ── shadowRoot ── <canvas> 1920 x 1678 backing
 ```
 

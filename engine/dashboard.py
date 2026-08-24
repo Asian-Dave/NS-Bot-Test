@@ -96,6 +96,7 @@ class Shared:
 SH = Shared()
 CONTROL = os.path.join(ROOT, "run/bot.control")
 PANEL_W = 380
+GAME_URL = ""          # set from config in main(); no host hardcoded here
 RUNNER = None   # set at startup so the UI can arm/disarm states at runtime
 
 
@@ -121,7 +122,7 @@ class Runner(threading.Thread):
         self.stream = stream
         self.use_overlay = use_overlay
         self.open_url = "http://127.0.0.1:%d/embed" % dash_port if embed else \
-                        "https://ninjasaga.cc/play"
+                        GAME_URL
         # CDP is origin-agnostic, so it can see and click the cross-origin game
         # iframe inside our own page. The PAGE's JS cannot - but it never needs to.
         self.match = "127.0.0.1" if embed else "ninjasaga"
@@ -343,7 +344,8 @@ class Handler(BaseHTTPRequestHandler):
         if u.path in ("/", "/index.html"):
             return self._send(200, "text/html; charset=utf-8", PAGE.encode())
         if u.path == "/embed":
-            return self._send(200, "text/html; charset=utf-8", EMBED.encode())
+            page = EMBED.replace("__GAME_URL__", GAME_URL)
+            return self._send(200, "text/html; charset=utf-8", page.encode())
         if u.path == "/api/state":
             return self._send(200, "application/json", json.dumps(SH.snapshot()).encode())
         if u.path == "/api/frame.jpg":
@@ -408,6 +410,10 @@ def main():
     args = ap.parse_args()
 
     cfg = json.load(open(args.config))
+    global GAME_URL
+    GAME_URL = cfg.get("target", {}).get("game_url", "")
+    if not GAME_URL:
+        print("  config has no target.game_url"); return 2
     os.makedirs(os.path.join(ROOT, "run"), exist_ok=True)
     if os.path.exists(CONTROL):
         os.remove(CONTROL)                     # never start up paused/stopped

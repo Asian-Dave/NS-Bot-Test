@@ -262,7 +262,7 @@ def main():
     if not browser.cdp_ready(args.port):
         log.info("no CDP on %d - launching a dedicated-profile Chrome", args.port)
         try:
-            browser.launch("https://ninjasaga.cc/play",
+            browser.launch(cfg.get("target", {}).get("game_url", ""),
                            profile_dir=os.path.join(ROOT, "run/chrome-profile"),
                            port=args.port)
         except Exception as e:
