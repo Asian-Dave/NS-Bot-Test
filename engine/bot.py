@@ -128,17 +128,26 @@ def identify_state(scored, cfg):
         return "combat"
 
     # a dismissible modal of some kind
-    if g("close_popup_x") >= 0.90 or g("close_popup_x_menu") >= 0.88:
+    # All four dismiss controls, not just the small ones. The large X and the
+    # back-arrow were previously omitted here, so the calendar, lucky-spin and
+    # wishing-tree popups classified as "unknown" even once their templates worked.
+    if (g("close_popup_x") >= 0.90 or g("close_popup_x_menu") >= 0.88
+            or g("close_popup_x_large") >= 0.76
+            or g("close_popup_back_arrow") >= 0.80):
         return "popup"
 
     # character select: strong, verified discriminator (0.33-0.35 elsewhere)
     if g("character_select") >= 0.85:
         return "character_select"
 
+    # Positive lobby anchor: the right-hand icon rail is opaque and absent in
+    # combat (0.356 vs 0.997 here). It also reads ~0.69 behind a popup, which is
+    # correct - the rail IS still on screen - so popup states are checked first.
+    if g("lobby_rail_fortune") >= 0.90:
+        return "lobby"
+
     if shell >= 0.85:
-        # No positive lobby anchor exists yet - the village labels are
-        # semi-transparent over animated art and unusable. Until one is cut,
-        # lobby is defined negatively: shell present, nothing else matched.
+        # Shell present but no lobby anchor: inside the game, state unidentified.
         return "lobby_or_shell"
 
     return "unknown"
@@ -223,6 +232,9 @@ def _decide(state, scored, ctx=None):
 
     if state in ("logged_out", "login_form"):
         return {"action": "halt", "reason": "NOT LOGGED IN - will not authenticate"}
+
+    if state == "lobby":
+        return {"action": "idle", "reason": "lobby; no behaviour configured yet"}
 
     if state == "lobby_or_shell":
         return {"action": "idle", "reason": "lobby; no behaviour configured yet"}
