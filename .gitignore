@@ -18,3 +18,10 @@ __pycache__/
 BotSettings.json
 Configs/
 settings.png
+
+# Decompiled third-party bot, kept locally as mechanics reference only (~7 MB:
+# 61 C# files, 10 DLLs, the extracted binary). Read, never built, never imported.
+# Excluded deliberately - whether a third party's decompiled binary belongs in
+# this history is a call for the repo owner, not a default. docs/PORT_FROM_CMMHERO.md
+# records everything taken from it, so the port is reviewable without it.
+ref/tp/
