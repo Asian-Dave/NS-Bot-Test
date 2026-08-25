@@ -22,9 +22,18 @@ class Capture:
         vp = json.loads(vp)
         self.viewport = (vp["w"], vp["h"])
 
-    def frame(self, region=None, gray=True):
-        """One frame. `region` is (x, y, w, h) in CAPTURED PIXELS, not CSS px."""
-        png = self.cdp.screenshot()
+    def frame(self, region=None, gray=True, clip=None):
+        """One frame.
+
+        `region` is (x, y, w, h) in CAPTURED PIXELS and crops after decoding.
+        `clip`   is (x, y, w, h) in CSS PIXELS and crops server-side, so only
+                 that area is encoded and transferred — cheaper on a hot polling
+                 loop, where full-frame capture costs ~82 ms. Note that a clipped
+                 frame's pixel origin is the clip origin, so coordinates from it
+                 are NOT in full-frame space; offset them back yourself if you
+                 need to click what you found.
+        """
+        png = self.cdp.screenshot(clip=clip)
         buf = np.frombuffer(png, dtype=np.uint8)
         img = cv2.imdecode(buf, cv2.IMREAD_COLOR)          # BGR
         if img is None:

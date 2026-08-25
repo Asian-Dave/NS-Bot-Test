@@ -147,9 +147,21 @@ class CDP:
             raise CDPError(f"JS threw: {r['exceptionDetails'].get('text')}")
         return r.get("result", {}).get("value")
 
-    def screenshot(self, path=None):
-        """Composited page pixels, including the Ruffle WebGL canvas."""
-        r = self.call("Page.captureScreenshot", format="png")
+    def screenshot(self, path=None, clip=None):
+        """Composited page pixels, including the Ruffle WebGL canvas.
+
+        `clip` is an optional (x, y, w, h) in CSS pixels. Passing it moves the
+        crop server-side, so only the region of interest is encoded and sent
+        instead of the whole page. Worth using on a hot polling loop — full-frame
+        capture was measured at ~82 ms (~12 fps) over CDP, and most state gates
+        only care about one small area.
+        """
+        params = {"format": "png"}
+        if clip:
+            x, y, w, h = clip
+            params["clip"] = {"x": float(x), "y": float(y),
+                              "width": float(w), "height": float(h), "scale": 1}
+        r = self.call("Page.captureScreenshot", **params)
         data = base64.b64decode(r["data"])
         if path:
             with open(path, "wb") as f:
