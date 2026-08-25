@@ -46,7 +46,11 @@ from bot import score_all, identify_state, load_templates, decide_action, NEVER_
 # came from 1568-wide screenshots, NOT native frames - reusing it here put the
 # true peak outside the band and made every template score wrong. The full 36-step sweep costs 16.05s/cycle vs 0.40s locked (40x) -
 # it is a calibration tool, never a runtime one. Enable it with --sweep.
-SCALES_FAST = [1.00]   # geometry pinned -> templates match at 1.0 exactly
+SCALES_FAST = [1.00, 1.03]
+# Templates cut natively from a canonical frame match at 1.00 exactly. Three
+# were re-cut by upscaling a reference JPEG, which carries ~3% scale error and
+# peaks nearer 1.03 - the lobby anchor scored 0.902 there while missing at 1.00.
+# Drop back to [1.00] once those are re-cut from live captures.
 
 
 class Shared:

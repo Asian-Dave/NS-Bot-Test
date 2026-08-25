@@ -178,10 +178,48 @@ Mission Room -> grade (S locked / A / B / C)
   bimodal split. The pale-pink slot reads 56 while perfectly usable. Use
   `engine/combat.SlotBaseline`, which compares each slot to its own ready-state
   sample.
-* **Targeting hit-areas differ and this is UNRESOLVED.** `Attack` + click on the
-  enemy NAME PLATE dealt damage (verified -7.7pp). Skills appeared to work when
-  clicking the enemy SPRITE earlier, but later skill+sprite and skill+plate both
-  produced no damage. Cause unknown. Investigate before trusting skill automation.
+* **Targeting: there is an 8-slot ring, and it is almost certainly the real
+  click surface.** Previously recorded here as UNRESOLVED — `Attack` + enemy NAME
+  PLATE dealt damage (verified -7.7pp), while skill+sprite and skill+plate later
+  both produced nothing. The reference bot explains why: it never clicks art at
+  all, only eight fixed battlefield slots `T1..T8`.
+
+  **That ring exists on our client.** Measured on `ref/combat/*.jpg`: an 8-slot
+  grid around the battle centre, upper four with RED borders, lower four YELLOW.
+  Border pixel counts were 254..667 for a drawn slot versus 0..11 for empty
+  background, so the separation is wide and unambiguous. Slot order matches the
+  reference bot's own `T1..T8`: outer-left, inner-left, inner-right, outer-right
+  across the top (enemy), then the same across the bottom (ally).
+
+  Implemented in `engine/geometry.py`. **Still unverified: that clicking a slot
+  selects that target.** The ring's existence is measured; its clickability is
+  inferred. Confirm on a live run before trusting skill automation.
+
+* **Battle geometry must be ANCHOR-RELATIVE, never absolute.** The reference bot
+  hardcodes ~2,500 absolute coordinates; it can, because it forces one window
+  size. We cannot — our own capture sets differ by 18% (command bar at scale
+  0.46 in one, 0.545 in the other). An early probe of mine reported the target
+  ring as "transient" purely because it tested one geometry's coordinates
+  against the other's frames. It is not transient; the coordinates were wrong.
+
+  What holds instead: locate the command bar (`charge_btn` + `dodge_btn`, which
+  also yields the scale), then compute every slot as
+  `anchor + offset_in_template_units * scale`. Verified by deriving offsets from
+  the 0.46 frames and predicting the 0.545 frames — **8/8 ring slots landed on
+  their real borders**, and skill slots within ~6px of independently measured
+  ones. The two geometries are a pure uniform scale: command-bar pitch / match
+  scale was 108.7 vs 108.3, agreeing to 0.4%.
+
+* **The command bar is a 2x2 block, not a row.** Attack top-left, Dodge
+  top-right, Charge bottom-left, Run bottom-right; side 108.7 template units
+  (50px at scale 0.46, 59px at 0.545).
+
+* **`min_conf` for the command bar is 0.70, not 0.85.** The discrimination matrix
+  below was measured on ONE geometry. On the 0.545 capture set the same real
+  command bar only reaches 0.746/0.788, because matchTemplate is not scale
+  invariant — an 0.85 gate silently classified every boss-encounter frame as
+  "not combat". Measured separation: command bar present 0.746..0.949, absent
+  0.407..0.470. Gate at 0.70 and let geometry cross-check the rest.
 * **Status effects** seen: `Blood Feed (1)`, `Strengthen(1)`, `Blind(1)` - named
   red text with a stack count. Damage numbers render as large floating white text.
 * **Mission flow varies between missions.** #1: cutscene -> traversal -> combat.
@@ -285,3 +323,97 @@ templates peak at **scale 0.46**, the later full-viewport combat captures at
 this is not survivable by threshold tuning. Either pin the viewport (what
 `bot.py` does) so only one geometry ever occurs, or re-cut everything at one
 canonical geometry. Until then the combat gate is scale-fragile.
+
+## TP Training (Special tab) — measured by playing it
+
+Path: Mission Room -> `Special` tab -> `TP Training`. Three per page, 2 pages.
+Observed: Dangerous Potion / Secret TP Scroll / Weird Potion, all Lv 40,
+XP 2000, Gold 2000, flame column showing **10**.
+
+* The flame column shows 10 where story missions show `-`. The user states TP
+  missions do not actually consume stamina; treat the displayed 10 as unverified.
+* Detail panel is the same shape as story missions: `Completed: N`, back arrow
+  bottom-left, green check bottom-right to start.
+* Flow: green check -> cutscene ("click anywhere to continue", ~2 clicks) -> minigame.
+
+### The minigame is hand-seal SEQUENCE ENTRY, not pair matching
+
+* HUD: `Skill : 1 / 4` (four rounds) and three hearts (lives).
+* A named target skill with icon (`Lightning Edge`, `Fiery Spike Wheel`, ...).
+* **Two face-down slot cards** beneath the skill name.
+* A row of **10 face-up hand seals** along the bottom, all visually distinct.
+* `Start` button, centre.
+
+Verified interactions:
+
+* Clicking a seal fills the next slot left->right and **greys that seal out**.
+  No heart is lost per click; evaluation happens on sequence completion.
+* A wrong sequence costs **one heart** (3 -> 2), **rerolls the target skill**,
+  resets all 10 seals and both slots, and leaves `Skill : 1 / 4` unchanged.
+  So a miss costs a life but not progress.
+* The 10 seals **stay face-up** - verified across 7.3 s of continuous observation,
+  no flip-back. The choices are not the memorised element.
+
+**UNRESOLVED: where the required sequence comes from.** It is not derivable from the
+visible screen. Most likely revealed briefly in the two slots immediately after
+`Start`; that window was missed twice by fixed-interval capture. If no reveal
+exists, a skill -> seals table is required instead.
+
+### TP geometry and capture notes
+
+At viewport 960x839 / dpr 2, in CSS coordinates:
+
+* 10 seals, ~148 px pitch, centres x = 147, 221, 295, 369, 443, 517, 591, 665,
+  739, 813 at y = 540
+* slots ~(447, 412) and ~(521, 412); `Start` (488, 200)
+* **Frame-differencing does not work on this screen.** The training dummy animates
+  continuously, so every frame differs by ~4000 px regardless of events. Read
+  content, never deltas.
+* Capture ceiling measured at ~82 ms/frame (~12 fps) over CDP.
+
+## Cross-reference: CMMhero NS Bot (decompiled, `ref/tp/cmmhero`)
+
+Third-party Windows/C#/Adobe-AIR bot for a **different** private-server clone.
+Mechanics reference only - never run the binary (it hardware-fingerprints, plants a
+DPAPI licence file that survives uninstall, and opens a plaintext WebSocket to a
+hardcoded IP). Findings that change our design:
+
+* **Their symbol matcher is better specified than our sketch**
+  (`CardSolver.cs:139-166`): inset each crop by 20% to drop the frame, resize to
+  70x70, greyscale, then distance = `mean(|grey diff|) + mean(|Canny edge diff|)`,
+  argmin wins. The **dual metric** is the transferable part - edges survive
+  brightness/shading shifts, greyscale catches fill differences. Use this for seal
+  matching rather than plain correlation.
+* Cards located by exact-colour `InRange` + `ConnectedComponentsWithStats` with an
+  **area filter** (900..3000 px), grouped into rows by Y proximity (<40 px), sorted
+  by X. Cheap and template-free.
+* On solver failure they **guess option 1** rather than re-capturing
+  (`FormMain.cs:17661-17685`: the `null` case shares the "A" branch). We should
+  retry the capture instead.
+* **Their TP content is not ours.** Our mission names appear in none of the 1,734
+  recovered strings, and `FormDailyTP.cs` is only a settings form (battle-limit
+  checkbox + count). Their TP mode is "fight N battles" - it does not solve a seal
+  puzzle, so their code cannot answer our open TP question.
+* **Targets are eight fixed battlefield slots `T1..T8`** (two rows of four), never
+  sprites or name plates. Strong candidate explanation for why our sprite/plate
+  clicking was inconsistent: we were aiming at art, not at the slot. Re-measure on
+  our client before use - their client is ~800x440, ours 960x720.
+* **No HP/CP reading anywhere.** `FindAllInRange` has no callers outside
+  `PixelSearch.cs`; `FindPixelColorRange` has one thin wrapper
+  (`FormMain.cs:14479`). Our `bar_fill_ratio` work is not redundant.
+* **No round/turn counter** (zero refs in `FormMain.cs`) and no flee/run path.
+  Their only failsafe is a wall-clock **"Stuck Timeout"** (" stuck more than 3
+  times"), which is time-based and would NOT catch a regenerating enemy - the
+  screen keeps changing while the fight stays unwinnable. Our progress-based
+  `DamageWatchdog` covers a gap their design misses.
+* Cooldown detection abandoned: `CheckSkillCD` is stubbed `return true`
+  (`FormMain.cs:6904`). They rotate a used skill to the back of a queue instead -
+  zero calibration, but weaker than round bookkeeping. Useful fallback for slots
+  whose cooldown length we have not measured.
+* `Village (46,90,#003A8F)` - a positive lobby anchor as a **single pixel probe** on
+  solid chrome. Cheaper than our template and sidesteps the semi-transparent-label
+  problem entirely. Worth trying on our client.
+* Correction to that folder's own notes: `PixelLoop2` (`FormMain.cs:14801`) is
+  **not** a tolerance/neighbourhood variant. It calls `PixelFound` with exact
+  equality; the difference is that it races all conditions concurrently
+  (`Task.Run` + `Task.WhenAny`). It does not help with animated art.
