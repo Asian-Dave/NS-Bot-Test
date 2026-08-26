@@ -25,3 +25,15 @@ settings.png
 # this history is a call for the repo owner, not a default. docs/PORT_FROM_CMMHERO.md
 # records everything taken from it, so the port is reviewable without it.
 ref/tp/
+
+# Automated capture dumps (281 MB and growing). These are the bot's own working
+# screenshots - every state probe, every calibration burst, every live run. They
+# are scratch, not source: regenerate them by running the engine.
+#
+# The handful of frames the test suite and the template-minting scripts assert
+# against ARE committed, force-added past this rule, and listed in
+# tests/test_battle_stack.py. ref/auto/tp/faces/ in particular is the twenty-crop
+# memory-board fixture whose true pairing the match-gate test depends on; live
+# runs write to ref/auto/tp/faces_live/ so they cannot overwrite it.
+ref/auto/
+ref/swf_assets/

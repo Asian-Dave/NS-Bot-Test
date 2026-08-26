@@ -178,22 +178,64 @@ Mission Room -> grade (S locked / A / B / C)
   bimodal split. The pale-pink slot reads 56 while perfectly usable. Use
   `engine/combat.SlotBaseline`, which compares each slot to its own ready-state
   sample.
-* **Targeting: there is an 8-slot ring, and it is almost certainly the real
-  click surface.** Previously recorded here as UNRESOLVED — `Attack` + enemy NAME
-  PLATE dealt damage (verified -7.7pp), while skill+sprite and skill+plate later
-  both produced nothing. The reference bot explains why: it never clicks art at
-  all, only eight fixed battlefield slots `T1..T8`.
+* **RESOLVED — the 8-slot centre ring is a TURN-SCOPED JUTSU CAST PANEL, not a
+  target selector.** This entry was wrong twice before settling; the evidence is
+  recorded here so it does not get re-litigated.
 
-  **That ring exists on our client.** Measured on `ref/combat/*.jpg`: an 8-slot
-  grid around the battle centre, upper four with RED borders, lower four YELLOW.
-  Border pixel counts were 254..667 for a drawn slot versus 0..11 for empty
-  background, so the separation is wide and unambiguous. Slot order matches the
-  reference bot's own `T1..T8`: outer-left, inner-left, inner-right, outer-right
-  across the top (enemy), then the same across the bottom (ally).
+  What was claimed and why it was wrong:
+  1. First claimed "transient" — from probing one geometry's coordinates against
+     another's frames. Wrong method.
+  2. Then claimed "persistent, and almost certainly the target surface" — from
+     the reference bot's fixed `T1..T8` battlefield slots. Wrong semantics.
 
-  Implemented in `engine/geometry.py`. **Still unverified: that clicking a slot
-  selects that target.** The ring's existence is measured; its clickability is
-  inferred. Confirm on a live run before trusting skill automation.
+  **What a live click actually did** (`ref/auto/mission/ring_before.png` ->
+  `ring_after.png`): clicking a filled slot **consumed the turn** (command bar
+  present -> absent, 12.7% of pixels changed) and cast **`Strengthen`** — the
+  buff appeared as red floating text over our own character. The ring then
+  **disappeared**.
+
+  So the model, which fits every frame we hold:
+
+  | frames | command bar | ring |
+  |---|---|---|
+  | t0-t3, boss_t0-t4 | present | present |
+  | epi_* (cutscene)  | absent  | absent |
+  | ring_before       | present | present |
+  | ring_after (acted)| absent  | absent |
+
+  The ring is co-present with the command bar: it is drawn while awaiting your
+  action and vanishes once you act. Filled slot with a coloured border =
+  castable jutsu; grey = empty slot. It is effectively a **second action bar**,
+  functionally like `S1..S8`.
+
+  Consequences for the bot:
+  - These are ACTIONS, not targets. They belong in `battle.rotation`, never in a
+    target step. `battle.click_target` stays **false**.
+  - They are TYPED like the skill slots — the one measured cast a self-buff for
+    no damage. Declare each in `battle.slot_kinds` before use.
+  - `engine/geometry.py` locates all eight correctly; only the name `TARGETS` is
+    a misnomer, kept for now to avoid churn. Read it as "ring action slots".
+  - Their presence is a usable **"it is your turn"** corroborator alongside the
+    command bar.
+
+  **Targeting is therefore still open.** The only mechanism with positive
+  evidence remains `Attack` + enemy NAME PLATE (-7.7pp verified). Also measured
+  live: `Attack` alone **resolved the turn with no separate target click**, so
+  the two-step action->target model is not required for `Attack` here.
+
+* **`find_enemy_bars(y0=0, …)` returns the PLAYER HUD as enemy bars.** Measured
+  live: 11 "bars" found, of which four (y=39, 59, 86, 101) all read exactly
+  100.0% — those are the top HUD (own HP/CP, gold/token fill), not enemies.
+  Two consequences, the second serious:
+
+  1. `DamageWatchdog` fed from these gets garbage and could abort a winnable
+     fight or miss a stalled one.
+  2. **A bar-derived click can land in the HUD row that holds the token `+`
+     sinks.** In this run the click went to (1176, 39), ~330px clear of the gold
+     `+`, and the token count was verified unchanged at 538 — but the class of
+     bug is a token-spend risk and must be fixed before any bar-derived click is
+     armed. Constrain the scan to the battlefield band and validate a candidate
+     before clicking it.
 
 * **Battle geometry must be ANCHOR-RELATIVE, never absolute.** The reference bot
   hardcodes ~2,500 absolute coordinates; it can, because it forces one window
@@ -222,6 +264,53 @@ Mission Room -> grade (S locked / A / B / C)
   0.407..0.470. Gate at 0.70 and let geometry cross-check the rest.
 * **Status effects** seen: `Blood Feed (1)`, `Strengthen(1)`, `Blind(1)` - named
   red text with a stack count. Damage numbers render as large floating white text.
+* **Result panels are dismissed by their GREEN CHECK, not by clicking anywhere.**
+  Measured live: a mid-mission Victory panel absorbed **eleven** clicks at the
+  canvas centre and did nothing. The panel body is not a hit area; the green
+  check bottom-right is the only one. Clicking the template-match centre (the
+  banner) fails the same way.
+
+  The check is the **same glyph** the mission detail panel uses to START a
+  mission (`tpl/mission_start.png` serves both). That is exactly why `classify()`
+  must test the result panels BEFORE `mission_start` — otherwise a Victory panel
+  reads as "start a mission".
+
+  **It is drawn at THREE DIFFERENT SIZES, and that is the trap.** Measured peaks
+  of the same glyph:
+
+  | where | scale | conf |
+  |---|---|---|
+  | mission detail panel | **1.00** | 0.975 |
+  | mid-mission Victory  | **1.18** | 0.974 |
+  | Mission Success      | **1.84** | 0.972 |
+
+  All ~0.97 at their true scale, so this is a pure SCALE problem, not a quality
+  one. A narrow 0.90..1.15 sweep caught Victory only at its edge and missed
+  Mission Success entirely (0.693), so the runner refused to click — correctly —
+  and the mission could never close out. The sweep must span **0.95..1.95**.
+
+* **A mission is not finished when "Mission Success!" appears — only once its
+  green check is acknowledged and the game is back in the lobby.** Verified live:
+  click the check -> panel clears in 0.34s -> lobby anchor returns in 0.33s.
+
+  Returning SUCCESS on sight of the panel was a false-success bug with a nasty
+  second-order effect: with `--repeat N` the next runner started while the panel
+  was still open, re-classified `mission_success`, and banked another instant
+  success — N missions from one panel, never once returning to the lobby to start
+  a real one. `MissionRunner` now requires the acknowledge AND the lobby before
+  reporting SUCCESS, and records `stats["closed_out"]`.
+
+* **Mission Success vs mid-mission Victory — measured, and cleanly separable.**
+  Confirmed on "Blacksmith's Trouble": the mid-mission Victory panel showed
+  **XP 0 / Gold 0**, while Mission Success showed **XP 11,630 / Gold 2,200**.
+  So only Mission Success may increment a success counter, exactly as recorded.
+  Template cross-check (both directions, so the counters cannot lie):
+
+  | template | Victory frame | Success frame |
+  |---|---|---|
+  | `result_panel`    | **1.000** | 0.328 |
+  | `mission_success` | 0.407     | **1.000** |
+
 * **Mission flow varies between missions.** #1: cutscene -> traversal -> combat.
   #2: cutscene -> **loading** -> combat (no traversal), then traversal later.
   Branch on observed state; never follow a fixed script.
@@ -336,6 +425,271 @@ XP 2000, Gold 2000, flame column showing **10**.
   bottom-left, green check bottom-right to start.
 * Flow: green check -> cutscene ("click anywhere to continue", ~2 clicks) -> minigame.
 
+### TP Training is FIVE missions in THREE minigame families
+
+Measured live. Mission Room -> `Special` tab -> `TP Training`, 2 pages:
+
+| page | mission | Lv | XP | Gold | flame |
+|---|---|---|---|---|---|
+| 1 | Dangerous Potion | 40 | 2000 | 2000 | 10 |
+| 1 | Secret TP Scroll | 40 | 2000 | 2000 | 10 |
+| 1 | Weird Potion | 40 | 2000 | 2000 | 10 |
+| 2 | Another TP Scroll | 40 | 2000 | 2000 | 10 |
+| 2 | The Kekkai in the Forest | 40 | 2000 | 2000 | 10 |
+
+The names group into three families — **Potion** x2, **TP Scroll** x2, **Kekkai**
+x1 — which matches "three kinds of minigame". Working hypothesis: **the name
+prefix IS the minigame type.** Confirmed for Kekkai (below); the Potion and
+Scroll games have not been opened yet.
+
+The `Special` tab itself holds four entries: `Special Events` (greyed),
+`Daily Mission`, `TP Training`, `SS Training`.
+
+### Kekkai minigame — SOLVED live, and the counter mapping is measured
+
+Played and beaten. `engine/kekkai.py` (solver) + `engine/kekkai_play.py` (live
+driver). What the run established:
+
+**Feedback mapping, determined by play rather than assumed:**
+
+    GREEN disc = correct rune in the CORRECT PLACE
+    GOLD  disc = correct rune in the WRONG PLACE
+
+Both mappings were carried as live hypotheses and filtered until one died. The
+history that settled it:
+
+| guess | green | gold |
+|---|---|---|
+| Green, Red, Blue | 0 | 1 |
+| Red, Black, Yellow | 2 | 0 |
+| Black, Blue, White | 1 | 1 |
+
+That leaves exactly ONE candidate under each mapping — `(Red,Black,White)` under
+green=correct-place, `(Black,Yellow,Blue)` under the inverse. Submitting
+`(Red,Black,White)` gave **"You break the seal!"**, then `Seals: 1 / 2`. So
+216 candidates -> 1 in three guesses, solved on the fourth.
+
+**Measured interaction:**
+
+* six rune buttons, captured px at the standard 1720x720 viewport:
+  Green (860,1076) Red (1018,1076) Blue (1166,1076) Black (1321,1076)
+  Yellow (1486,1076) White (1639,1076)
+* screen order matches the reference bot's rune list exactly
+* filling the slots arms the kekkai centre — it turns dark red (#9C2F16, their
+  bot waited on #7E1A01) — and **clicking that centre at (1259,513) SUBMITS**.
+  Filling the slots alone does nothing.
+* the "You break the seal!" dialog needs its green check acknowledged (found at
+  scale 1.1, another size for that one glyph)
+
+**History scroll must be LOCATED, not computed.** A fixed y0+pitch drifted
+(measured y0 290 not 297, pitch 88.53 not 88.0 — ~25px over ten rows, enough to
+read a neighbour's digit). Segment the green disc column instead: 10 rows,
+y 290..1087, green x 1987, gold x +86.
+
+**Counters are read by binarising the white outline.** The glyph is a dark digit
+with a white outline on a coloured disc; thresholding bright pixels makes one
+exemplar set serve both discs (self-match 1.000, cross-digit 0.161). Rows that
+have NOT been played render dimmer, so each digit needs a played AND an unplayed
+exemplar — the same "0" scored 1.000 against one and 0.767 against the other.
+
+**Count filled rows by saturation FRACTION, not mean.** Parchment is itself
+saturated: filled rows mean 87..93, empty 47..53, which no single mean cutoff
+separates safely. `frac(sat>90)` gives 0.243..0.303 filled against 0.000..0.028
+empty.
+
+**Two bugs this run, both worth remembering:**
+1. A guess entered by hand before the solver started occupied row 0, so reading
+   "row N-1 for guess N" was off by one and fed guess 2's model with guess 1's
+   feedback. Read the row found by counting FILLED rows, never by assuming.
+2. `solve_live` reported "solved after 0 guesses" when the panel had simply never
+   opened. Absence of the panel BEFORE any guess means not-open, not success.
+
+**Locating a kekkai in the scene** needs shape, not just colour. A dark-red blob
+search matched our own character's RED ROBE and clicked it, which did nothing
+while the code reported success. Calibrated on a frame holding both:
+
+| | area | bbox | fill | aspect |
+|---|---|---|---|---|
+| kekkai | 20622 | 481x268 | **0.160** | 1.79 |
+| character robe | 4040 | 65x170 | 0.366 | 0.38 |
+
+All three features separate them; the decisive one is FILL, because a kekkai is a
+triangle OUTLINE and therefore sparse inside its bounding box while a robe is a
+solid blob. `kekkai_play.find_kekkai` requires area >= 8000, fill <= 0.30 and
+aspect >= 1.0, and is verified to fire on a kekkai frame and NOT on two
+character-only frames.
+
+**TRAVERSAL: run to a MAP EDGE, do not sweep the current map.** If no kekkai is
+on screen, the way forward is to run to the left or right edge of the canvas —
+**the location changes during the running sequence**. Clicking mid-ground points
+just shuffles the character around one map forever and finds nothing; that was a
+wasted attempt. At the standard viewport the canvas is captured x 760..2680, so
+the edge targets are ~(800, 880) and ~(2640, 880), and a run plus the transition
+needs a longer settle (~4.5s) than a short walk — scanning mid-transition reads
+as "nothing here".
+
+This is almost certainly the same mechanic behind `mission.traversal_click` being
+unset for story missions: encounters trigger on movement, and movement means
+running to an edge.
+
+**HEADING COMES FROM WHERE YOU SPAWN.** You enter a map through one edge, so you
+appear NEAR that edge and must run AWAY from it. Derive it per map from the
+character's x against the canvas centre (1720 at the standard viewport):
+x < centre -> head right, x > centre -> head left. Neither a fixed default nor a
+merely persistent heading works — with the character at x=2268 a default of
+"right" ran it straight back through the edge it had just come from, repeatedly.
+`kekkai_play.heading_from_spawn` does this.
+
+The character is found by the SAME colour pass as the seal, using the inverse
+shape signature — area 4040, bbox 65x170, fill 0.366, aspect 0.38: small, tall
+and solid, where a seal is large, wide and sparse.
+
+**A seal is APPROACHED, then OPENED.** The first click walks you to it; only a
+second click opens the puzzle. One click and a "did it open?" check is not enough.
+
+**NODE COUNT IS THE CODE LENGTH.** A 3-node triangle seal is a 3-rune code; a
+5-node pentagon is 5. Count the pale nodes inside the seal — and do it BEFORE
+opening the puzzle, while the seal is still drawn in the scene. Counting after
+opening returns nothing and silently falls back to the default length, which had
+a 5-node seal being solved as a 3-rune code.
+
+**Detector calibration — area and aspect, NOT fill.** Measured across two real
+seals and the character:
+
+| | area | bbox | fill | aspect |
+|---|---|---|---|---|
+| triangle seal (3 nodes) | 20622 | 481x268 | 0.160 | 1.79 |
+| pentagon seal (5 nodes) | 32897 | 432x244 | **0.312** | 1.77 |
+| character robe | 4040 | 65x170 | 0.366 | 0.38 |
+
+A `max_fill` of 0.30 — fine for the triangle — REJECTED the pentagon, because
+five big nodes fill more of the box than three. And the seal range (0.16..0.31)
+now sits close to the character's 0.366, so fill is only a loose safety bound.
+Area separates by 5x and aspect by 4.6x; use those.
+
+**"Panel open" needs a plausible ROW COUNT.** One stray green blob is not the
+history scroll. After a correct guess the panel closes instantly, and a single
+unrelated green element made `find_rows` report "open, 1 row" — so the solver read
+digits out of a closed panel, scored 0.000, and reported failure on a puzzle it
+had just solved. Require >= 5 discs, and check for a closed panel BEFORE reading
+digits after a submit.
+
+### TP mission COMPLETED end to end
+
+"The Kekkai in the Forest" finished by the bot: rewards banked (gold
+1,196,781 -> 1,198,981, XP 494,230 -> 496,230) and the game returned to the
+village. `engine/tp.py` does the whole flow — lobby -> Mission Room -> Special
+tab -> TP Training -> start -> cutscenes -> hunt and solve seals -> acknowledge
+Mission Success. Navigation templates `special_tab` (margin 0.660) and
+`tp_training_row` (0.720) verified.
+
+**It refuses the Potion and Scroll families by name.** Only Kekkai has been
+opened and understood; starting one of the others would burn the stamina the
+flame column claims to cost on a minigame we cannot finish.
+
+**Mission Success can raise a "Share with Teammates!" dialog.** Close it with its
+X. NEVER click "Share to wall" — that publishes to a social feed, which is not
+something the bot should ever do unasked.
+
+### Where the algorithm came from — the reference bot already had it
+
+"The Kekkai in the Forest" opens with `Seals: 0 / 2` and a triangular kekkai
+(kanji 封). Clicking the kekkai opens the puzzle, which states its own rules:
+**"Unseal the kekkai by clicking the runes in order"**.
+
+* N ordered slots (3 in this mission), numbered 1 2 3, with a clear button
+* **SIX runes**: green spiral, red spiral, blue triangle, black lightning,
+  yellow flame, white crescent
+* a history scroll, one row per guess, **two counters per row**
+
+Two counters per guess means Mastermind: (correct rune correct place, correct
+rune wrong place).
+
+**The reference bot solves exactly this** — for the Jounin and Sage exams, not
+for TP. Its dict is literally called `jouninKekkai`. Its rune set is
+`["Green","Red","Blue","Black","Yellow","White"]`, matching ours exactly, and it
+supports code lengths 2..5. Algorithm (`-/-.cs` class `_2003`,
+`FormMain.cs:11169`): precompute all candidate codes, filter to those consistent
+with every past guess's feedback, return a survivor.
+
+Ported to `engine/kekkai.py`, with two deliberate differences: we pick the
+survivor that minimises the worst-case partition (Knuth minimax, capped at a
+pool of 300 for cost) instead of `list[0]`, and repeats are allowed by default
+since we have not measured whether the game's codes repeat a rune. Self-tested
+exhaustively: every secret solved, length 3 avg 4.07 / worst 6 guesses.
+
+**Still needed before it can run live:** the six rune button coordinates on our
+geometry, and a way to READ the two feedback counters (the reference bot scrapes
+them with dedicated routines). Without the counters the solver has no input.
+
+### What the reference bot has for the OTHER minigames
+
+Inventory, so this is not re-researched:
+
+| solver | wired? | what it does |
+|---|---|---|
+| rune solver | **yes**, 2 sites | the Kekkai Mastermind, above — Jounin + Sage exams |
+| `CardSolver` | **yes**, 1 site (`FormMain.cs:17661`) | 3-option "which matches", inside a battle loop; dual metric (greyscale + Canny diff); **guesses "A" on failure** rather than re-capturing |
+| `BoardScanner` + `PipePuzzleSolver` | **no callers at all** | pipe-rotation puzzle, ~670 lines of dead code |
+| `FormDailyTP` | n/a | ctor + `updateForm` only. Their TP mode just fights N battles — **no TP puzzle logic whatsoever** |
+
+So for the Potion and Scroll families there is nothing to borrow; they have to be
+solved from observation.
+
+### Minigame dispatch is by OBSERVATION, not by a configured family
+
+`engine/minigame.py` classifies what is on screen and dispatches. An earlier
+`--family kekkai` flag was the fixed-script anti-pattern this file warns about,
+and it is now advisory only — if the caller's label disagrees with the pixels,
+the pixels win.
+
+    kekkai      rune Mastermind, seal in scene or panel open   -> PLAYABLE
+    seal_entry  hand-seal minigame                             -> recognised, DECLINED
+    combat      a battle                                       -> handed to the battle runner
+    unknown     cutscene / traversal / panel / lobby           -> nothing
+
+Every criterion measured; verified on 9 frames across two canvas geometries.
+
+**Two false positives had to be measured away, and both are instructive:**
+
+1. **Village architecture reads as a seal.** On one lobby frame FIVE blobs cleared
+   `area >= 8000`, with fills 0.286 / 0.310 / 0.358 — straddling the pentagon
+   seal's 0.312. Fill cannot separate them. **Bounding-box HEIGHT can**: real
+   seals measured 244, 268, 279 px tall; every lobby blob 84..161. A seal is tall
+   AND wide, village art is flat.
+
+2. **The combat target ring is geometrically indistinguishable from a seal** —
+   measured area 11988, bbox 395x264, fill 0.115, aspect 1.50, which passes every
+   shape filter a real seal passes. Shape CANNOT separate them, so context must:
+   check for the command bar first via `BattleGeometry` and call it combat.
+
+Also: every one of these colour-blob detectors needs its ROI CLAMPED to the frame.
+Unclamped, a 1920-wide frame fed a region starting at x=1950 and OpenCV threw on
+an empty slice.
+
+### seal_entry: recognised, and honestly NOT solvable yet
+
+The hand-seal minigame (`Skill : N / 4`, three hearts, a named jutsu, two empty
+slots, ten face-up seals) is detected reliably by its "Skill :" label — 1.000
+positive against 0.268..0.348 everywhere else — and then declined. Why:
+
+* the two slots are card BACKS. They are the empty INPUT, not a revealed answer.
+* **CLAUDE.md's "revealed briefly after Start" hypothesis does not hold** at
+  47 fps. Clipping the capture to the slot strip got 237 frames in 5.01 s (a 4x
+  speedup over full-frame) and showed only a READY overlay then the training
+  dummy. No reveal.
+* the mapping is not in the client we hold: a string search of the shell SWF
+  finds no jutsu names and no seal vocabulary, consistent with the existing note
+  that per-skill data lives in a server-fed `SKILL_DATA`.
+
+Ten seals in two ordered slots is **90** possibilities against **three** hearts,
+and a miss also REROLLS the target jutsu — so attempts cannot even be accumulated
+against one skill. Guessing just spends the lives.
+
+**What would fix it:** a jutsu -> seal-pair table, harvested once offline. The
+likely source is the game's own Jutsu panel. That is a separate job, not
+something to attempt mid-minigame with three lives on the line.
+
 ### The minigame is hand-seal SEQUENCE ENTRY, not pair matching
 
 * HUD: `Skill : 1 / 4` (four rounds) and three hearts (lives).
@@ -358,6 +712,123 @@ Verified interactions:
 visible screen. Most likely revealed briefly in the two slots immediately after
 `Start`; that window was missed twice by fixed-interval capture. If no reveal
 exists, a skill -> seals table is required instead.
+
+### Scroll family (memory board) — SOLVED live, mission banked
+
+"Secret TP Scroll" completed by the bot: **Remaining Cards x0 with the hourglass
+still at 85**, then Mission Success (Gold 2,000 / XP 2,000). `engine/cards.py`.
+
+A 4x5 grid of 20 face-down cards, ten pairs, and **a countdown that is the real
+opponent** — running it out ends the mission with "Sorry, you are not qualified
+to receive this scroll." There is no opening reveal (a 26 fps burst over 8 s
+caught zero change), so it is a genuine memory game.
+
+**Cell state is read from AGGREGATES, never from spatial distance.** The backs
+are the logo over animated flames, so at any instant every back looks different —
+spatial distance from cell 0 to the others ran 0..127.6 on a frame where all
+twenty were face-down. Measured bands, which is what `cell_state` uses:
+
+| state | mean sat | mean val |
+|---|---|---|
+| back (animated) | 28.2 .. 30.1 | 123.5 .. 125.0 |
+| face | 113.4 .. 201.9 | 96.9 .. 185.1 |
+| removed (blank slot) | ~46 | **255.0** |
+
+**Face matching is a 3x4 mean-HSV signature, NOT the reference bot's metric.**
+`CardSolver.cs`'s grey+Canny dual metric was ported first and does not separate
+this board at all. Calibrated against twenty real crops whose ten true pairs are
+known (`ref/auto/tp/faces/`, committed as a fixture):
+
+| metric | worst true pair | best NON-pair | verdict |
+|---|---|---|---|
+| grey+Canny (theirs) | 139.85 | 104.96 | **INVERTED** |
+| mean sat+val | 3.39 | 1.50 | **INVERTED** |
+| **3x4 mean-HSV (ours)** | **4.56** | **8.99** | 1.97x gap |
+
+Confirmed independently on a live board: true pairs 0.29 / 1.07 / 1.70, nearest
+non-pair 23.88 — a **14x** gap. Gate at 6.5. Inset is HARMFUL here (a 20% inset
+drops the gap to 1.27x), so the crop is used whole.
+
+**Mutual-best partner is VACUOUS on its own.** With two revealed cards each is
+trivially the other's best, which is how a run reported "10/10 pairs" against the
+game's own "Remaining Cards: x18". Require mutual-best AND the gate.
+
+**Three bugs, each of which cost a mission:**
+
+1. **The flip detected the face and never STORED it.** `seen` stayed empty, so
+   `unknown_positions()` never shrank and the run re-flipped the same two cells
+   for its whole 80 s clock — 831 reads, zero progress. Symptom from the outside:
+   "it presses things but does not memorise them, and repeats cards it should
+   already know."
+2. **A cell that will not flip must leave the rotation** (`skipped`), and must
+   NOT be counted as `cleared` — that inflates the score with cells the game
+   never removed.
+3. **A matched pair burns away in a SMOKE PUFF, and mid-puff both cells read as
+   BACKS** — the same reading a mismatch gives. Judging on a snapshot called 14
+   pairs wrong in the very run that cleared the whole board. The verdict is
+   therefore **asymmetric**: REMOVED is terminal and believed at once, BACK must
+   HOLD for `MISMATCH_HOLD` (1.2 s) before it counts. As a backstop, a flip that
+   finds a cell already REMOVED banks it, so a wrong rejection costs one click
+   rather than poisoning the board.
+
+**Trust the game, not the metric.** Every pair is adjudicated by watching the two
+cells; the metric only proposes. Rejected pairs are remembered so they are never
+proposed twice, and both faces stay in memory for their real partners.
+
+### Speed: what actually made the timed board winnable
+
+The board went from timing out to finishing in 33.9 s of an 85 s clock. Three
+costs, in order of size:
+
+1. **Full-frame capture is 168-173 ms (5.9 fps).** Clip to the board and it is
+   50 ms (20 fps); the template gate on the clip is 12.5 ms against 72.3 ms on a
+   full frame. **63 ms per read against 245 ms — 3.9x.**
+2. **Fixed sleeps.** A guessed `flip_settle=0.75` on every flip became a poll
+   that returns the instant the cell shows a face.
+3. **Human-like click pacing.** `Actor`'s defaults sleep 0.18-0.55 s before and
+   0.4-1.1 s after EVERY click — up to 1.65 s each, ~40 s over a game. Tightened
+   for the duration of a timed minigame and restored afterwards. Pacing is
+   anti-detection cosmetics; on a countdown it is just a way to lose.
+
+**CDP clip geometry has two traps, and both fail SILENTLY** — a mis-clipped frame
+still decodes, has plausible dimensions, and reads confident nonsense:
+
+* **A clip is DOCUMENT-relative; a full frame is the VIEWPORT.** The game page
+  sits at `scrollY=301`, so a clip computed from viewport pixels lands 602
+  captured px off. Adding the scroll offset took the difference against the same
+  region of a full frame from a mean of 76.50 to **exactly 0.00**.
+* **`scale` MULTIPLIES the device pixel ratio, it does not replace it.** At
+  dpr 2 a 600x452 CSS clip returns 1200x904 at scale 1 and 2400x1808 at scale 2.
+  The correct scale is 1.
+
+Use `Capture.clip_for`, which does both. Verify any new clip by differencing it
+against the same crop of a full frame — that is the only check that catches this.
+
+**Do not poll flat out.** Capture runs at ~20 fps and every
+`Page.captureScreenshot` forces the WebGL canvas to re-composite, which makes the
+game visibly FLICKER for anyone watching. `POLL_INTERVAL = 0.10` gives ~8
+reads/second, which is comfortable to look at and far more than fast enough — the
+board was solved with 51 s to spare.
+
+### TP list navigation — measured
+
+* The mission is chosen **by row title template**, never by row position.
+  `tp_scroll_row` 1.000 / 0.608 worst negative; `tp_scroll2_row` 0.992 / 0.533.
+  The 0.6 worst negatives are each other, which is exactly the confusion to avoid
+  — "Secret TP Scroll" and "Another TP Scroll" are different missions.
+* **The TP list is a DAILY list and it SHRINKS as missions are completed.**
+  Measured: after finishing "Secret TP Scroll" and "The Kekkai in the Forest" the
+  list went from 5 entries over 2 pages to 3 entries on one page (1/1), with both
+  completed missions simply gone. A picker that knows one mission per family
+  reports "not on this page" as soon as that one is done for the day, so
+  `tp.ROW_TEMPLATES` maps a family to ALL of its missions.
+* **Mission Success can be covered by the "Share with Teammates!" prompt**, and
+  none of the four existing X templates matched it (close_popup_x 0.719,
+  close_popup_x_menu 0.586, close_promo_x 0.465, back_arrow 0.402) — close-out
+  timed out with the reward unbanked. `close_share_x` (1.000 / 0.784 worst) fixes
+  it. The prompt must be dismissed BEFORE the success check is searched for,
+  because its "Share to wall" button carries a green check glyph of its own that
+  scores 0.708. **Never click that button** — it posts publicly.
 
 ### TP geometry and capture notes
 

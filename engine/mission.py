@@ -64,6 +64,13 @@ from geometry import BattleGeometry
 # missing. Better a loud preflight failure than a bot clicking hopefully at a
 # screen it cannot read.
 REQUIRED_TEMPLATES = {
+    "mission_room_entry": (
+        "The 'Mission Room' plaque in the VILLAGE, i.e. the way in from the lobby.",
+        "CLAUDE.md warns village labels are semi-transparent over animated art and "
+        "unusable. MEASURED otherwise for this one: the plaque scored 1.000 on four "
+        "lobby frames captured 1.5s apart with the scene animating, worst negative "
+        "0.512. So the warning holds for Battle / Hunting House but NOT here - "
+        "re-measure per label rather than assuming either way."),
     "mission_room": (
         "A unique, opaque element of the Mission Room shell.",
         "Cut from the room's own chrome — a tab border or panel corner. NOT the "
@@ -153,8 +160,11 @@ class MissionRunner:
         self.traversal_click = m.get("traversal_click")   # (x, y) fraction of canvas
 
         self.conditions = self._build_conditions()
+        # `closed_out` records whether the Mission Success panel was actually
+        # acknowledged and the lobby regained. A SUCCESS with closed_out False
+        # means the reward may not be banked and the next mission cannot start.
         self.stats = {"battles": 0, "victories": 0, "aborted": 0,
-                      "cutscenes": 0, "steps": 0}
+                      "cutscenes": 0, "steps": 0, "closed_out": None}
 
     # -- conditions ----------------------------------------------------------
     def _build_conditions(self):
@@ -167,12 +177,20 @@ class MissionRunner:
         c = {}
         t = self.templates
         for key in ("result_panel", "mission_success", "mission_start",
-                    "mission_room", "mission_locked", "page_next",
-                    "cutscene_continue"):
+                    "mission_room", "mission_room_entry", "mission_locked",
+                    "page_next", "cutscene_continue"):
             if key in t:
                 c[key] = cond_template(key, t[key])
         if "loading_text" in t:
             c["loading"] = cond_template("loading", t["loading_text"])
+        # The lobby anchor. Needed to confirm a mission actually CLOSED OUT: the
+        # run is not finished when the Mission Success panel appears, only once
+        # its green check has been acknowledged and the game has returned here.
+        if "lobby_rail_fortune" in t:
+            c["lobby"] = cond_template("lobby", t["lobby_rail_fortune"])
+        if "mission_room_entry" in t:
+            c["mission_room_entry"] = cond_template("mission_room_entry",
+                                                    t["mission_room_entry"])
 
         # Combat gates. Two corroborating command buttons, per CLAUDE.md's
         # discrimination matrix — never attack_btn, which only reaches 0.791.
@@ -205,7 +223,7 @@ class MissionRunner:
             mistaking it for "unknown" burns the step budget.
         """
         order = ("mission_success", "result_panel", "loading", "command_bar",
-                 "mission_start", "cutscene_continue", "mission_room")
+                 "mission_start", "cutscene_continue", "mission_room", "lobby")
         for name in order:
             cond = self.conditions.get(name)
             if cond is None:
@@ -248,11 +266,48 @@ class MissionRunner:
                 return MissionOutcome.STALLED, self.stats
 
             if state == "mission_success":
-                self.log.info("mission: SUCCESS after %d battles",
-                              self.stats["battles"])
-                if payload is not None and getattr(payload, "center", None):
-                    self.actor.click_pixel(*payload.center,
-                                           why="acknowledge Mission Success")
+                # A mission is NOT finished when this panel appears. It is
+                # finished when its green check has been acknowledged and the
+                # game has returned to the lobby. Returning SUCCESS on sight was
+                # wrong in two ways:
+                #   1. it ignored whether the click actually landed, so a check
+                #      we failed to locate still counted as a success;
+                #   2. with --repeat N the next runner started while the panel
+                #      was still up, re-classified mission_success, and banked
+                #      another instant "success" - N missions from one panel,
+                #      never once going back to the lobby to start a real one.
+                # So: click, then WAIT for the panel to clear, then confirm the
+                # lobby. Anything else is a stall, not a success.
+                if not self._click_green_check(gray, "Mission Success"):
+                    continue                    # retry; the loop bounds this
+
+                cleared = self.gate.wait_until_gone(
+                    self.conditions["mission_success"],
+                    self.cfg.get("mission", {}).get("close_out_timeout_s", 45))
+                if isinstance(cleared, Stopped):
+                    return MissionOutcome.STOPPED, self.stats
+                if not cleared:
+                    self.log.error("mission: Mission Success panel did not clear "
+                                   "after acknowledging it; the reward is not "
+                                   "banked and the next mission cannot start")
+                    return MissionOutcome.STALLED, self.stats
+
+                if "lobby" in self.conditions:
+                    back = self.gate.wait_for_any(
+                        [self.conditions["lobby"]],
+                        self.cfg.get("mission", {}).get("close_out_timeout_s", 45),
+                        why="return to lobby after Mission Success")
+                    if isinstance(back, Stopped):
+                        return MissionOutcome.STOPPED, self.stats
+                    if not back:
+                        self.log.warning("mission: acknowledged Mission Success but "
+                                         "the lobby anchor never appeared; "
+                                         "reporting SUCCESS with a caveat")
+                        self.stats["closed_out"] = False
+                        return MissionOutcome.SUCCESS, self.stats
+                self.stats["closed_out"] = True
+                self.log.info("mission: SUCCESS after %d battles, closed out to "
+                              "the lobby", self.stats["battles"])
                 return MissionOutcome.SUCCESS, self.stats
 
             if state == "command_bar":
@@ -270,9 +325,7 @@ class MissionRunner:
                 # treat it as a failed fight, and do not count it as a mission
                 # success. Just acknowledge and carry on.
                 self.stats["victories"] += 1
-                if payload is not None and getattr(payload, "center", None):
-                    self.actor.click_pixel(*payload.center,
-                                           why="dismiss mid-mission Victory")
+                self._click_green_check(gray, "mid-mission Victory")
                 continue
 
             if state == "loading":
@@ -302,6 +355,26 @@ class MissionRunner:
                     return MissionOutcome.LOCKED, self.stats
                 continue
 
+            if state == "lobby":
+                # The hop the runner previously could not make. Without it,
+                # starting a mission from the lobby fell through to `unknown` ->
+                # `_traverse`, which does nothing when traversal_click is unset:
+                # the runner burned its whole step budget standing in the village.
+                #
+                # `lobby` is tested LAST in classify() so that mission_room wins
+                # whenever both could match. Measured, they do not overlap: the
+                # lobby rail reads 1.000 in the village and 0.297 behind the
+                # Mission Room panel.
+                cond = self.conditions.get("mission_room_entry")
+                payload2 = cond.check(bgr, gray) if cond else None
+                if payload2 is None:
+                    self.log.error("mission: in the lobby but the Mission Room "
+                                   "entrance was not located; cannot start")
+                    return MissionOutcome.STALLED, self.stats
+                self.actor.click_pixel(*payload2.center,
+                                       why="enter Mission Room from the village")
+                continue
+
             # Unknown. Most likely traversal — CLAUDE.md notes encounters trigger
             # on movement, and the traversal screen has no reliable anchor yet.
             self._traverse(bgr)
@@ -310,6 +383,52 @@ class MissionRunner:
         return MissionOutcome.STALLED, self.stats
 
     # -- pieces --------------------------------------------------------------
+    def _click_green_check(self, frame_gray, why):
+        """Dismiss a result panel by its GREEN CHECK, not by clicking the panel.
+
+        MEASURED live: a Victory panel absorbed ELEVEN clicks at the canvas
+        centre and did nothing at all. The panel body is not a hit area; the
+        green check bottom-right is the only one. Clicking the template match
+        centre (the banner) has the same problem — it is not the button.
+
+        Note the green check is the SAME glyph the mission detail panel uses to
+        START a mission, which is why `tpl/mission_start.png` doubles as the
+        check here, and why `classify()` must test the result panels BEFORE
+        mission_start. Otherwise a Victory panel reads as "start a mission".
+
+        The check is drawn at THREE DIFFERENT SIZES, which is the trap here.
+        Measured peaks of the same glyph:
+
+            mission detail panel   scale 1.00   conf 0.975
+            mid-mission Victory    scale 1.18   conf 0.974
+            Mission Success        scale 1.84   conf 0.972
+
+        All three are ~0.97 at their true scale, so this is a pure scale problem,
+        not a quality one. A narrow sweep (0.90..1.15) caught Victory only at its
+        edge and missed Mission Success entirely, scoring 0.693 — below any sane
+        gate. The runner then refused to click, correctly, and the mission could
+        never close out. So the sweep must span 0.95..1.95.
+        """
+        from perceive import find
+        tpl = self.templates.get("mission_start")
+        if tpl is None:
+            self.log.error("mission: no green-check template; cannot dismiss %s", why)
+            return False
+        saved_scales, saved_thr = tpl.scales, tpl.threshold
+        try:
+            tpl.scales = [round(0.95 + i * 0.05, 2) for i in range(21)]  # 0.95..1.95
+            tpl.threshold = 0.85
+            m, conf = find(frame_gray, tpl)
+            if not m.found:
+                self.log.warning("mission: %s up but green check not located "
+                                 "(best %.3f); not guessing a click", why, conf)
+                return False
+            self.actor.click_pixel(*m.center,
+                                   why=f"dismiss {why} via green check ({conf:.3f})")
+            return True
+        finally:
+            tpl.scales, tpl.threshold = saved_scales, saved_thr
+
     def _fight(self):
         runner = battle_mod.BattleRunner(self.gate, self.actor, self.capture,
                                         self.templates, self.conditions,

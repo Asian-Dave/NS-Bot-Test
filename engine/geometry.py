@@ -35,29 +35,31 @@ Two facts fell out of that measurement and both are load-bearing:
   * The command bar is a 2x2 block of side 108.7 template units, not a row.
     Attack top-left, Dodge top-right, Charge bottom-left, Run bottom-right.
 
-THE TARGET RING — resolves an open question in CLAUDE.md
---------------------------------------------------------
-CLAUDE.md records targeting as UNRESOLVED: clicking an enemy sprite worked once,
-name plates worked once, and later neither did. The reference bot explains why —
-it never clicks art at all. It clicks eight fixed battlefield slots.
+THE 8-SLOT RING — an ACTION panel, not targets (resolved live)
+-------------------------------------------------------------
+READ THIS BEFORE USING `TARGETS`. The name is a misnomer, kept only to avoid
+churn. These eight positions are a **turn-scoped jutsu cast panel**, measured
+live: clicking a filled slot CONSUMED THE TURN and cast `Strengthen` (a self
+buff, no damage), after which the ring disappeared. It is co-present with the
+command bar — drawn while awaiting your action, gone once you act.
 
-That ring exists on OUR client too. It is an 8-slot grid around the battle
-centre, and it is persistent (an earlier probe of mine reported it "transient"
-purely because I probed one geometry's coordinates against another's frames).
-Measured border colours give the teams away:
+So treat these as ACTIONS alongside S1..S8, never as a target step. They are
+typed like skill slots, so declare each in `battle.slot_kinds` before adding one
+to a rotation. Their presence is also a useful second "it is your turn" signal.
 
-    T1..T4  RED  border  -> enemy side   (upper arc)
-    T5..T8  YELLOW border -> ally side   (lower arc)
+Historical note, because this entry was wrong twice: the ring was first called
+"transient" (from probing one geometry against another's frames — bad method),
+then called the target surface (from the reference bot's `T1..T8` — wrong
+semantics). The reference bot's naming does not transfer to our client.
 
-Ordering matches the reference bot's own T1..T8 exactly: outer-left, inner-left,
-inner-right, outer-right across the top, then the same across the bottom.
-
-STILL UNVERIFIED — do not treat as fact
----------------------------------------
-That clicking a ring slot actually *selects* that target is inferred from the
-reference bot's behaviour plus the ring's existence here. It has NOT been
-confirmed against our live client. `BattleGeometry.target()` gives you the point;
-proving the click lands is a live-run task. See `docs/UI_MAP.md` when it is.
+RING SLOT ORDER
+---------------
+Positions are geometrically real and were validated by predicting one capture
+geometry from another (8/8 landed on their drawn borders). Order follows the
+reference bot's layout: outer-left, inner-left, inner-right, outer-right across
+the top, then the same across the bottom. Border colour indicates slot CONTENTS
+(a coloured border means a castable jutsu is in it; grey means empty), NOT team —
+an earlier reading of red=enemy / yellow=ally was wrong.
 """
 import cv2
 
@@ -85,23 +87,28 @@ SKILLS = {
     **{f"S{i+5}": (224.0 + i * _SKILL_PITCH, _SKILL_Y) for i in range(4)},
 }
 
-# Target ring: symmetric about dx=+48.5. Inner columns +-55.5, outer +-144.5.
+# Ring action slots: symmetric about dx=+48.5. Inner columns +-55.5, outer +-144.5.
+# NOTE: named TARGETS for historical reasons only — these are jutsu CAST slots.
 _RING_CX = 48.5
 _RING_IN, _RING_OUT = 55.5, 144.5
 _ROW_TOP, _ROW_UP, _ROW_LOW, _ROW_BOT = -615.0, -516.5, -411.0, -320.0
 TARGETS = {
-    "T1": (_RING_CX - _RING_OUT, _ROW_UP),    # enemy  outer left
-    "T2": (_RING_CX - _RING_IN, _ROW_TOP),    # enemy  inner left
-    "T3": (_RING_CX + _RING_IN, _ROW_TOP),    # enemy  inner right
-    "T4": (_RING_CX + _RING_OUT, _ROW_UP),    # enemy  outer right
-    "T5": (_RING_CX - _RING_OUT, _ROW_LOW),   # ally   outer left
-    "T6": (_RING_CX - _RING_IN, _ROW_BOT),    # ally   inner left
-    "T7": (_RING_CX + _RING_IN, _ROW_BOT),    # ally   inner right
-    "T8": (_RING_CX + _RING_OUT, _ROW_LOW),   # ally   outer right
+    "T1": (_RING_CX - _RING_OUT, _ROW_UP),    # upper outer left
+    "T2": (_RING_CX - _RING_IN, _ROW_TOP),    # upper inner left
+    "T3": (_RING_CX + _RING_IN, _ROW_TOP),    # upper inner right
+    "T4": (_RING_CX + _RING_OUT, _ROW_UP),    # upper outer right
+    "T5": (_RING_CX - _RING_OUT, _ROW_LOW),   # lower outer left
+    "T6": (_RING_CX - _RING_IN, _ROW_BOT),    # lower inner left
+    "T7": (_RING_CX + _RING_IN, _ROW_BOT),    # lower inner right
+    "T8": (_RING_CX + _RING_OUT, _ROW_LOW),   # lower outer right
 }
 
-ENEMY_SLOTS = ("T1", "T2", "T3", "T4")
-ALLY_SLOTS = ("T5", "T6", "T7", "T8")
+# Upper / lower halves of the ring. These are NOT enemy/ally sides — that reading
+# was refuted live. Kept only as a stable way to name the two rows.
+UPPER_SLOTS = ("T1", "T2", "T3", "T4")
+LOWER_SLOTS = ("T5", "T6", "T7", "T8")
+ENEMY_SLOTS = UPPER_SLOTS      # deprecated alias; misleading name
+ALLY_SLOTS = LOWER_SLOTS       # deprecated alias; misleading name
 
 # Ring border colours, in HSV, as measured. Used to tell an occupied/enemy slot
 # from an ally slot without clicking anything.

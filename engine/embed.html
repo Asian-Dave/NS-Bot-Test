@@ -51,6 +51,14 @@
     </div>
 
     <div class="card">
+      <h4>Tasks <span class="d">what the bot does</span></h4>
+      <div id="tasks"></div>
+      <div id="opts" style="margin-top:8px"></div>
+      <div class="note">A task that cannot run is shown disabled with the reason.
+        Enabling a task does not arm clicking — that is the next panel.</div>
+    </div>
+
+    <div class="card">
       <h4>Arm states <span class="d">live clicking</span></h4>
       <div id="arm"></div>
       <div class="note">Unchecked = detect and log only. Claim / Wish / SPIN and
@@ -77,7 +85,8 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const ARMABLE = ['character_select', 'popup', 'daily_reward_popup', 'combat'];
+// 'navigate' arms the resume ladder (character select -> Play -> popups -> lobby).
+const ARMABLE = ['navigate', 'tp', 'character_select', 'popup', 'daily_reward_popup', 'combat'];
 let armed = new Set();
 
 async function ctl(cmd){ await fetch('/api/control?cmd=' + cmd); }
@@ -97,6 +106,40 @@ async function toggleArm(s){
   armed.has(s) ? armed.delete(s) : armed.add(s);
   await fetch('/api/arm?states=' + encodeURIComponent([...armed].join(',')));
   renderArm();
+}
+
+let TASKS = null;
+
+function renderTasks(){
+  if(!TASKS) return;
+  const b = TASKS.blocked || {};
+  $('tasks').innerHTML = Object.keys(TASKS.tasks).map(k => {
+    const off = b[k];
+    return `<label title="${off ? off.replace(/"/g,'') : ''}">
+      <input type="checkbox" ${TASKS.tasks[k] ? 'checked' : ''}
+        ${off ? 'disabled' : ''} onchange="setTask('${k}', this.checked)">
+      <span class="${off ? 'd' : ''}">${k}</span>
+      ${off ? `<div class="note bad" style="margin-left:18px">${off}</div>` : ''}
+    </label>`;
+  }).join('');
+  $('opts').innerHTML = Object.entries(TASKS.options).map(([k,v]) =>
+    `<div class="r"><span class="d">${k}</span>
+      <input value="${v}" size="6" onchange="setOpt('${k}', this.value)"
+        style="font:inherit;background:#1a1f28;color:var(--fg);
+               border:1px solid var(--edge);border-radius:4px;padding:1px 5px;
+               width:80px;text-align:right"></div>`).join('');
+}
+
+async function setTask(k, on){
+  TASKS = await (await fetch(`/api/tasks?set=${encodeURIComponent(k)}&on=${on?1:0}`)).json();
+  renderTasks();
+}
+async function setOpt(k, v){
+  TASKS = await (await fetch(`/api/option?key=${encodeURIComponent(k)}&value=${encodeURIComponent(v)}`)).json();
+  renderTasks();
+}
+async function loadTasks(){
+  try{ TASKS = await (await fetch('/api/tasks')).json(); renderTasks(); }catch(e){}
 }
 
 async function tick(){
@@ -142,6 +185,10 @@ async function tick(){
 }
 
 renderArm();
+loadTasks();
 tick();
 setInterval(tick, 1200);
+// Blockers are discovered by the Runner once templates are loaded, so refresh
+// the task list periodically rather than only at page load.
+setInterval(loadTasks, 6000);
 </script>

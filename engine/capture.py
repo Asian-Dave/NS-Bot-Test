@@ -22,7 +22,7 @@ class Capture:
         vp = json.loads(vp)
         self.viewport = (vp["w"], vp["h"])
 
-    def frame(self, region=None, gray=True, clip=None):
+    def frame(self, region=None, gray=True, clip=None, scale=None):
         """One frame.
 
         `region` is (x, y, w, h) in CAPTURED PIXELS and crops after decoding.
@@ -32,8 +32,15 @@ class Capture:
                  frame's pixel origin is the clip origin, so coordinates from it
                  are NOT in full-frame space; offset them back yourself if you
                  need to click what you found.
+        `scale`  MULTIPLIES the device pixel ratio, it does not replace it. A
+                 clip already comes back at dpr, so scale=1 (the default) puts a
+                 clipped frame in the SAME pixel space as a full frame. Measured
+                 on this host at dpr 2: a 600x452 CSS clip returns 1200x904 at
+                 scale 1 and 2400x1808 at scale 2. Use `clip_for` and leave this
+                 alone.
         """
-        png = self.cdp.screenshot(clip=clip)
+        png = self.cdp.screenshot(clip=clip,
+                                  scale=(1.0 if scale is None else scale))
         buf = np.frombuffer(png, dtype=np.uint8)
         img = cv2.imdecode(buf, cv2.IMREAD_COLOR)          # BGR
         if img is None:
@@ -42,6 +49,43 @@ class Capture:
             x, y, w, h = region
             img = img[y:y + h, x:x + w]
         return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if gray else img
+
+    def clip_for(self, x, y, w, h):
+        """CAPTURED-pixel box -> the (clip, origin) pair `frame` needs.
+
+        Returns the CSS-pixel clip to pass to `frame(clip=...)` and the
+        captured-pixel origin of the resulting image, so a point found in the
+        clip maps back with `full = clipped + origin`.
+
+        TWO CORRECTIONS, BOTH MEASURED, BOTH SILENT IF YOU GET THEM WRONG
+        -----------------------------------------------------------------
+        1. **A clip is DOCUMENT-relative; a full frame is the VIEWPORT.** The
+           game page sits at scrollY=301, so a clip computed straight from
+           viewport pixels lands 602 captured px too high and reads the wrong
+           part of the screen. Adding the scroll offset takes the difference
+           against the same region of a full frame from a mean of 76.50 to
+           EXACTLY 0.00.
+        2. **`scale` multiplies the device pixel ratio rather than replacing
+           it.** The clip is already at dpr, so the correct scale is 1.
+
+        Both were found the same way - by cropping the identical box out of a
+        full frame and differencing - which is the only way to be sure, because
+        a mis-clipped frame still decodes, still has plausible dimensions, and
+        still reads confident nonsense out of every cell.
+
+        The scroll position is read live because the page can be scrolled between
+        calls. The extra round trip is a few ms against a ~42 ms capture.
+        """
+        import json
+        try:
+            s = json.loads(self.cdp.evaluate(
+                "JSON.stringify({x:scrollX,y:scrollY})") or "{}")
+            sx, sy = float(s.get("x", 0)), float(s.get("y", 0))
+        except Exception:
+            sx = sy = 0.0
+        clip = (x / self.dpr + sx, y / self.dpr + sy,
+                w / self.dpr, h / self.dpr)
+        return clip, (x, y)
 
     def to_click_coords(self, px, py):
         """Captured-pixel point -> CSS coordinates for Input.dispatchMouseEvent."""

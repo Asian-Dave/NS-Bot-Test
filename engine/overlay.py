@@ -88,3 +88,22 @@ def update(cdp, *, mode, live, state, cycle, score_ms, action, reason,
     }
     return cdp.evaluate(_UPDATE % {"id": PANEL_ID, "payload": json.dumps(payload)},
                         await_promise=False)
+
+
+def remove(cdp):
+    """Delete the injected panel from the page.
+
+    Needed because `ensure()` puts a real element in the game page's DOM, and
+    that element survives simply stopping the updates — it stays there, stale,
+    occluding whatever is behind it. Since the page we inject into is also the
+    page we screenshot for perception, a leftover panel is not merely cosmetic:
+    it covers part of the frame the matcher reads (it sat over the gold/token
+    HUD in testing). So turning the overlay off has to actively remove it.
+    """
+    try:
+        cdp.evaluate(
+            "(()=>{const e=document.getElementById('%s');"
+            "if(e){e.remove();return 'removed';}return 'absent';})()" % PANEL_ID)
+        return True
+    except Exception:
+        return False

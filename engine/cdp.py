@@ -147,7 +147,7 @@ class CDP:
             raise CDPError(f"JS threw: {r['exceptionDetails'].get('text')}")
         return r.get("result", {}).get("value")
 
-    def screenshot(self, path=None, clip=None):
+    def screenshot(self, path=None, clip=None, scale=1.0):
         """Composited page pixels, including the Ruffle WebGL canvas.
 
         `clip` is an optional (x, y, w, h) in CSS pixels. Passing it moves the
@@ -155,12 +155,21 @@ class CDP:
         instead of the whole page. Worth using on a hot polling loop — full-frame
         capture was measured at ~82 ms (~12 fps) over CDP, and most state gates
         only care about one small area.
+
+        `scale` is the clip's output resolution multiplier. It defaults to 1,
+        which yields ONE OUTPUT PIXEL PER CSS PIXEL — while an unclipped frame
+        comes back at the device pixel ratio. On a Retina host that is a silent
+        factor-of-two: geometry measured against full frames lands in the wrong
+        place on a clipped one. Pass `scale=capture.dpr` to get a clip in the
+        SAME pixel space as a full frame, so an offset is the only correction
+        needed.
         """
         params = {"format": "png"}
         if clip:
             x, y, w, h = clip
             params["clip"] = {"x": float(x), "y": float(y),
-                              "width": float(w), "height": float(h), "scale": 1}
+                              "width": float(w), "height": float(h),
+                              "scale": float(scale)}
         r = self.call("Page.captureScreenshot", **params)
         data = base64.b64decode(r["data"])
         if path:
