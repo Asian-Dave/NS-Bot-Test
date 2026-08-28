@@ -860,6 +860,42 @@ Two corrections to the section above, both measured live:
 Note the band spans the *outer edges* of the first and last card, so its width is
 `(n-1)*pitch + card_width`. Forgetting the card width over-counts by one.
 
+### CONFIRMED: the hand-seal mission COMPLETES
+
+"Weird Potion" finished by the bot with the anchored geometry — including
+**four-sign rounds read in order** — then Mission Success banked and the village
+regained. A representative round:
+
+    panel offset (0, -111) (HUD at (1106, 144))
+    sign 1..4 of 4 shown
+    sign 0 -> tile 5 (d=0.077, margin 5.06x)
+    sign 1 -> tile 2 (d=0.073, margin 3.06x)
+    sign 2 -> tile 0 (d=0.055, margin 5.35x)
+    sign 3 -> tile 4 (d=0.040, margin 5.06x)
+
+Note the offset: the panel was 111 px from where it sits in the reference layout,
+and the match margins were unaffected. That is the anchor doing its job.
+
+**A failed TP mission is NOT consumed** — it stays in the day's list and can be
+retried.
+
+### The resume ladder needs a CUTSCENE rung
+
+A failed mission ends on "Aww... you better take some rest..." over a
+"click anywhere to continue" screen, and the ladder halted there after 20
+unrecognised frames. That halt was correct — it refuses to click blindly — but it
+could not get home from a screen whose only exit is a click, so the whole session
+was stuck until a human intervened.
+
+This file warns that `click_to_continue` was unusable as a gate (0.642..0.849
+across unrelated states, false-firing on combat). **That was a different, badly
+cut template.** `cutscene_continue` measures 0.968 positive against a 0.381 worst
+negative across seven reference frames — a margin of 0.587 — so it is safe where
+the old one was not.
+
+It sits AFTER the result panels deliberately: a Victory or Mission Success panel
+must be acknowledged by its own green check, not clicked through as a cutscene.
+
 ### GEOMETRY MUST BE ANCHOR-RELATIVE HERE TOO
 
 **The whole panel moves.** After a page reload the Start button went from y=400

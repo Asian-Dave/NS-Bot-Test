@@ -284,6 +284,45 @@ def test_resume_ladder_panels():
     # mission could never close out. Assert the two click points differ, which is
     # only true if both were resolved at their own scale.
     pts = {}
+    # A CUTSCENE IS A DEAD END WITHOUT ITS OWN RUNG. Measured live: a failed TP
+    # mission ends on "Aww... you better take some rest..." over a
+    # "click anywhere to continue" screen, and the ladder halted there after 20
+    # unrecognised frames - right to refuse to click blindly, but unable to get
+    # home from a screen whose only exit is a click.
+    #
+    # CLAUDE.md warns the OLD click_to_continue template was unusable (0.642 to
+    # 0.849 on unrelated states). This is a different, re-cut template, and the
+    # margin is what makes it safe - so assert the margin, not just the hit.
+    from perceive import find
+    names = [st.name for st in resume.DEFAULT_LADDER]
+    check("cutscene" in names, "the ladder has a cutscene rung")
+    if "cutscene" in names:
+        check(names.index("cutscene") > names.index("result_panel"),
+              "cutscene is checked AFTER the result panels, so a Victory panel "
+              "is acknowledged by its check rather than clicked through")
+        ct = os.path.join(ROOT, "tpl", "cutscene_continue.png")
+        cf = os.path.join(ROOT, "ref/auto/tp/cutscene_failed.png")
+        if os.path.exists(ct) and os.path.exists(cf):
+            t = Template("cutscene_continue", ct, threshold=0.80)
+            pos = find(cv2.cvtColor(cv2.imread(cf), cv2.COLOR_BGR2GRAY), t)[1]
+            worst, who = 0.0, None
+            for rel in ("ref/auto/lobby/lb0.png", "ref/auto/panels/victory.png",
+                        "ref/auto/panels/mission_success.png",
+                        "ref/auto/mission/COMBAT.png", "ref/auto/tp/room.png",
+                        "ref/auto/tp/cards_now.png",
+                        "ref/auto/tp/seal_active.png"):
+                pp = os.path.join(ROOT, rel)
+                if not os.path.exists(pp):
+                    continue
+                m2, c2 = find(cv2.cvtColor(cv2.imread(pp), cv2.COLOR_BGR2GRAY), t)
+                if c2 > worst:
+                    worst, who = c2, os.path.basename(rel)
+                check(not m2.found,
+                      f"cutscene does NOT fire on {os.path.basename(rel)} ({c2:.3f})")
+            check(pos > 0.90, f"cutscene fires on a click-anywhere screen ({pos:.3f})")
+            check(pos - worst > 0.30,
+                  f"cutscene margin {pos - worst:.3f} over its worst negative ({who})")
+
     for label, rel in (("victory", "ref/auto/panels/victory.png"),
                        ("success", "ref/auto/panels/mission_success.png")):
         p = os.path.join(ROOT, rel)

@@ -163,6 +163,25 @@ DEFAULT_LADDER = [
          target_threshold=0.85,
          note="mid-mission Victory; XP 0 / Gold 0 here is NORMAL"),
 
+    # A cutscene is a dead end for the ladder without this. Measured live: a
+    # failed TP mission ends on "Aww... you better take some rest..." over a
+    # "click anywhere to continue" screen, and the ladder halted there after 20
+    # unrecognised frames - correctly refusing to click blindly, but unable to
+    # get home from a screen whose only exit is a click.
+    #
+    # CLAUDE.md warns that `click_to_continue` was unusable as a gate (0.642 to
+    # 0.849 across unrelated states, false-firing on combat). That was a
+    # DIFFERENT, badly-cut template. `cutscene_continue` was re-cut and measured
+    # across eleven reference frames: 0.968 positive against a 0.421 worst
+    # negative (Mission Success), a margin of 0.547 - so it is safe here where
+    # the old one was not.
+    #
+    # It sits AFTER the result panels deliberately: a Victory or Success panel
+    # must be acknowledged by its own green check, not clicked through as if it
+    # were a cutscene.
+    Step("cutscene", "cutscene_continue", "click", threshold=0.80,
+         note="click-anywhere screen; the only way off it is a click"),
+
     # --- popup drain. Login queues four: Daily Login Reward -> Calendar ->
     # Wishing Tree -> Lucky Spin. Dismiss controls are NOT uniform, hence four
     # separate anchors rather than one.
