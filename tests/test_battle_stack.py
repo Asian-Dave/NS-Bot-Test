@@ -173,14 +173,15 @@ def test_skill_rotation():
     check(verdicts[-1] == "regenerating",
           f"a genuinely regenerating fight still aborts (got {verdicts[-1]})")
 
-    print("\n[5] SkillRotation: rotate-on-resolve and cooldown skipping")
+    print("\n[5] SkillRotation: priority order, cooldowns and the Attack fallback")
     tracker = combat.CooldownTracker({"S1": 3})
-    r = SkillRotation(["S1", "S2", "AT"], tracker, LOG)
+    r = SkillRotation(["S1", "S2", "AT"], tracker, LOG, mode="rotate")
 
     check(r.candidates() == ["S1", "S2", "AT"], "all slots offered initially")
 
     r.resolved("S1")
-    check(r.order == ["S2", "AT", "S1"], "a resolved slot goes to the back")
+    check(r.order == ["S2", "AT", "S1"],
+          "in ROTATE mode a resolved slot goes to the back")
     # S1 has a known 3-round cooldown and was used at round 0, so it is skipped
     # until three rounds have passed.
     check(r.candidates() == ["S2", "AT"], "known-cooling slot is withheld")
@@ -190,14 +191,53 @@ def test_skill_rotation():
 
     # A slot with an UNKNOWN cooldown must still be offered - we never guess it
     # is unavailable - but it is demoted after firing.
-    r2 = SkillRotation(["S5", "S6"], combat.CooldownTracker({}), LOG)
+    r2 = SkillRotation(["S5", "S6"], combat.CooldownTracker({}), LOG,
+                       mode="rotate")
     r2.resolved("S5")
     check(r2.candidates() == ["S6", "S5"],
           "unknown-cooldown slot is offered again but demoted")
 
-    r3 = SkillRotation(["S1", "S2"], combat.CooldownTracker({}), LOG)
+    r3 = SkillRotation(["S1", "S2"], combat.CooldownTracker({}), LOG,
+                       mode="rotate")
     r3.failed("S1")
     check(r3.order == ["S2", "S1"], "a failed slot is demoted too")
+
+    # PRIORITY MODE is the default, and is what "press these in this order, and
+    # Attack when none are left" actually means: take the first READY slot, keep
+    # the configured order, and never stall for want of something to click.
+    tr = combat.CooldownTracker({"S1": 3, "S3": 5})
+    rp = SkillRotation(["S1", "S3"], tr, LOG, fallback="AT")
+    picks = []
+    for rnd in range(10):
+        if rnd:
+            tr.next_round()
+        pick = rp.candidates()[0]
+        picks.append(pick)
+        rp.resolved(pick)
+    check(picks[:3] == ["S1", "S3", "AT"],
+          f"priority takes the best ready slot, then Attack (got {picks[:3]})")
+    check(rp.order == ["S1", "S3"],
+          f"priority does NOT rotate the configured order (got {rp.order})")
+
+    # A slot with NO known cooldown must still be demoted even in priority mode,
+    # or it would be pressed every turn forever - bookkeeping is the only thing
+    # that could stop that, and there is none.
+    ru = SkillRotation(["S1", "S2"], combat.CooldownTracker({}), LOG,
+                       fallback="AT")
+    up = []
+    for _ in range(4):
+        pick = ru.candidates()[0]
+        up.append(pick)
+        ru.resolved(pick)
+    check(up == ["S1", "S2", "S1", "S2"],
+          f"unknown-cooldown slots still alternate in priority mode (got {up})")
+
+    # Every skill cooling must still leave something to click.
+    rf = SkillRotation(["S1"], combat.CooldownTracker({"S1": 9}), LOG,
+                       fallback="AT")
+    rf.resolved("S1")
+    check(rf.candidates() == ["AT"],
+          f"with every skill cooling the fallback is offered (got {rf.candidates()})")
 
     try:
         SkillRotation([], combat.CooldownTracker({}), LOG)

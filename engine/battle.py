@@ -65,24 +65,42 @@ class SkillRotation:
     length are always offered and demoted by `resolved()` after they fire.
     """
 
-    def __init__(self, order, tracker, log, kinds=None):
+    def __init__(self, order, tracker, log, kinds=None, mode="priority",
+                 fallback=None):
         if not order:
             raise ValueError("skill rotation is empty; configure at least one slot")
         self.order = list(order)
         self.tracker = tracker
         self.log = log
+        # "priority" keeps the configured order fixed and simply takes the first
+        # slot that is READY, which is what an operator means by "press these in
+        # this order, and Attack when none are left". "rotate" is the older
+        # round-robin, kept because it is the only sane behaviour for a slot
+        # whose cooldown length is unknown - see `resolved`.
+        self.mode = mode
+        # What to do when every configured slot is cooling. Attack always works
+        # and is the only action measured to reliably deal damage on this
+        # client, so a fight never stalls just because the skills are down.
+        self.fallback = fallback
         # slot -> "damage" | "buff" | "heal" | ... purely informational here, but
         # it keeps a buff-only slot from being counted as a damage attempt.
         self.kinds = dict(kinds or {})
 
     def candidates(self):
-        """Offerable slots, in preference order, cooling ones removed."""
+        """Offerable slots, in preference order, cooling ones removed.
+
+        The fallback is appended last so there is ALWAYS something to try: with
+        every skill cooling the caller would otherwise have nothing to click and
+        the turn would pass doing nothing.
+        """
         out = []
         for slot in self.order:
             ready = self.tracker.ready(slot)
             if ready is False:
                 continue          # known to be cooling — skip
             out.append(slot)      # True, or None == unknown, so offer it
+        if self.fallback and self.fallback not in out:
+            out.append(self.fallback)
         return out
 
     def resolved(self, slot):
@@ -93,6 +111,14 @@ class SkillRotation:
         cooldown, and demotion covers the slots where we do not.
         """
         self.tracker.use(slot)
+        # In PRIORITY mode a slot with a KNOWN cooldown keeps its place: the
+        # tracker will withhold it until it is ready again, so the order can stay
+        # exactly as configured. A slot whose cooldown we do NOT know still has
+        # to be demoted, or priority would press it every single turn forever -
+        # bookkeeping is the only thing that can stop that, and we have none.
+        known = self.tracker.ready(slot) is not None
+        if self.mode == "priority" and known:
+            return
         if slot in self.order:
             self.order.remove(slot)
             self.order.append(slot)
@@ -142,6 +168,8 @@ class BattleRunner:
         self.watchdog = combat.DamageWatchdog(
             stall_turns=c.get("watchdog_stall_turns", 3))
         self.rotation = SkillRotation(c.get("rotation", []), self.tracker, log,
+                                      mode=c.get("order_mode", "priority"),
+                                      fallback=c.get("fallback", "AT"),
                                       kinds=c.get("slot_kinds"))
 
     # -- geometry ------------------------------------------------------------
