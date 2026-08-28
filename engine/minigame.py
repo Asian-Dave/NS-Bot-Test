@@ -19,8 +19,8 @@ WHAT IT CAN TELL APART
     "kekkai"      the rune Mastermind. Either an unsealed kekkai standing in the
                   scene, or its puzzle panel already open.  -> SOLVABLE
     "seal_entry"  the hand-seal minigame: `Skill : N / 4`, three hearts, a named
-                  target jutsu, two empty slots, ten face-up hand seals.
-                  -> NOT SOLVABLE YET, and it says so instead of guessing.
+                  target jutsu, two slot cards, ten hand seals.
+                  -> PLAYABLE but not yet reliable; see engine/seals.py.
     "unknown"     anything else - cutscene, traversal, a panel, the lobby.
 
     "combat"      a battle, not a minigame - handed back to the battle runner.
@@ -163,12 +163,15 @@ def solve(cap, actor, log, frame=None):
         return kind, pairs > 0
 
     if kind == SEAL_ENTRY:
-        log.info("seal-entry minigame recognised, and it is NOT solvable yet: it "
-                 "needs a jutsu -> seal-pair table that is not in the client "
-                 "(SKILL_DATA is server-fed). Ten seals in two ordered slots is "
-                 "90 options against three hearts, and a miss rerolls the jutsu, "
-                 "so guessing would just spend the lives. Leaving it untouched.")
-        return kind, None
+        import seals as se
+        log.info("hand-seal minigame. The answer IS shown - pressing Start opens "
+                 "a look phase where both slot cards flip over and display the "
+                 "two required seals - so this is a memorisation game, not the "
+                 "90-way guess this file used to describe. Matching slot art to "
+                 "tile art is only partly reliable so far (5.13x separation on "
+                 "some seals, 1.10x on others); see engine/seals.py.")
+        ok = se.play_round(cap, actor, log, save_crops=True)
+        return kind, bool(ok)
 
     if kind == COMBAT:
         log.info("this is a battle, not a minigame - leaving it to the battle "

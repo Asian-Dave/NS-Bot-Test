@@ -139,13 +139,96 @@ Mission Room -> grade (S locked / A / B / C)
 * Login queues **four** popups: Daily Login Reward -> Calendar -> Wishing Tree ->
   Lucky Spin. Dismiss controls are NOT uniform — small X (~59px disc), large X
   (~136px), and a back-arrow. Needs a drain-loop over a template set.
-* Sessions persist in the browser profile, which is the credential store — the bot
-  never handles a password. Server-side expiry should surface to the human, not be
-  auto-recovered, since it may mean a password change or ban.
+* The browser profile is the credential store — the bot never handles a password.
+  Server-side expiry should surface to the human, not be auto-recovered, since it
+  may mean a password change or ban.
+* **CORRECTION — the session does NOT survive quitting the browser.** This entry
+  used to say sessions persist in the profile. Measured: after `Browser.close`
+  and a relaunch on the same profile, the page came back on the logged-out
+  landing with only `_ga` and `cf_clearance` left, so the site's session cookie
+  is a **browser-session cookie**. Consequences:
+    - never restart Chrome to "get a clean window" — attach to the running one
+      (`browser.launch` already reuses a live CDP port; `app.py --attach` forces it)
+    - a crash or a quit costs a manual sign-in, and only the human can do it
+* **Signing out is an explicit HALT, not an unknown screen.** `tpl/logged_out.png`
+  (the "Welcome, Shinobi!" heading, 1.000 positive / 0.435 worst in-game) is the
+  FIRST rung of the resume ladder. Before it existed the ladder still refused to
+  authenticate, but only by exhausting `max_unknown` and reporting "unrecognised
+  screen" — true, and useless to the operator.
 * Cold SWF load ~25-30s; warm ~8s. Loading-state timeouts must span that range.
 * Known stalls on this server: the Hunting House sub-app hangs at "Loading… 3%".
 * The game console is noisy and prints `Out :: Error :: Main :: initButton` lines
   that are **not errors** — a log-scraping health check would false-alarm.
+
+## The bot window — Chrome without browser chrome, panel inside the page
+
+`engine/app.py` is the entry point: one command opens a window with the game on
+the left and the controls on the right, like the reference bot's UI.
+
+**There is no such thing as "embed the game in a native app".** Ruffle is
+WASM + WebGL, the session cookie lives in this Chrome profile, and CDP is how we
+click. Any native shell would have to host a browser engine and then expose a
+debugging protocol to drive it — which is exactly what the reference bot IS
+(Adobe AIR + CEF, i.e. a Chromium in a native frame). So the honest version of a
+"native window" is **a browser window with the browser chrome hidden**:
+
+    browser.launch(..., app_mode=True)   ->   --app=<url>
+
+Measured: window chrome drops from **274 px to 90 px** — tab strip, omnibox and
+bookmarks bar gone, leaving the title bar.
+
+**The panel goes in the page's own gutter — the player element is never touched.**
+CLAUDE.md's hard rule is that resizing `ruffle-player` via CSS desyncs
+click -> stage mapping. It does not need resizing. Measured at the pinned
+1720x720 viewport:
+
+    game iframe (emulator.html)   x=375  w=960   -> right edge 1335
+    free right gutter             1335..1720     -> 385 CSS px  (770 device px)
+
+`engine/dock.py` puts a 380 px `position:fixed` panel there as a SIBLING of the
+game, and `install()` asserts `overlaps: false` live rather than assuming it.
+
+**The dock is invisible to perception.** Verified by scoring all 51 templates on
+the same screen with and without it: 4 templates moved, all by <= 0.037, all
+still at 0.16-0.31 against thresholds of 0.88, and **none matched inside the
+dock**. There is no streaming anywhere in the viewing path — the operator is
+looking at the real canvas at its own framerate.
+
+### Getting a button press back to Python
+
+    dock button -> window.__nsbot_send(json)   (Runtime.addBinding)
+                -> Runtime.bindingCalled       (the CDP socket we already hold)
+                -> cdp.drain_events()
+                -> app.Runner._apply()
+
+No HTTP server, no port, nothing polling the DOM. Three things had to be fixed
+first, and each failed silently:
+
+* **`CDP.call` DISCARDED every message that was not its own reply**, so events
+  did not exist as far as this codebase was concerned. Nothing errored; they were
+  simply gone. Events are buffered now (`_stash` / `drain_events`).
+* **Waiting for events with a socket timeout corrupts the connection.** A timeout
+  can expire in the MIDDLE of a websocket frame, after the header is consumed and
+  before the payload, leaving the stream permanently desynchronised: every later
+  read is garbage and the next `call()` blocks forever with no error. Wait with
+  `select` — ask whether a read would block, then read the frame to completion.
+* **Buffering every event is not viable on this game.** Enabling Runtime filled a
+  512-slot buffer with `Runtime.consoleAPICalled` in under a second (the noisy
+  console already recorded above), which would evict the button press. `cdp.watch()`
+  is an allowlist; the dock watches only `Runtime.bindingCalled`.
+
+### Two safety rails the dock needs
+
+* **The panel is a NO-CLICK ZONE for the bot.** It is injected into the game page,
+  so its buttons are as clickable as anything else on screen, and a stray bot
+  click would press Stop or switch the task. `Actor.no_click_zones` refuses and
+  logs. Every measured target is inside the game rect so this should never fire —
+  which is precisely what was believed about the fixed card grid right before it
+  clicked into the weapon Shop.
+* **Pause must not deadlock.** The dock's Pause writes to `run/bot.control`, a
+  long task parks in `Controls.wait_if_paused`, and the only loop that could read
+  the operator's next button press is the one now parked. That hung live.
+  `Controls.on_wait` is pumped every poll, so Run and Stop stay live mid-mission.
 
 ## Safety rules (non-negotiable)
 
@@ -667,180 +750,190 @@ Also: every one of these colour-blob detectors needs its ROI CLAMPED to the fram
 Unclamped, a 1920-wide frame fed a region starting at x=1950 and OpenCV threw on
 an empty slice.
 
-### seal_entry: recognised, and honestly NOT solvable yet
+### CORRECTION — the hand-seal (Potion) minigame IS solvable, and the answer is SHOWN
 
-The hand-seal minigame (`Skill : N / 4`, three hearts, a named jutsu, two empty
-slots, ten face-up seals) is detected reliably by its "Skill :" label — 1.000
-positive against 0.268..0.348 everywhere else — and then declined. Why:
+This file previously recorded the seal-entry minigame as unsolvable, on two
+claims that a live observation disproves. Both are wrong, and the mistake was
+WHEN we looked, not how fast:
 
-* the two slots are card BACKS. They are the empty INPUT, not a revealed answer.
-* **CLAUDE.md's "revealed briefly after Start" hypothesis does not hold** at
-  47 fps. Clipping the capture to the slot strip got 237 frames in 5.01 s (a 4x
-  speedup over full-frame) and showed only a READY overlay then the training
-  dummy. No reveal.
-* the mapping is not in the client we hold: a string search of the shell SWF
-  finds no jutsu names and no seal vocabulary, consistent with the existing note
-  that per-skill data lives in a server-fed `SKILL_DATA`.
+    WRONG: "the two slots are card BACKS - they are the empty INPUT, not a
+            revealed answer"
+    WRONG: "a 47 fps burst over 5 s across the slot strip caught no reveal"
 
-Ten seals in two ordered slots is **90** possibilities against **three** hearts,
-and a miss also REROLLS the target jutsu — so attempts cannot even be accumulated
-against one skill. Guessing just spends the lives.
+Nothing is revealed until **Start** is pressed. The earlier burst sampled the
+pre-Start screen. Press Start and the phases are:
 
-**What would fix it:** a jutsu -> seal-pair table, harvested once offline. The
-likely source is the game's own Jutsu panel. That is a separate job, not
-something to attempt mid-minigame with three lives on the line.
-
-### The minigame is hand-seal SEQUENCE ENTRY, not pair matching
-
-* HUD: `Skill : 1 / 4` (four rounds) and three hearts (lives).
-* A named target skill with icon (`Lightning Edge`, `Fiery Spike Wheel`, ...).
-* **Two face-down slot cards** beneath the skill name.
-* A row of **10 face-up hand seals** along the bottom, all visually distinct.
-* `Start` button, centre.
-
-Verified interactions:
-
-* Clicking a seal fills the next slot left->right and **greys that seal out**.
-  No heart is lost per click; evaluation happens on sequence completion.
-* A wrong sequence costs **one heart** (3 -> 2), **rerolls the target skill**,
-  resets all 10 seals and both slots, and leaves `Skill : 1 / 4` unchanged.
-  So a miss costs a life but not progress.
-* The 10 seals **stay face-up** - verified across 7.3 s of continuous observation,
-  no flip-back. The choices are not the memorised element.
-
-**UNRESOLVED: where the required sequence comes from.** It is not derivable from the
-visible screen. Most likely revealed briefly in the two slots immediately after
-`Start`; that window was missed twice by fixed-interval capture. If no reveal
-exists, a skill -> seals table is required instead.
-
-### Scroll family (memory board) — SOLVED live, mission banked
-
-"Secret TP Scroll" completed by the bot: **Remaining Cards x0 with the hourglass
-still at 85**, then Mission Success (Gold 2,000 / XP 2,000). `engine/cards.py`.
-
-A 4x5 grid of 20 face-down cards, ten pairs, and **a countdown that is the real
-opponent** — running it out ends the mission with "Sorry, you are not qualified
-to receive this scroll." There is no opening reveal (a 26 fps burst over 8 s
-caught zero change), so it is a genuine memory game.
-
-**Cell state is read from AGGREGATES, never from spatial distance.** The backs
-are the logo over animated flames, so at any instant every back looks different —
-spatial distance from cell 0 to the others ran 0..127.6 on a frame where all
-twenty were face-down. Measured bands, which is what `cell_state` uses:
-
-| state | mean sat | mean val |
+| phase | slots | ten tiles |
 |---|---|---|
-| back (animated) | 28.2 .. 30.1 | 123.5 .. 125.0 |
-| face | 113.4 .. 201.9 | 96.9 .. 185.1 |
-| removed (blank slot) | ~46 | **255.0** |
+| idle (Start on screen) | face-down backs | face-down backs |
+| **look** (~3 s "READY", then a 9..0 hourglass) | **FLIP OVER and show the two required seals** | face up but GREYED |
+| input | flip back to backs | full colour, clickable |
 
-**Face matching is a 3x4 mean-HSV signature, NOT the reference bot's metric.**
-`CardSolver.cs`'s grey+Canny dual metric was ported first and does not separate
-this board at all. Calibrated against twenty real crops whose ten true pairs are
-known (`ref/auto/tp/faces/`, committed as a fixture):
+So it is a **memorisation game with a generous look phase**, exactly as the user
+said — not a 90-way guess against three lives. The old conclusion that it "needs
+a jutsu -> seal-pair table that is not in the client" was answering a question
+the game never asks: the required seals are shown to you, just not at the same
+moment as the buttons.
 
-| metric | worst true pair | best NON-pair | verdict |
-|---|---|---|---|
-| grey+Canny (theirs) | 139.85 | 104.96 | **INVERTED** |
-| mean sat+val | 3.39 | 1.50 | **INVERTED** |
-| **3x4 mean-HSV (ours)** | **4.56** | **8.99** | 1.97x gap |
+**The reference bot has nothing for this.** `FormAnniversaryMinigame`,
+`FormCrewMinigame`, `FormSoccerFeverMinigame` and `FormSSTraining` are all
+settings forms — constructor plus `updateForm`, same as `FormDailyTP`. There is
+no hand-seal logic anywhere in it.
 
-Confirmed independently on a live board: true pairs 0.29 / 1.07 / 1.70, nearest
-non-pair 23.88 — a **14x** gap. Gate at 6.5. Inset is HARMFUL here (a 20% inset
-drops the gap to 1.27x), so the crop is used whole.
+### Measured geometry (captured px, the pinned 1720x720 viewport)
 
-**Mutual-best partner is VACUOUS on its own.** With two revealed cards each is
-trivially the other's best, which is how a run reported "10/10 pairs" against the
-game's own "Remaining Cards: x18". Require mutual-best AND the gate.
+    Start button      (1740, 400)   tpl/tp_seal_start.png, 1.000 / 0.248 worst
+    slot cards        (1651, 821) and (1806, 821), about 140x175
+    ten seal tiles    x = 1051 + 150*i for i in 0..9, y = 1069, about 104x104
+    "Skill : N / 4"   tpl/tp_seal_hud.png, 1.000 / 0.348 worst
 
-**Three bugs, each of which cost a mission:**
+Verified by overlaying the grid on a live frame: all ten boxes centre on their
+tiles, both slot boxes on their cards.
 
-1. **The flip detected the face and never STORED it.** `seen` stayed empty, so
-   `unknown_positions()` never shrank and the run re-flipped the same two cells
-   for its whole 80 s clock — 831 reads, zero progress. Symptom from the outside:
-   "it presses things but does not memorise them, and repeats cards it should
-   already know."
-2. **A cell that will not flip must leave the rotation** (`skipped`), and must
-   NOT be counted as `cleared` — that inflates the score with cells the game
-   never removed.
-3. **A matched pair burns away in a SMOKE PUFF, and mid-puff both cells read as
-   BACKS** — the same reading a mismatch gives. Judging on a snapshot called 14
-   pairs wrong in the very run that cleared the whole board. The verdict is
-   therefore **asymmetric**: REMOVED is terminal and believed at once, BACK must
-   HOLD for `MISMATCH_HOLD` (1.2 s) before it counts. As a backstop, a flip that
-   finds a cell already REMOVED banks it, so a wrong rejection costs one click
-   rather than poisoning the board.
+### SATURATION DOES NOT SEPARATE THE PHASES — the blue glove does
 
-**Trust the game, not the metric.** Every pair is adjudicated by watching the two
-cells; the metric only proposes. Rejected pairs are remembered so they are never
-proposed twice, and both faces stay in memory for their real partners.
+This cost two live rounds. A **face-down card is orange flame art** and reads as
+saturated as a live seal, so a saturation gate fired on a board that had not
+dealt yet: once it concluded a round was already running and never pressed
+Start, once it tried to read seals off card backs.
 
-### Speed: what actually made the timed board winnable
+Only a live seal has a saturated **blue glove**:
 
-The board went from timing out to finishing in 33.9 s of an 85 s clock. Three
-costs, in order of size:
+| state | blue fraction |
+|---|---|
+| face down (flame back) | 0.000 |
+| greyed during the look phase | 0.000 |
+| live and clickable | 0.157 .. 0.264 |
 
-1. **Full-frame capture is 168-173 ms (5.9 fps).** Clip to the board and it is
-   50 ms (20 fps); the template gate on the clip is 12.5 ms against 72.3 ms on a
-   full frame. **63 ms per read against 245 ms — 3.9x.**
-2. **Fixed sleeps.** A guessed `flip_settle=0.75` on every flip became a poll
-   that returns the instant the cell shows a face.
-3. **Human-like click pacing.** `Actor`'s defaults sleep 0.18-0.55 s before and
-   0.4-1.1 s after EVERY click — up to 1.65 s each, ~40 s over a game. Tightened
-   for the duration of a timed minigame and restored afterwards. Pacing is
-   anti-detection cosmetics; on a countdown it is just a way to lose.
+`seals.tiles_live` and `seals.slots_revealed` both key on that, and all three
+phases are pinned as fixtures (`ref/auto/tp/seal_facedown|look|active.png`).
 
-**CDP clip geometry has two traps, and both fail SILENTLY** — a mis-clipped frame
-still decodes, has plausible dimensions, and reads confident nonsense:
+### Matching a revealed slot to a tile — partly solved
 
-* **A clip is DOCUMENT-relative; a full frame is the VIEWPORT.** The game page
-  sits at `scrollY=301`, so a clip computed from viewport pixels lands 602
-  captured px off. Adding the scroll offset took the difference against the same
-  region of a full frame from a mean of 76.50 to **exactly 0.00**.
-* **`scale` MULTIPLIES the device pixel ratio, it does not replace it.** At
-  dpr 2 a 600x452 CSS clip returns 1200x904 at scale 1 and 2400x1808 at scale 2.
-  The correct scale is 1.
+The same seal is drawn **differently** in the two places: the slot card shows it
+small over animated flames, the tile shows it filling a wooden frame — and during
+the only window where both are visible, the tiles are greyed. So the pixels
+genuinely do not correspond. Measured separation between the correct tile and
+the runner-up, across the whole strip:
 
-Use `Capture.clip_for`, which does both. Verify any new clip by differencing it
-against the same crop of a full frame — that is the only check that catches this.
+| metric | slot A | slot B |
+|---|---|---|
+| greyscale difference | 1.03x | 1.09x |
+| Canny edges | 1.01x | 1.03x |
+| grey+Canny (the reference bot's CardSolver metric) | 1.01x | 1.07x |
+| dark-ink silhouette | 1.03x | 1.34x |
+| normalised cross-correlation | 1.05x | 3.49x |
+| **blue glove only, tight-cropped** | **1.10x** | **5.13x** |
 
-**Do not poll flat out.** Capture runs at ~20 fps and every
-`Page.captureScreenshot` forces the WebGL canvas to re-composite, which makes the
-game visibly FLICKER for anyone watching. `POLL_INTERVAL = 0.10` gives ~8
-reads/second, which is comfortable to look at and far more than fast enough — the
-board was solved with 51 s to spare.
+The blue glove is the one element that survives every rendering difference: skin
+tones collide with the flame background and the ink outline collides with the
+wooden frame. Tight-cropping to its bounding box normalises position and scale
+in one step. Connected-component isolation was tried and is worse.
 
-### TP list navigation — measured
+**It is decisive for most seals and not for all** — two of the ten have
+near-identical glove silhouettes (1.10x). A live attempt on a thin margin was
+WRONG: one heart lost, the target skill rerolled, the board reset.
 
-* The mission is chosen **by row title template**, never by row position.
-  `tp_scroll_row` 1.000 / 0.608 worst negative; `tp_scroll2_row` 0.992 / 0.533.
-  The 0.6 worst negatives are each other, which is exactly the confusion to avoid
-  — "Secret TP Scroll" and "Another TP Scroll" are different missions.
-* **The TP list is a DAILY list and it SHRINKS as missions are completed.**
-  Measured: after finishing "Secret TP Scroll" and "The Kekkai in the Forest" the
-  list went from 5 entries over 2 pages to 3 entries on one page (1/1), with both
-  completed missions simply gone. A picker that knows one mission per family
-  reports "not on this page" as soon as that one is done for the day, so
-  `tp.ROW_TEMPLATES` maps a family to ALL of its missions.
-* **Mission Success can be covered by the "Share with Teammates!" prompt**, and
-  none of the four existing X templates matched it (close_popup_x 0.719,
-  close_popup_x_menu 0.586, close_promo_x 0.465, back_arrow 0.402) — close-out
-  timed out with the reward unbanked. `close_share_x` (1.000 / 0.784 worst) fixes
-  it. The prompt must be dismissed BEFORE the success check is searched for,
-  because its "Share to wall" button carries a green check glyph of its own that
-  scores 0.708. **Never click that button** — it posts publicly.
+**The honest fix is a labelled catalogue** of the ten seals in BOTH renderings,
+harvested once (`engine/seals.py --save-crops` writes to `ref/auto/tp/seals/`),
+then matching by identity rather than by cross-rendering similarity. Until that
+exists, `potion` is deliberately NOT in `tp.SUPPORTED`.
 
-### TP geometry and capture notes
+### THE SIGNS ARE SHOWN ONE AT A TIME, AND THE SEQUENCE GROWS
 
-At viewport 960x839 / dpr 2, in CSS coordinates:
+Two corrections to the section above, both measured live:
 
-* 10 seals, ~148 px pitch, centres x = 147, 221, 295, 369, 443, 517, 591, 665,
-  739, 813 at y = 540
-* slots ~(447, 412) and ~(521, 412); `Start` (488, 200)
-* **Frame-differencing does not work on this screen.** The training dummy animates
-  continuously, so every frame differs by ~4000 px regardless of events. Read
-  content, never deltas.
-* Capture ceiling measured at ~82 ms/frame (~12 fps) over CDP.
+1. **The signs appear sequentially, not together.** Mid-reveal on a four-sign
+   round the slot blue fractions read `[0.262, 0.182, 0.000, 0.000]` — two shown,
+   two still to come. A single snapshot cannot read the sequence, and a gate that
+   waits for every slot at once may never fire. `seals.capture_sequence` polls and
+   keeps the FIRST frame in which each slot shows a sign, which also preserves
+   the order — the thing the game actually tests.
+2. **The number of signs GROWS.** `Skill : 1/4` shows two; `Skill : 3/4` shows
+   four. Hardcoding two cost a mission: the bot entered two signs of a four-sign
+   sequence and left the round half-entered, unrecoverable. `seals.find_slots`
+   measures the row instead — the parchment behind it is a flat value 255 and a
+   card is darker, so the dark band gives the count at the known 150 px pitch.
+   The gate must be generous (230, not 170): the cards are not drawn alike, and
+   one measured 190..215 while its neighbour was 81..132.
+
+Note the band spans the *outer edges* of the first and last card, so its width is
+`(n-1)*pitch + card_width`. Forgetting the card width over-counts by one.
+
+### GEOMETRY MUST BE ANCHOR-RELATIVE HERE TOO
+
+**The whole panel moves.** After a page reload the Start button went from y=400
+to y=432, every tile and slot crop moved with it, and the match margins collapsed
+from 7..14x to 1.0x — the solver picked wrong twice in a row on a board it had
+been reading perfectly a few minutes earlier.
+
+This is the same rule the combat section already states: *battle geometry must be
+anchor-relative, never absolute*. The anchor here is the **"Skill : N / 4" HUD**,
+because it is present in EVERY phase (Start is not) and lands at exactly
+`(1106, 255)` on every correctly-aligned frame. `seals.anchor_offset` returns the
+delta and everything is computed from it.
+
+Proven by shifting a frame and re-running the match:
+
+| | picks |
+|---|---|
+| baseline | tile 7 @ 1.10x, tile 1 @ 5.13x |
+| shifted 20px, **anchored** | tile 7 @ 1.10x, tile 1 @ 5.13x |
+| shifted 20px, naive | tile 6 @ 1.18x, tile 6 @ 1.16x — wrong, and both signs collapse onto one tile |
+
+### What the matcher actually achieved
+
+On a correctly-aligned board the bot played **three rounds in a row with zero
+mistakes** (`Skill : 3/4`, all three hearts intact), with first-sign margins of
+7.03x, 14.53x and 12.89x and second-sign margins of 2.54x, 2.43x and 2.92x. The
+blue-glove metric is good; every failure since has been a geometry or
+sequence-length bug, not a matching one.
+
+**A caution about "verification".** An attempt to confirm each pick by re-reading
+the slot after clicking reported `d=0.000` — identical images — because the slot
+had not changed yet. That is a vacuous check, not a passing one: a distance of
+exactly zero between two captures means nothing happened, and should be treated
+as a failed observation rather than a match.
+
+### ABSTAINING STRANDS THE ROUND — this game inverts the usual rule
+
+Everywhere else in this project the right move when unsure is "do not click".
+**Here that is wrong, and it was measured.** Once the look phase has passed the
+game parks the round waiting for two clicks: the slots are face down, there is
+no Start button, and nothing re-triggers a reveal. Abstaining does not cost one
+round of four — it strands the round permanently and the mission can never
+finish. The only exits are a right answer or a wrong one.
+
+So `seals.play_round(commit=True)` (the default) plays its best guess and logs
+how confident it was. `commit=False` is for harvesting crops only.
+
+The decision point that IS free is **before pressing Start**. Nothing is lost by
+declining to start a round.
+
+### Misc
+
+* A miss costs one heart, **rerolls the target skill**, resets all ten tiles and
+  both slots, and leaves `Skill : N / 4` unchanged — so a miss costs a life but
+  not progress.
+* Target skills seen: `Refresh`, `Water Burst`, `Lightning Edge`,
+  `Fiery Spike Wheel`.
+* Frame-differencing is useless on this screen: the training dummy animates
+  continuously, so every frame differs regardless of events. Read content.
+* Capture ceiling over CDP measured at ~16 fps full-frame, ~82 ms/frame.
+
+
+### TP geometry — SUPERSEDED, kept only as a warning about viewports
+
+An earlier pass recorded the hand-seal geometry at viewport **960x839 / dpr 2**,
+in CSS coordinates: 10 seals at ~148 px pitch from x=147 to x=813 at y=540, slots
+~(447,412) and ~(521,412), Start (488,200).
+
+**Do not use those numbers.** Everything in this project is now measured at the
+pinned 1720x720 / dpr 2 viewport in CAPTURED pixels, and the current hand-seal
+geometry is in the section above. The two are recorded together only to make the
+point that a coordinate is meaningless without the geometry it was measured at —
+the same ten tiles are 148 CSS px apart in one and 150 captured px apart in the
+other.
 
 ## Cross-reference: CMMhero NS Bot (decompiled, `ref/tp/cmmhero`)
 

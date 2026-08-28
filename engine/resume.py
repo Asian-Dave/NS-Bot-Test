@@ -123,6 +123,18 @@ class Step:
 #   * character_select before lobby for the same reason
 #   * the lobby anchor last: it is the goal, not a waypoint
 DEFAULT_LADDER = [
+    # LOGGED OUT: halt, loudly and immediately. Never authenticate - CLAUDE.md
+    # is explicit that an expired session may mean a password change or a ban,
+    # and that it must reach the human rather than be auto-recovered. Without
+    # this rung the ladder still refused to log in, but only by exhausting
+    # `max_unknown` and reporting "unrecognised screen", which tells the
+    # operator nothing about what is actually wrong.
+    #
+    # Anchor is the logged-out page's own "Welcome, Shinobi!" heading:
+    # 1.000 positive against a 0.435 worst negative.
+    Step("logged_out", "logged_out", "halt",
+         note="you are signed out - a human must sign in; the bot never "
+              "handles credentials"),
     Step("loading", "loading_text", "wait",
          note="cold SWF load 25-30s, warm ~8s; Hunting House hangs at 3% forever"),
 

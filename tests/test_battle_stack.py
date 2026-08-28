@@ -9,9 +9,11 @@ frame on disk or a number that was actually observed in game.
 Run:  .venv/bin/python tests/test_battle_stack.py
 """
 import glob
+import inspect
 import logging
 import os
 import sys
+import time
 
 import cv2
 import numpy as np
@@ -23,6 +25,7 @@ import combat                                             # noqa: E402
 from battle import SkillRotation                          # noqa: E402
 from geometry import BattleGeometry, COMMAND, CMD_SIDE     # noqa: E402
 from mission import REQUIRED_TEMPLATES, preflight, _find_all  # noqa: E402
+import resume                                             # noqa: E402
 from resume import Resumer, ARRIVED  # noqa: E402
 from perceive import Template                              # noqa: E402
 
@@ -535,8 +538,413 @@ def test_tp_navigation_templates():
     import tp as tprun
     check(len(tprun.ROW_TEMPLATES.get("scroll", [])) >= 2,
           "the scroll family lists both of its missions")
-    check("scroll" in tprun.SUPPORTED and "potion" not in tprun.SUPPORTED,
-          "scroll is supported, potion (the hand-seal game) is still refused")
+    check({"scroll", "kekkai", "potion"} <= tprun.SUPPORTED,
+          "all three TP families are playable")
+    check(tprun.TRY_ORDER[-1] == "potion",
+          "the hand-seal game is tried LAST - it is the least reliable, so the "
+          "families we solve cleanly get first go at the day's missions")
+    check(len(tprun.ROW_TEMPLATES.get("potion", [])) >= 2,
+          "both Potion missions are addressable by name")
+
+
+# --- 13. the control dock: event plumbing, click guard, halt anchor ---------
+def test_dock_and_controls():
+    """The pieces that make an in-page control panel safe, without a browser.
+
+    Each check pins a bug that actually happened while building it:
+
+    * `CDP.call` used to DISCARD every message that was not its own reply, so
+      events did not reach this codebase AT ALL - silently, nothing erroring.
+      An in-page panel is impossible without them: a button press arrives as
+      `Runtime.bindingCalled`.
+    * The first `poll_events` waited with a SOCKET TIMEOUT, which can expire
+      mid-websocket-frame, consume half a frame, and desynchronise the stream
+      permanently - every later read garbage, the next `call()` hanging forever
+      with no error. It waits with `select` now.
+    * Buffering everything is not viable: enabling Runtime on this game filled a
+      512-slot buffer with `consoleAPICalled` in under a second, which would
+      evict the button press. Hence the watch allowlist.
+    * The dock's Pause writes to the control file, a task parks in
+      `wait_if_paused`, and the only loop that could read the operator's next
+      press is the parked one. That DEADLOCKED live. `on_wait` fixes it.
+    * The panel is injected into the game page, so its buttons are as clickable
+      as anything else - the bot must refuse to click into it.
+    """
+    print("\n[13] control dock plumbing")
+    import act as act_mod
+    import cdp as cdp_mod
+    import dock as dock_mod
+
+    # -- event buffer, without a socket ------------------------------------
+    c = cdp_mod.CDP.__new__(cdp_mod.CDP)
+    c._events, c._max_events, c._watch = [], 4, None
+    for i in range(6):
+        c._stash({"method": "Runtime.consoleAPICalled", "i": i})
+    check(len(c._events) == 4 and c._events[-1]["i"] == 5,
+          "the event buffer is bounded and drops the OLDEST, keeping the newest")
+
+    c._events, c._watch = [], {"Runtime.bindingCalled"}
+    c._stash({"method": "Runtime.consoleAPICalled"})
+    c._stash({"method": "Runtime.bindingCalled", "params": {"payload": "{}"}})
+    check(len(c._events) == 1
+          and c._events[0]["method"] == "Runtime.bindingCalled",
+          "the watch allowlist keeps console spam out of the buffer")
+
+    c._stash({"id": 7, "result": {}})
+    check(len(c._events) == 1, "command replies are never stashed as events")
+
+    # `call` must stash what it skips, not drop it.
+    src = inspect.getsource(cdp_mod.CDP.call)
+    check("self._stash(msg)" in src,
+          "call() buffers the events it skips instead of discarding them")
+    check("select.select" in inspect.getsource(cdp_mod.CDP.poll_events),
+          "poll_events waits with select, never a socket timeout mid-frame")
+
+    # -- no-click zones -----------------------------------------------------
+    class _Cap:
+        dpr = 2
+        def to_click_coords(self, x, y):
+            return x / 2, y / 2
+
+    class _Rec:
+        def __init__(self):
+            self.warns = []
+        def info(self, m, *a):
+            pass
+        def warning(self, m, *a):
+            self.warns.append((m % a) if a else m)
+        error = info
+
+    rec = _Rec()
+    a = act_mod.Actor(None, _Cap(), rec, dry_run=True,
+                      no_click_zones=[(2680, 0, 760, 1440)])
+    check(a.blocked_by(2880, 400) == (2680, 0, 760, 1440),
+          "a point inside the dock is reported as blocked")
+    check(a.blocked_by(1720, 720) is None,
+          "a point inside the game is not blocked")
+    check(a.blocked_by(2679, 400) is None,
+          "the zone edge is exclusive on the left")
+    check(a.click_pixel(2880, 400, why="dock") is None and rec.warns,
+          "clicking into the dock is REFUSED and logged, not silently dropped")
+    check(a.click_pixel(1720, 720, why="game") is None,
+          "a game click still goes through the dry-run path")
+
+    # -- pause must not deadlock -------------------------------------------
+    import tempfile
+    ctl_path = os.path.join(tempfile.mkdtemp(), "bot.control")
+    with open(ctl_path, "w") as f:
+        f.write("pause")
+    pumped = {"n": 0}
+
+    def pump():
+        pumped["n"] += 1
+        if pumped["n"] >= 3:                 # the operator presses Run
+            with open(ctl_path, "w") as f:
+                f.write("run")
+
+    ctl = act_mod.Controls(ctl_path, None)
+    ctl.on_wait = pump
+    t0 = time.time()
+    released = ctl.wait_if_paused(poll=0.01)
+    check(released and pumped["n"] >= 3 and time.time() - t0 < 5,
+          "a paused task pumps operator input and can be un-paused from the dock")
+
+    with open(ctl_path, "w") as f:
+        f.write("stop")
+    check(ctl.wait_if_paused(poll=0.01) is False,
+          "stop still breaks the wait")
+
+    # -- the dock renders into the gutter, never over the game -------------
+    check(dock_mod.WIDTH <= 385,
+          f"the dock ({dock_mod.WIDTH}px) fits the measured 385px right gutter")
+    # A dead socket must be recognised and RECONNECTED, not spun on. Logging out
+    # tore the CDP target down, every later call raised BrokenPipeError, and the
+    # process stayed alive logging "panel update failed" forever - the panel gone
+    # and the only fix a manual restart, which is the one thing the dock exists
+    # to avoid.
+    import app as app_mod
+
+    class _Dead:
+        def evaluate(self, *a, **k):
+            raise BrokenPipeError(32, "Broken pipe")
+        def close(self):
+            pass
+
+    class _Q2:
+        def info(self, *a):
+            pass
+        warning = error = info
+
+    r = app_mod.Runner.__new__(app_mod.Runner)
+    r.cdp, r.dock, r.log = _Dead(), _Dead(), _Q2()
+    try:
+        r.ensure_dock()
+        raised = False
+    except app_mod.Disconnected:
+        raised = True
+    except Exception:
+        raised = False
+    check(raised, "a dead socket raises Disconnected instead of being swallowed")
+    check("reconnect" in inspect.getsource(app_mod.Runner.loop),
+          "the loop reconnects rather than spinning on a dead socket")
+    check(hasattr(app_mod, "attach"),
+          "connection setup is factored out so it can be rebuilt in place")
+
+    src = dock_mod._BOOTSTRAP
+    check("window.top !== window" in src,
+          "the panel refuses to inject itself inside the game iframe")
+    check("addScriptToEvaluateOnNewDocument" in inspect.getsource(dock_mod.Dock.install),
+          "the panel is re-injected on navigation, so a relog does not lose it")
+    check("overlaps" in inspect.getsource(dock_mod.Dock.install),
+          "install REFUSES rather than reflowing the player element")
+
+    # -- signing out halts, and is anchored ---------------------------------
+    from perceive import Template, find
+    lo = os.path.join(ROOT, "tpl", "logged_out.png")
+    if os.path.exists(lo):
+        t = Template("logged_out", lo, threshold=0.88)
+        worst, who = 0.0, None
+        for rel in ("ref/auto/lobby/lb0.png", "ref/auto/mission/COMBAT.png",
+                    "ref/auto/tp/cards_now.png", "ref/auto/tp/room.png",
+                    "ref/auto/panels/mission_success.png"):
+            pp = os.path.join(ROOT, rel)
+            if not os.path.exists(pp):
+                continue
+            mm, cc = find(cv2.cvtColor(cv2.imread(pp), cv2.COLOR_BGR2GRAY), t)
+            if cc > worst:
+                worst, who = cc, os.path.basename(rel)
+            check(not mm.found,
+                  f"logged_out does NOT fire on {os.path.basename(rel)} ({cc:.3f})")
+        check(worst < 0.60, f"logged_out worst in-game score {worst:.3f} ({who})")
+
+    names = [st.name for st in resume.DEFAULT_LADDER]
+    check("logged_out" in names, "the ladder has a logged_out rung")
+    step = next(st for st in resume.DEFAULT_LADDER if st.name == "logged_out")
+    check(step.action == "halt",
+          "the logged_out rung HALTS - it never tries to authenticate")
+    check(names.index("logged_out") <= 1,
+          "logged_out is checked first, before anything tries to click")
+
+
+# --- 14. kekkai feedback digits, and knowing when to stop hunting -----------
+def test_kekkai_digits():
+    """The counter reader that stalled the Kekkai mission twice.
+
+    Symptom both times: "could not read row N (green 0.524 / gold 0.611)", and
+    the solver correctly refused to guess rather than treat an unread counter as
+    a zero — a wrong 0 is indistinguishable from a real one and would corrupt
+    the model. But it meant the mission could never finish.
+
+    TWO causes, and only the second is obvious:
+
+    1. Missing digits. The library held only 0 and 1, so any feedback of 2
+       was unreadable. (A 2 turned up on the very first live run.)
+    2. **Same-size template matching has NO alignment freedom.** An exemplar the
+       same size as the patch gives `matchTemplate` exactly one position to
+       score, so the row drift CLAUDE.md already documents (pitch 88.53 vs an
+       assumed 88.0) is charged straight to the confidence. Trimming the
+       exemplar to its glyph and searching it inside the full patch took the
+       same-digit score from 0.311 to 1.000.
+
+    Connected-component isolation was tried instead and is measurably WORSE
+    (every 0 dropped to ~0.72 and failed the gate), so tight-cropping stands.
+    """
+    print("\n[14] kekkai feedback digits")
+    import kekkai_play as kp
+
+    lib = kp.load_exemplars()
+    check(bool(lib), "digit exemplars load")
+    check(set(lib) >= {0, 1, 2},
+          f"library covers 0, 1 and 2 (has {sorted(lib)})")
+    check(all(set(np.unique(i)) <= {0, 255} for v in lib.values() for i in v),
+          "exemplars are binarised the same way the live patch is")
+
+    # Tight-cropping must actually shrink the glyph, or it is doing nothing.
+    any_trimmed = any(kp.tight_glyph(i).shape != i.shape
+                      for v in lib.values() for i in v)
+    check(any_trimmed, "tight_glyph trims the exemplar below the patch size")
+
+    # Every exemplar must classify as its own digit against the whole library,
+    # comfortably above the gate.
+    d = os.path.join(ROOT, "ref/auto/tp/digits")
+    worst = 1.0
+    for f in sorted(glob.glob(os.path.join(d, "*.png"))):
+        base = os.path.basename(f)
+        head = os.path.splitext(base)[0].split("_")[0]
+        if not head.isdigit():
+            continue
+        want = int(head)
+        g = cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2GRAY)
+        patch = cv2.threshold(g, 200, 255, cv2.THRESH_BINARY)[1]
+        best, got = 0.0, None
+        for val, imgs in lib.items():
+            for img in imgs:
+                t = kp.tight_glyph(img)
+                if t.shape[0] > patch.shape[0] or t.shape[1] > patch.shape[1]:
+                    continue
+                m = float(cv2.minMaxLoc(
+                    cv2.matchTemplate(patch, t, cv2.TM_CCOEFF_NORMED))[1])
+                if m > best:
+                    best, got = m, val
+        worst = min(worst, best)
+        check(got == want and best >= 0.80,
+              f"{base} reads as {want} ({got} @ {best:.3f})")
+    check(worst >= 0.95, f"weakest self-match across the library {worst:.3f}")
+
+    # An unreadable counter must return None, never a silent zero.
+    blank = np.zeros((68, 68), np.uint8)
+
+    class _F:
+        shape = (2000, 3440, 3)
+    val, conf = kp.read_digit(
+        np.zeros((2000, 3440, 3), np.uint8), (500, 500), lib)
+    check(val is None,
+          f"an unreadable counter returns None, not a zero (conf {conf:.3f})")
+
+    # Knowing when to STOP hunting. Breaking the last seal ends the mission;
+    # a run that kept hunting afterwards ran to a map edge that no longer
+    # existed and tried to "open" panel artwork three times.
+    class _Cap:
+        def __init__(self, p):
+            self.f = cv2.imread(p)
+        def frame(self, gray=False):
+            return self.f
+
+    class _Q:
+        def info(self, *a):
+            pass
+        warning = error = info
+
+    for rel, want in (("ref/auto/panels/mission_success.png", True),
+                      ("ref/auto/lobby/lb0.png", False),
+                      ("ref/auto/tp/kekkai_puzzle.png", False),
+                      ("ref/auto/tp/kekkai_minigame.png", False),
+                      ("ref/auto/mission/COMBAT.png", False)):
+        pp = os.path.join(ROOT, rel)
+        if not os.path.exists(pp):
+            continue
+        check(kp.mission_over(_Cap(pp), _Q()) is want,
+              f"mission_over({os.path.basename(rel)}) is {want}")
+
+    src = inspect.getsource(kp.solve_live)
+    check("resumed" in src and "seal_broken" in src,
+          "a first-guess panel closure on a RESUMED puzzle needs corroboration")
+
+
+# --- 15. hand-seal minigame: the three phases, and the Start anchor ---------
+def test_seal_phases():
+    """The Potion family's phase detection.
+
+    CLAUDE.md had this game recorded as unsolvable on two claims that a live
+    observation disproves: that the two slot cards are "the empty INPUT, not a
+    revealed answer", and that no reveal exists. Pressing Start opens a LOOK
+    PHASE in which both slots flip over and display the two required seals. The
+    earlier burst simply sampled before Start.
+
+    Three phases have to be told apart, and the obvious signal is wrong for two
+    of them:
+
+        face down    orange flame card backs
+        look         slots revealed, the ten tiles drawn GREYED
+        active       tiles in full colour and clickable
+
+    SATURATION DOES NOT SEPARATE THESE. A face-down card is flame art and reads
+    as saturated as a live seal, which cost two live rounds - once by concluding
+    a round was already running and never pressing Start, once by trying to read
+    seals off card backs. The blue glove does separate them: only a live seal
+    has one.
+    """
+    print("\n[15] hand-seal minigame phases")
+    import seals as se
+
+    cases = [
+        ("seal_facedown.png", False, False, True),   # tiles live, slots shown, Start
+        ("seal_look.png",     False, True,  False),
+        ("seal_active.png",   True,  False, False),
+    ]
+    from perceive import Template, find
+    sp = os.path.join(ROOT, "tpl", "tp_seal_start.png")
+    start_t = Template("tp_seal_start", sp, threshold=0.88) if os.path.exists(sp) else None
+
+    for name, want_live, want_shown, want_start in cases:
+        p = os.path.join(ROOT, "ref/auto/tp", name)
+        if not os.path.exists(p):
+            print(f"  SKIP  {name}")
+            continue
+        f = cv2.imread(p)
+        live, blues = se.tiles_live(f)
+        shown, sb = se.slots_revealed(f)
+        check(live is want_live,
+              f"{name}: tiles_live {live} (blue {blues[0]:.3f})")
+        check(shown is want_shown,
+              f"{name}: slots_revealed {shown} (blue {sb[0]:.3f})")
+        check(se.board_present(f) is True, f"{name}: the Skill HUD is found")
+        if start_t is not None:
+            m, c = find(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), start_t)
+            check(m.found is want_start,
+                  f"{name}: Start button {m.found} ({c:.3f})")
+
+    # The Start anchor must not fire anywhere else.
+    if start_t is not None:
+        for rel in ("ref/auto/lobby/lb0.png", "ref/auto/tp/cards_now.png",
+                    "ref/auto/mission/COMBAT.png", "ref/auto/tp/room.png"):
+            pp = os.path.join(ROOT, rel)
+            if not os.path.exists(pp):
+                continue
+            m, c = find(cv2.cvtColor(cv2.imread(pp), cv2.COLOR_BGR2GRAY), start_t)
+            check(not m.found,
+                  f"tp_seal_start does not fire on {os.path.basename(rel)} ({c:.3f})")
+
+    # Geometry: ten tiles on a fixed pitch, two slots, all inside the frame.
+    check(len(se.TILES) == 10 and se.TILES[1][0] - se.TILES[0][0] == 150,
+          "ten tiles on the measured 150px pitch")
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/tp/seal_active.png"))
+    if f is not None:
+        h, w = f.shape[:2]
+        check(all(0 < x < w and 0 < y < h for x, y in se.TILES + se.SLOTS),
+              "every tile and slot centre lies inside the frame")
+
+    # THE PANEL MOVES, so geometry must be anchor-relative. Measured live: a
+    # page reload shifted Start from y=400 to y=432, every tile and slot crop
+    # went with it, and the match margins collapsed from 7..14x to 1.0x - the
+    # solver picked wrong twice on a board it had been reading perfectly.
+    look = cv2.imread(os.path.join(ROOT, "ref/auto/tp/seal_look.png"))
+    act = cv2.imread(os.path.join(ROOT, "ref/auto/tp/seal_active.png"))
+    if look is not None and act is not None:
+        check(se.anchor_offset(look) == (0, 0),
+              "the reference frame has zero panel offset")
+
+        def picks(lk, ac, off):
+            ss = se.find_slots(lk, off=off)
+            art = [se.slot_crop(lk, i, ss) for i in range(len(ss))]
+            r = se.rank_candidates_from(art, ac, None, off)
+            return None if r is None else [(r[i][0][1],
+                                            r[i][1][0] / max(1e-6, r[i][0][0]))
+                                           for i in range(len(r))]
+
+        base = picks(look, act, (0, 0))
+        for dy in (20, 32):
+            M = np.float32([[1, 0, 0], [0, 1, dy]])
+            lk = cv2.warpAffine(look, M, (look.shape[1], look.shape[0]))
+            ac = cv2.warpAffine(act, M, (act.shape[1], act.shape[0]))
+            off = se.anchor_offset(lk)
+            check(off == (0, dy), f"a {dy}px shift is detected as {off}")
+            anch = picks(lk, ac, off)
+            check(anch is not None
+                  and [p[0] for p in anch] == [p[0] for p in base],
+                  f"anchored picks survive a {dy}px shift")
+            naive = picks(lk, ac, (0, 0))
+            check(naive is None
+                  or [p[0] for p in naive] != [p[0] for p in base],
+                  f"UNanchored picks would be wrong at {dy}px - the anchor earns "
+                  f"its keep")
+
+    # Abstaining strands the round, so the default must be to commit.
+    import inspect
+    sig = inspect.signature(se.play_round)
+    check(sig.parameters["commit"].default is True,
+          "play_round commits by default - abstaining after the look phase "
+          "parks the round forever")
 
 
 def main():
@@ -545,7 +953,9 @@ def main():
                test_skill_rotation, test_command_bar_layout,
                test_preflight, test_find_all_suppression,
                test_resume_ladder_panels, test_minigame_classifier,
-               test_card_matcher, test_tp_navigation_templates):
+               test_card_matcher, test_tp_navigation_templates,
+               test_dock_and_controls, test_kekkai_digits,
+               test_seal_phases):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

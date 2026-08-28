@@ -75,7 +75,21 @@ FAMILIES = {
 }
 # `scroll` is the 4x5 memory board (engine/cards.py). It is TIMED, which is
 # why its solver reads a clipped board and skips the human-like click pacing.
-SUPPORTED = {"kekkai", "scroll"}
+# `potion` is the hand-seal game (engine/seals.py). Its mechanic is understood
+# and the phases are read reliably, but matching a revealed slot to a tile is
+# decisive for most seals (5.13x) and thin for a couple (1.10x), so a round can
+# be played wrong and cost a heart.
+#
+# It is included anyway, and deliberately LAST in the try order, because the
+# alternative is worse: refusing means the Potion missions are simply never
+# attempted, and every live attempt is also what produces the labelled crops
+# that would make the matcher reliable. Failing a TP mission costs stamina and
+# nothing else.
+SUPPORTED = {"kekkai", "scroll", "potion"}
+
+# Order matters: try the families we solve reliably first, and only fall through
+# to the hand-seal game when nothing else is left today.
+TRY_ORDER = ("scroll", "kekkai", "potion")
 
 # The green check is ONE glyph drawn at several sizes (mission detail 1.00,
 # Victory 1.18, Mission Success 1.84, seal-broken dialog 1.1), so anything that
@@ -145,6 +159,8 @@ ROW_TEMPLATES = {
     "kekkai": ["tp_kekkai_row"],                        # "The Kekkai in the Forest"
     "scroll": ["tp_scroll_row", "tp_scroll2_row"],      # "Secret TP Scroll",
                                                         # "Another TP Scroll"
+    "potion": ["tp_potion_row", "tp_potion2_row"],      # "Dangerous Potion",
+                                                        # "Weird Potion"
 }
 
 
@@ -225,11 +241,26 @@ def close_out(actor, cap, log, timeout=45):
     same as a story mission.
     """
     ms = _tpl("mission_success")
+    cs = _tpl("cutscene_continue", 0.80,
+              [round(0.9 + i * 0.05, 2) for i in range(9)])
     t0 = time.time()
     seen = False
     while time.time() - t0 < timeout:
         f = cap.frame(gray=False)
         g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+        # A MISSION DOES NOT END ON THE MINIGAME. There is an epilogue cutscene
+        # between winning and the Success panel - "Congratulations! You have more
+        # TP now!" - and an earlier close_out sat on it for its whole 45 s
+        # timeout waiting for a panel that could not appear until it was clicked
+        # through. Waiting for one specific screen is the fixed-script mistake in
+        # miniature; check what is actually there and advance it.
+        if not seen:
+            cm, cc = find(g, cs)
+            if cm.found:
+                actor.click_pixel(1720, 720,
+                                  why=f"advance epilogue cutscene ({cc:.3f})")
+                time.sleep(1.6)
+                continue
         if find(g, ms)[0].found:
             seen = True
             # A share prompt can sit on top of the Success panel, COVERING the
@@ -264,8 +295,23 @@ def close_out(actor, cap, log, timeout=45):
             else:
                 log.info("Success panel up but its check was not located (%.3f)", c)
         elif seen:
-            log.info("Success panel cleared")
-            return True
+            # THE PANEL BEING GONE IS NOT THE SAME AS BEING BACK IN THE VILLAGE.
+            # CLAUDE.md records the false-success bug this exact shape caused for
+            # story missions: returning success on the panel alone let the next
+            # run start while the game was still mid-transition. Require the
+            # lobby anchor too, and say so when it does not come back.
+            lob = _tpl("lobby_rail_fortune", 0.90)
+            for _ in range(10):
+                lg = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+                lm, lc = find(lg, lob)
+                if lm.found:
+                    log.info("Success panel cleared and the village is back "
+                             "(%.3f) - mission banked", lc)
+                    return True
+                time.sleep(1.2)
+            log.info("Success panel cleared but the village did not come back; "
+                     "not calling this a success")
+            return False
         time.sleep(1.5)
     log.info("close-out timed out after %ss", timeout)
     return False

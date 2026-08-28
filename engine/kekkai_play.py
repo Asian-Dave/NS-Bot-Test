@@ -314,6 +314,41 @@ def digit_mask(frame, xy):
     return cv2.threshold(g, 200, 255, cv2.THRESH_BINARY)[1]
 
 
+def tight_glyph(mask, pad=2):
+    """Trim a binarised digit crop to the glyph itself.
+
+    THIS IS WHAT MAKES THE MATCH WORK. An exemplar the same size as the patch
+    gives `matchTemplate` exactly ONE position to score, so any misalignment is
+    charged straight to the confidence - and the rows DO drift (CLAUDE.md: the
+    history scroll must be located, not computed; measured pitch 88.53 against
+    an assumed 88.0, ~25px over ten rows). Trimming the exemplar to its glyph and
+    searching it inside the full patch gives the matcher room to find the offset.
+
+    Measured on real crops of the SAME digit, before -> after:
+
+        green "0" vs the 0 exemplar     0.311 -> 1.000
+        gold  "1" vs the 1 exemplar     0.611 -> 1.000
+
+    Both sat under the 0.80 gate before, which is exactly why a live run logged
+    "could not read row 0 (green 0.524 / gold 0.611)" and abandoned a puzzle
+    whose feedback was perfectly legible.
+
+    Only the CENTRAL region is kept: the crop catches the edges of neighbouring
+    discs, and those are as bright as the glyph outline.
+    """
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        return mask
+    h, w = mask.shape
+    cy, cx = h // 2, w // 2
+    keep = (np.abs(ys - cy) < h * 0.42) & (np.abs(xs - cx) < w * 0.42)
+    if keep.sum() < 10:
+        return mask
+    y0, y1 = ys[keep].min(), ys[keep].max()
+    x0, x1 = xs[keep].min(), xs[keep].max()
+    return mask[max(0, y0 - pad):y1 + pad + 1, max(0, x0 - pad):x1 + pad + 1]
+
+
 def read_digit(frame, xy, exemplars, gate=0.80):
     """Classify a digit crop against saved exemplars. Returns (value, conf).
 
@@ -327,9 +362,10 @@ def read_digit(frame, xy, exemplars, gate=0.80):
     best, bestv = 0.0, None
     for val, imgs in exemplars.items():
         for img in (imgs if isinstance(imgs, list) else [imgs]):
-            if img.shape[0] > patch.shape[0] or img.shape[1] > patch.shape[1]:
+            g = tight_glyph(img)
+            if g.shape[0] > patch.shape[0] or g.shape[1] > patch.shape[1]:
                 continue
-            r = cv2.matchTemplate(patch, img, cv2.TM_CCOEFF_NORMED)
+            r = cv2.matchTemplate(patch, g, cv2.TM_CCOEFF_NORMED)
             m = float(cv2.minMaxLoc(r)[1])
             if m > best:
                 best, bestv = m, val
@@ -349,9 +385,13 @@ def load_exemplars():
     for p in sorted(glob.glob(os.path.join(ROOT, "ref/auto/tp/digits/*.png"))):
         n = os.path.splitext(os.path.basename(p))[0]
         head = n.split("_")[0]
-        if head.isdigit():
-            out.setdefault(int(head), []).append(
-                cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2GRAY))
+        if not head.isdigit():
+            continue                     # UNREAD_*: unclassified, never guess
+        g = cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2GRAY)
+        # Binarise the exemplar the SAME way the live patch is binarised in
+        # `digit_mask`, or the two are simply not comparable.
+        out.setdefault(int(head), []).append(
+            cv2.threshold(g, 200, 255, cv2.THRESH_BINARY)[1])
     return out
 
 
@@ -387,10 +427,20 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
     # a bug that reported "solved after 0 guesses" when the puzzle had simply
     # never opened - a click had landed on the character's robe instead of a
     # kekkai. Absence of the panel before any guess means NOT OPEN, not solved.
-    if find_rows(cap.frame(gray=False))[0] is None:
+    first = cap.frame(gray=False)
+    if find_rows(first)[0] is None:
         log.info("kekkai puzzle is not open - nothing to solve. Open a kekkai "
                  "first; this is not a success.")
         return None, 0
+
+    # Did this panel ALREADY have guesses in it when we arrived? It happens
+    # whenever a previous attempt was abandoned mid-puzzle, and it changes how
+    # much a first-guess panel closure is worth as evidence - see the guard
+    # below.
+    resumed = count_filled(first) > 0
+    if resumed:
+        log.info("resuming a puzzle that already has %d guess(es) of history",
+                 count_filled(first))
 
     for n in range(max_guesses):
         frame = cap.frame(gray=False)
@@ -433,6 +483,19 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
             # The panel closes the instant a guess is right, so this is success -
             # and it must be checked BEFORE reading digits, or we read a closed
             # panel, score 0.000 and report failure on a solved puzzle.
+            #
+            # BUT closure is only EVIDENCE of success, not proof, and it is at
+            # its weakest on the very first guess of a RESUMED panel. Observed
+            # live: a run reconnected to a puzzle that already had two guesses in
+            # its history, misread the node count, submitted five identical
+            # runes, the panel closed, and it reported "SOLVED in 1 guess" for a
+            # 1-in-7776 code. Corroborate with the seal-broken dialog, which a
+            # real solve always raises.
+            if n == 0 and resumed and not seal_broken(cap):
+                log.info("panel closed on the FIRST guess of a resumed puzzle "
+                         "and no seal-broken dialog appeared - treating that as "
+                         "the old panel being dismissed, NOT a solve")
+                return None
             log.info("panel closed after guess %d -> SOLVED: %s", n + 1,
                      ",".join(guess))
             return guess, n + 1
@@ -486,6 +549,45 @@ EDGE_SETTLE = 4.5
 MAP_CHANGE_DIFF = 0.18
 
 
+def seal_broken(cap, settle=1.2):
+    """Is the "You break the seal!" dialog on screen?
+
+    Corroboration for a solve. The dialog's acknowledge control is the same green
+    check the rest of the game uses, drawn at yet another size, so the search
+    sweeps scale like everywhere else.
+    """
+    from perceive import Template, find
+    time.sleep(settle)
+    g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+    t = Template("gc", os.path.join(ROOT, "tpl/mission_start.png"), threshold=0.80)
+    t.scales = [round(0.95 + i * 0.05, 2) for i in range(21)]
+    return find(g, t)[0].found
+
+
+def mission_over(cap, log=None):
+    """Is the mission finished — i.e. is there nothing left to hunt?
+
+    Checked between rounds, never mid-puzzle. Either anchor means the run is
+    done: the Success panel is the end of the mission, and the epilogue cutscene
+    only appears once the last seal is broken.
+    """
+    from perceive import Template, find
+    g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+    for name, thr in (("mission_success", 0.88), ("cutscene_continue", 0.80)):
+        p = os.path.join(ROOT, "tpl", f"{name}.png")
+        if not os.path.exists(p):
+            continue
+        t = Template(name, p, threshold=thr)
+        if name == "cutscene_continue":
+            t.scales = [round(0.9 + i * 0.05, 2) for i in range(9)]
+        m, c = find(g, t)
+        if m.found:
+            if log:
+                log.info("mission-over anchor %s (%.3f)", name, c)
+            return True
+    return False
+
+
 def hunt_and_solve(cap, actor, log, length=3, max_rounds=6, max_walks=10):
     """Find each kekkai in the scene, solve it, repeat.
 
@@ -496,6 +598,17 @@ def hunt_and_solve(cap, actor, log, length=3, max_rounds=6, max_walks=10):
     solved = 0
     heading = heading_from_spawn(cap.frame(gray=False), log)
     for rnd in range(max_rounds):
+        # STOP AS SOON AS THE MISSION IS OVER. Breaking the last seal ends the
+        # mission, and what follows is an epilogue cutscene and the Success
+        # panel - not another map to search. Without this check the hunt kept
+        # going after "Seals: 2 / 2", ran to a map edge that no longer existed,
+        # found a "seal" that was panel artwork, and logged "could not open the
+        # seal after 3 attempts" on a mission it had already won. Harmless here
+        # only because the clicks landed on a panel; the class of bug is
+        # clicking blindly on an unrecognised screen.
+        if mission_over(cap, log):
+            log.info("the mission has ended; %d seal(s) solved this run", solved)
+            return solved
         target = None
         for w in range(max_walks):
             frame = cap.frame(gray=False)

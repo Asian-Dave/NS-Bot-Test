@@ -61,11 +61,24 @@ def cdp_ready(port, timeout=1.5):
 
 
 def launch(url, profile_dir, port=9222, window=(1728, 994), browser=None,
-           extra_flags=(), reuse=True):
+           extra_flags=(), reuse=True, app_mode=False):
     """Start a dedicated browser instance and wait for CDP.
 
     If `reuse` and something is already serving CDP on `port`, attach to that
     instead of starting a second instance.
+
+    `app_mode` passes `--app=<url>` instead of the URL as a positional argument.
+    Chrome then opens a window with no tab strip, no omnibox and no bookmarks
+    bar - a plain application window. Combined with `engine/dock.py`, which
+    injects the control panel into the page itself, that is the whole of "a
+    native-looking bot window": the operator sees the game rendering at its own
+    framerate with the controls beside it, and nothing is being streamed.
+
+    Worth being clear about what this is NOT: it does not embed the game in some
+    other runtime. It cannot - Ruffle is WASM + WebGL, the session cookie lives
+    in this profile, and CDP is how we click. The reference bot's "native" shell
+    is Adobe AIR + CEF, which is a Chromium in a frame; this is the same trade
+    without the extra runtime.
     """
     if reuse and cdp_ready(port):
         # Alive, but it may have no pages left (window closed). Opening a target
@@ -110,7 +123,7 @@ def launch(url, profile_dir, port=9222, window=(1728, 994), browser=None,
         "--disable-renderer-backgrounding",
         "--disable-background-timer-throttling",
         *extra_flags,
-        url,
+        (f"--app={url}" if app_mode else url),
     ]
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

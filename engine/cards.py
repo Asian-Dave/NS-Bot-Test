@@ -233,7 +233,8 @@ class Board:
     def __init__(self, log, sat_gate=SAT_GATE, match_gate=MATCH_GATE):
         self.log = log
         self.seen = {}                  # pos -> signature
-        self.cleared = set()            # the GAME removed these
+        self.cleared = set()            # the GAME removed these, after we played them
+        self.vacant = set()             # empty slots - this board has fewer than N cards
         self.skipped = set()            # would not flip; taken out of rotation
         self.rejected = set()           # frozenset({i, j}) the game refused
         self.sat_gate = sat_gate
@@ -251,6 +252,9 @@ class Board:
 
     def _live(self):
         return [p for p in self.seen if p not in self.cleared]
+
+    def rejected_members(self):
+        return {i for pair in self.rejected for i in pair}
 
     def _ok(self, i, j):
         return frozenset((i, j)) not in self.rejected
@@ -290,7 +294,8 @@ class Board:
         two cells. That happened live - 831 reads, 80 s, the same two cards.
         """
         return [i for i in range(N) if i not in self.cleared
-                and i not in self.skipped and i not in self.seen]
+                and i not in self.vacant and i not in self.skipped
+                and i not in self.seen]
 
 
 class _FastActor:
@@ -403,11 +408,20 @@ def solve_live(cap, actor, log, timeout=80.0, save_crops=False,
                      "clicking through to whatever replaced it", i)
             return None, None, o
         if cell_state(f, i, o) == REMOVED:
-            # SELF-HEALING. The game already took this cell, whatever we thought.
-            # This is the backstop for a pair we wrongly recorded as refused:
-            # a mistake there costs one wasted click, not a poisoned board.
-            log.info("card %d is already gone - the board had taken it", i)
-            b.cleared.add(i)
+            # SELF-HEALING, and it covers two different situations.
+            #
+            # 1. A pair we wrongly recorded as refused was actually taken. The
+            #    mistake then costs one wasted click, not a poisoned board.
+            # 2. **THE BOARD IS NOT ALWAYS 20 CARDS.** Measured on "Another TP
+            #    Scroll": rows 1 and 4 were empty slots from the start and only
+            #    the middle ten cells were in play. Those slots must not be
+            #    counted as pairs WE cleared, so they go to `vacant`.
+            if i in b.seen or i in b.rejected_members():
+                log.info("card %d is already gone - the board had taken it", i)
+                b.cleared.add(i)
+            else:
+                log.info("cell %d is an empty slot, not a card", i)
+                b.vacant.add(i)
             b.seen.pop(i, None)
             return False, f, o
         actor.click_pixel(*pos_xy(i), why=f"flip card {i}")
@@ -569,10 +583,13 @@ def solve_live(cap, actor, log, timeout=80.0, save_crops=False,
             log.info("cards %d,%d are not a pair - both faces remembered", a, c)
 
     el = time.time() - t0
+    in_play = N - len(b.vacant)
     log.info("memory game: %d/%d cells cleared BY THE GAME, %d faces known, "
-             "%d pair(s) refused, %d skipped, %.1fs (%d reads, %.0f ms each)%s",
-             len(b.cleared), N, len(b.seen), len(b.rejected), len(b.skipped),
-             el, reads["n"], 1000 * reads["t"] / max(1, reads["n"]),
+             "%d pair(s) refused, %d skipped, %d empty slot(s), %.1fs "
+             "(%d reads, %.0f ms each)%s",
+             len(b.cleared), in_play, len(b.seen), len(b.rejected),
+             len(b.skipped), len(b.vacant), el, reads["n"],
+             1000 * reads["t"] / max(1, reads["n"]),
              f" (ABORTED: {aborted['why']})" if aborted["why"] else "")
     return len(b.cleared) // 2, el
 
