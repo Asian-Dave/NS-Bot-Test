@@ -161,6 +161,9 @@ class MissionRunner:
         # a short walk settles quickly but a map change needs ~4.5s, and scanning
         # mid-transition reads as "nothing here".
         self.traverse_settle = m.get("traverse_settle_s", 5.0)
+        # Between dialogue clicks. Long enough for the next screen to draw,
+        # short enough that a five-screen cutscene is not a five-second wait.
+        self.dialogue_settle = m.get("dialogue_settle_s", 0.45)
         self._heading = m.get("traverse_heading", "right")
         self.traversal_click = m.get("traversal_click")   # (x, y) fraction of canvas
 
@@ -344,9 +347,7 @@ class MissionRunner:
                 continue
 
             if state == "cutscene_continue":
-                self.stats["cutscenes"] += 1
-                if payload is not None and getattr(payload, "center", None):
-                    self.actor.click_pixel(*payload.center, why="advance cutscene")
+                self._skip_dialogue(payload)
                 continue
 
             if state == "mission_start":
@@ -527,6 +528,46 @@ class MissionRunner:
     # pinned viewport spans x 760..2680, and the walkable ground is at y 880.
     CANVAS_X0, CANVAS_X1, GROUND_Y = 760, 2680, 880
     EDGE_MARGIN = 40
+
+    def _skip_dialogue(self, payload, max_screens=25):
+        """Click through a whole run of dialogue in one go.
+
+        A cutscene is usually SEVERAL screens, and handling one click per pass of
+        the main loop paid a full classify() for each - and classify is the
+        expensive part, not the click. Draining the run here keeps the cost to
+        one cheap template check per screen instead.
+
+        It stops the moment the dialogue does: on anything that is no longer a
+        cutscene, so combat, a panel or traversal takes over immediately rather
+        than after another full cycle. `max_screens` is a runaway guard, not an
+        expectation.
+        """
+        from perceive import find
+        cond = self.conditions.get("cutscene_continue")
+        tpl = self.templates.get("cutscene_continue")
+        n = 0
+        while n < max_screens:
+            if self.controls is not None and not self.controls.wait_if_paused():
+                return n
+            if payload is not None and getattr(payload, "center", None):
+                self.actor.click_pixel(*payload.center,
+                                       why=f"advance dialogue {n + 1}")
+            elif tpl is not None:
+                break
+            n += 1
+            self.stats["cutscenes"] += 1
+            time.sleep(self.dialogue_settle)
+            bgr = self.capture.frame(gray=False)
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            # Cheap check FIRST: is another dialogue screen up? Only if not do we
+            # hand back, so the expensive full classify runs once per run of
+            # dialogue rather than once per screen.
+            payload = cond.check(bgr, gray) if cond is not None else None
+            if not payload:
+                break
+        if n:
+            self.log.info("mission: advanced %d dialogue screen(s)", n)
+        return n
 
     def _traverse(self, frame_bgr):
         """Walk. Encounters trigger on MOVEMENT, so standing still stalls a

@@ -161,69 +161,68 @@ def locked_rows(frame_gray, log=None):
     return [p[1] for p in _find_all(frame_gray, t, max_hits=6)]
 
 
-def pick_highest(actor, cap, log, max_pages=12, settle=2.4):
-    """Start the highest-level startable mission in the current grade.
+def pick_highest(actor, cap, log, max_pages=15, settle=2.4):
+    """Start the highest-level mission the character can actually play.
 
-    Rows run low level to high, three per page, so the highest one we can
-    actually play is the LAST row that is not padlocked. This pages to the end,
-    remembering the last unlocked row it saw, and comes back to it.
+    THE RULE, as the operator described it: page forward until a page shows a
+    padlocked mission, then take the LAST unlocked row seen. If every row on a
+    page is locked, go back a page and take the last one there.
+
+    That works because the rows run low level to high, so the first padlock is
+    the character's level ceiling and everything past it is locked too. Paging
+    to the very end instead would be pointless work - Grade A is seven pages.
+
+    PAGING IS CONFIRMED BY THE ROWS CHANGING, not by the arrow. The next-page
+    arrow does have distinguishable enabled and disabled renderings - 1.000 vs
+    0.806 - but that margin proved unreliable in practice: it called page 2 of a
+    SEVEN page Grade A list the last one. Whether the list actually advanced is
+    the thing we care about, so measure that instead.
     """
-    nxt = _tpl("page_next", 0.85)
-    best = None                      # (page, y)
-    pages = 0
-    for page in range(max_pages):
+    nxt, prv = _tpl("page_next", 0.85), _tpl("page_prev", 0.85)
+    best = None                      # (page index, row y)
+    page = 0
+    while page < max_pages:
         frame = cap.frame(gray=False)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         rows = tp.find_mission_rows(frame)
         locked = locked_rows(gray, log)
         if locked is None:
             return None
-        free = [y for y in rows
-                if not any(abs(y - ly) < 60 for ly in locked)]
+        free = [y for y in rows if not any(abs(y - ly) < 60 for ly in locked)]
         log.info("page %d: %d row(s), %d locked, %d startable",
                  page + 1, len(rows), len(locked), len(free))
         if free:
             best = (page, free[-1])
-        pages = page
-        m, c = find(gray, nxt)
-        if not m.found:
-            log.info("no next page (arrow %.3f) - this is the last one", c)
+        if locked:
+            log.info("a padlock on this page means we are at our level ceiling; "
+                     "stopping here")
             break
-        # Every row locked from here on means we are past our level; no point
-        # paging further.
-        if rows and not free and best is not None:
-            log.info("every row on this page is above our level; stopping here")
+        m, c = find(gray, nxt) if nxt is not None else (None, 0.0)
+        if m is None or not m.found:
+            log.info("no next-page arrow (%.3f)", c)
             break
-        before = rows
         actor.click_pixel(*m.center, why=f"next page ({c:.3f})")
         time.sleep(1.6)
-        # Belt and braces. The arrow's enabled and disabled renderings differ by
-        # only 1.000 vs 0.806, which is a real margin but not a wide one, and a
-        # paging loop that cannot tell it has stopped advancing spins forever.
-        # If the rows did not change, we did not turn a page.
-        after = tp.find_mission_rows(cap.frame(gray=False))
-        if after == before and page > 0:
-            log.info("the page did not change; treating this as the last one")
+        if tp.find_mission_rows(cap.frame(gray=False)) == rows:
+            log.info("the rows did not change; that was the last page")
             break
+        page += 1
 
     if best is None:
         log.info("no startable mission in this grade - every row is locked")
         return None
-    page, y = best
-    # Page back to where it was.
-    if page < pages:
-        prv = _tpl("page_prev", 0.85)
-        for _ in range(pages - page):
-            gray = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
-            m, c = find(gray, prv) if prv is not None else (None, 0)
-            if m is None or not m.found:
-                log.info("no previous-page arrow; cannot return to page %d",
-                         page + 1)
-                return None
-            actor.click_pixel(*m.center, why="previous page")
-            time.sleep(1.4)
-    log.info("starting the highest startable mission (page %d, y=%d)",
-             page + 1, y)
+    want_page, y = best
+    for _ in range(page - want_page):
+        gray = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+        m, c = find(gray, prv) if prv is not None else (None, 0.0)
+        if m is None or not m.found:
+            log.info("no previous-page arrow; cannot get back to page %d",
+                     want_page + 1)
+            return None
+        actor.click_pixel(*m.center, why="previous page")
+        time.sleep(1.6)
+    log.info("starting the highest unlocked mission (page %d, y=%d)",
+             want_page + 1, y)
     return tp.start_row(actor, cap, log, y, settle=settle)
 
 
