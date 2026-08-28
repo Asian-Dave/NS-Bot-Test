@@ -145,3 +145,30 @@ class Controls:
                 except Exception:
                     pass
             time.sleep(poll)
+
+
+class fast_pacing:
+    """Temporarily tighten an Actor's click pacing, then restore it.
+
+    `Actor`'s defaults sleep 0.18-0.55 s before and 0.4-1.1 s after every click -
+    up to 1.65 s each. That randomised pacing is anti-robotic cosmetics for
+    wandering the village, and it is the wrong trade anywhere the game is waiting
+    on us: in a battle it is most of the delay between "it is our turn" and the
+    action actually going out, which reads as the bot being slow to think.
+
+    Used by the minigame solvers and the battle runner. `cards.py` keeps its own
+    copy of this idea deliberately - it is the module the operator asked not to
+    disturb.
+    """
+
+    def __init__(self, actor, click=(0.02, 0.06), post=(0.02, 0.06)):
+        self.a, self.click, self.post = actor, click, post
+
+    def __enter__(self):
+        self._save = (self.a.click_delay, self.a.post_click)
+        self.a.click_delay, self.a.post_click = self.click, self.post
+        return self.a
+
+    def __exit__(self, *exc):
+        self.a.click_delay, self.a.post_click = self._save
+        return False

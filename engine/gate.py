@@ -163,8 +163,12 @@ class Gate:
     bot you cannot turn off.
     """
 
-    def __init__(self, capture, log, controls=None, poll_interval=0.25):
+    def __init__(self, capture, log, controls=None, poll_interval=0.10):
         self.capture, self.log, self.controls = capture, log, controls
+        # 0.10, not 0.25. The interval was set when a single combat check cost
+        # seconds, so a longer sleep was free; with the command-bar geometry
+        # cached that check is 1.6 ms and the capture (~0.14 s) dominates, so the
+        # sleep is now pure added latency between "it is our turn" and acting.
         self.poll_interval = poll_interval
 
     def _frames(self, clip=None):

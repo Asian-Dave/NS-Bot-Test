@@ -149,6 +149,14 @@ class BattleRunner:
     # -- the loop ------------------------------------------------------------
     def run(self):
         """Returns (outcome, info dict)."""
+        # Tighten click pacing for the duration of the fight. The Actor's
+        # human-like defaults sleep up to 1.65 s per click, which in a battle is
+        # most of the gap between the turn gate firing and the action going out.
+        from act import fast_pacing
+        with fast_pacing(self.actor):
+            return self._run()
+
+    def _run(self):
         rounds = 0
         acted = 0
         while rounds < self.max_rounds:
