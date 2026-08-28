@@ -388,6 +388,8 @@ class MissionRunner:
         return MissionOutcome.STALLED, self.stats
 
     # -- pieces --------------------------------------------------------------
+    _check_scales = []          # scales that have worked, most recent first
+
     def _click_green_check(self, frame_gray, why):
         """Dismiss a result panel by its GREEN CHECK, not by clicking the panel.
 
@@ -421,9 +423,28 @@ class MissionRunner:
             return False
         saved_scales, saved_thr = tpl.scales, tpl.threshold
         try:
-            tpl.scales = [round(0.95 + i * 0.05, 2) for i in range(21)]  # 0.95..1.95
             tpl.threshold = 0.85
-            m, conf = find(frame_gray, tpl)
+            # TRY THE SCALES THAT HAVE ALREADY WORKED, THEN THE FULL SWEEP.
+            # The full 21-scale sweep costs 1,538 ms against 62 ms at a known
+            # scale, and it was being paid every time a panel was dismissed -
+            # which is most of why the Victory screen felt slow. There are only
+            # three sizes in this game (detail 1.00, Victory ~1.20, Success
+            # 1.84), so after the first sighting of each the cache answers.
+            full = [round(0.95 + i * 0.05, 2) for i in range(21)]   # 0.95..1.95
+            m = conf = None
+            for cand in (self._check_scales, full):
+                if not cand:
+                    continue
+                tpl.scales = list(cand)
+                m, conf = find(frame_gray, tpl)
+                if m.found:
+                    sc = getattr(m, "scale", None)
+                    if sc is not None and sc not in self._check_scales:
+                        self._check_scales.insert(0, sc)
+                        del self._check_scales[3:]
+                        self.log.info("mission: green check found at scale %s "
+                                      "(cached for next time)", sc)
+                    break
             if not m.found:
                 self.log.warning("mission: %s up but green check not located "
                                  "(best %.3f); not guessing a click", why, conf)

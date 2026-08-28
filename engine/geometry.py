@@ -172,10 +172,66 @@ class BattleGeometry:
         # the fast path fails for any reason the full sweep still runs, so this
         # is an accelerator and never a new way to be wrong: the two-button gate
         # and the pitch cross-check below are applied identically either way.
+        # NO HINT YET? Try a NARROW sweep over the lower part of the frame
+        # before paying for the full one. The full sweep is 90 scales across the
+        # whole frame and costs ~12 s, and with no hint cached that was being
+        # paid on EVERY non-combat frame - a cutscene classified in 12.9 s, which
+        # is why dialogue felt unclickable.
+        #
+        # The viewport is pinned, so the real scale is ~1.0 (measured 1.000 on
+        # the live client); the 0.30..1.19 range exists for older capture
+        # geometries. The command bar also always sits in the lower half of the
+        # canvas. Narrowing both is enough to find it cheaply, and the full sweep
+        # remains as the fallback so an unexpected geometry is still handled.
+        if scales is None and cls._hint is None:
+            # The band must not CUT a button in half. Slicing at h/2 clipped
+            # dodge, whose box spans 824..910 on a 1678-tall frame, and it
+            # scored 0.406 instead of 0.986 - the same mistake as a clip that
+            # cuts an anchor. Start well above the bar and keep the margin.
+            h = frame_gray.shape[0]
+            y0 = int(h * 0.40)
+            band = frame_gray[y0:, :]
+            ch = _best(band, charge_tpl, cls.FAST_SCALES)
+            do = _best(band, dodge_tpl, cls.FAST_SCALES)
+            if (ch is not None and do is not None
+                    and ch[0] >= min_conf and do[0] >= min_conf):
+                cf, sc, (cx, cy) = ch
+                df, _, (dx, dy) = do
+                cy += y0
+                dy += y0
+                expect = CMD_SIDE * ((sc + do[1]) / 2.0)
+                if expect > 0:
+                    err = max(abs((dx - cx) - expect),
+                              abs((cy - dy) - expect)) / expect
+                    if err <= pitch_tolerance:
+                        cls._hint = {"scale": (sc + do[1]) / 2.0,
+                                     "charge": (cx, cy), "dodge": (dx, dy),
+                                     "pitch_tolerance": pitch_tolerance}
+                        cls._misses = 0
+                        return cls((cx, cy), cls._hint["scale"],
+                                   confidence=min(cf, df))
+            cls._misses = getattr(cls, "_misses", 0) + 1
+            if cls._misses < cls.REACQUIRE_AFTER:
+                return None
+            cls._misses = 0
+
         if scales is None and cls._hint is not None:
             got = cls._from_hint(frame_gray, charge_tpl, dodge_tpl, min_conf)
             if got is not None:
+                cls._misses = 0
                 return got
+            # THE FAST CHECK FAILING USUALLY MEANS THE BAR IS ABSENT, NOT MOVED.
+            # Falling straight through to the full sweep made every NON-combat
+            # frame cost 8 seconds - so cutscenes, victory panels and traversal
+            # each paid a full 90-scale sweep to be told what they already were.
+            # That is most of why dismissing a panel felt slow.
+            #
+            # So a miss is taken at face value, and the expensive re-acquire is
+            # only done occasionally, in case the layout genuinely moved.
+            cls._misses = getattr(cls, "_misses", 0) + 1
+            if cls._misses < cls.REACQUIRE_AFTER:
+                return None
+            cls._misses = 0
 
         scales = scales or [round(0.30 + i * 0.01, 2) for i in range(90)]
         ch = _best(frame_gray, charge_tpl, scales)
@@ -201,7 +257,11 @@ class BattleGeometry:
 
     # -- the fast path -------------------------------------------------------
     _hint = None            # {scale, charge, dodge} from the last full locate
+    _misses = 0             # consecutive fast-path misses
     HINT_WINDOW = 140       # px around the remembered button centres
+    REACQUIRE_AFTER = 25    # misses before paying for a full sweep again
+    # The pinned viewport puts the real scale at ~1.0; measured 1.000 live.
+    FAST_SCALES = [0.90, 0.95, 1.00, 1.05, 1.10]
 
     @classmethod
     def forget(cls):
