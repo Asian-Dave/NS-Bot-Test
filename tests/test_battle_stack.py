@@ -1374,6 +1374,85 @@ def test_restriction_short_circuits_the_rotation():
     check(seen == [order[0]], f"and tries only that one action ({seen})")
 
 
+def test_battle_between_turns_is_not_scenery():
+    """A battle waiting for its turn must never be walked through.
+
+    Between turns the game draws NO command bar, so every combat gate is
+    silent - measured on a live frame with three Lv64 enemies on screen:
+    charge 0.371, dodge 0.328, attack 0.307. `in_mission` therefore returned
+    None, the resume ladder called the screen unknown, and after three unknowns
+    the runner "walked", clicking the map edge in the middle of a fight. From
+    outside that looks exactly like the bot skipping the enemy.
+
+    `action_flag` is the only anchor that survives the between-turns gap.
+    """
+    print("\nbattle between turns is not scenery")
+    from perceive import find
+    import farm, bot as botmod
+    import json as _json
+    cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
+    tpls = botmod.load_templates(cfg, LOG)
+
+    battle = cv2.imread(os.path.join(ROOT, "ref/auto/mission/battle_between_turns.png"))
+    check(battle is not None, "the between-turns battle frame is committed")
+    if battle is None:
+        return
+    g = cv2.cvtColor(battle, cv2.COLOR_BGR2GRAY)
+
+    # Every command gate really is silent here - that is the whole point.
+    for name in ("charge_btn", "dodge_btn", "attack_btn"):
+        c = find(g, tpl(name))[1]
+        check(c < 0.70, f"{name} is silent between turns ({c:.3f} < 0.70)")
+    c = find(g, tpl("action_flag"))[1]
+    check(c >= 0.85, f"action_flag still fires between turns ({c:.3f} >= 0.85)")
+
+    check(farm.in_mission(battle, tpls) is not None,
+          "in_mission recognises a battle with no command bar")
+    check(farm.looks_like_mission_scene(battle, tpls) is False,
+          "and it is NOT treated as walkable scenery")
+
+    # A real traversal screen must still be walkable, or this trades one stuck
+    # state for another.
+    trav = cv2.imread(os.path.join(ROOT, "ref/auto/mission/traverse_shrub_decoy.png"))
+    if trav is not None:
+        check(farm.looks_like_mission_scene(trav, tpls) is True,
+              "a real traversal screen is still walkable")
+
+
+def test_character_finder_rejects_scenery():
+    """Saturated SCENERY must not be mistaken for the character.
+
+    A yellow-green shrub on a rock at the map edge measured 48x77 with area
+    2534, beating the real character's 79x123 / area 1585 on AREA - so picking
+    the largest blob located the "character" at the same pixel (779, 917) every
+    run, always concluded "head right" because that x is left of centre, ran
+    into the edge it was already standing on, and logged 8 dead ends while an
+    enemy stood in plain sight.
+
+    Height is what separates them: characters measured 106, 107 and 123 tall
+    across three maps; the shrub is 77. A bush is short and broad, a ninja is
+    tall and narrow.
+    """
+    print("\ncharacter finder rejects saturated scenery")
+    import mission as mission_mod
+    R = mission_mod.MissionRunner
+    centre = (R.CANVAS_X0 + R.CANVAS_X1) // 2
+
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/mission/traverse_shrub_decoy.png"))
+    check(f is not None, "the shrub-decoy frame is committed")
+    if f is None:
+        return
+    p = R.find_character(f)
+    check(p is not None, f"a character is found ({p})")
+    if p:
+        check(p[0] > 2000,
+              f"it is the character at the RIGHT edge (x={p[0]}), not the "
+              f"shrub at x=779")
+        check(("right" if p[0] < centre else "left") == "left",
+              "so the heading is LEFT - toward the enemy, not into the edge "
+              "it is already standing on")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1386,7 +1465,9 @@ def main():
                test_cold_command_bar_probe_is_budgeted,
                test_focus_survives_a_reload,
                test_character_finder_drives_heading,
-               test_restriction_short_circuits_the_rotation):
+               test_restriction_short_circuits_the_rotation,
+               test_battle_between_turns_is_not_scenery,
+               test_character_finder_rejects_scenery):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

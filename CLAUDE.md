@@ -563,6 +563,45 @@ turn starts the rotation again from the top. `battle.restricted_after` tunes it.
 Note this is the *cheap* direction of the trade. Probing more costs 6 s a go and
 tells us nothing new; probing less costs at most one turn spent dodging.
 
+### A battle BETWEEN TURNS has no command bar — gate combat on `action_flag`
+
+This is the third instance of "a negative definition needs a positive veto",
+and the most damaging one, because what it licensed was walking during a fight.
+
+Between turns the game draws no command bar at all. Measured on a live frame
+with three Lv64 enemies on screen, name plates and HP bars drawn, and the turn
+marker still travelling:
+
+| template | between turns | with the bar |
+|---|---|---|
+| `charge_btn` | 0.371 | 0.867 |
+| `dodge_btn` | 0.328 | 0.986 |
+| `attack_btn` | 0.307 | 0.989 |
+| **`action_flag`** | **0.897** | **0.993** |
+
+`action_flag` reads 0.223..0.255 on traversal, the lobby and the mission room,
+so it separates by 0.64 and is the ONLY anchor that survives the between-turns
+gap. It is now in both `IN_MISSION` and `NOT_IN_MISSION`.
+
+Before that, `in_mission` returned None mid-battle, the ladder called the screen
+unknown, and after three unknowns the runner walked — clicking the map edge
+while three enemies waited. From outside that looks precisely like the bot
+"skipping the enemy".
+
+### Saturated SCENERY beats the character on AREA — select by HEIGHT
+
+The saturation finder above must not pick the biggest blob. A yellow-green shrub
+on a rock at the map edge measured **48x77, area 2534**, beating the real
+character's **79x123, area 1585**. So the bot "found" its character at the same
+pixel (779, 917) every single run, always concluded "head right" because that x
+is left of centre, ran into the edge it was already standing on, and logged
+**8 dead ends** while an enemy stood in plain sight.
+
+Measured character heights are **106, 107, 123** across three maps against the
+shrub's 77, so height separates cleanly where area inverts the answer: a bush is
+short and broad, a ninja is tall and narrow. `CHAR_MIN_H` is 95 and the TALLEST
+qualifying blob wins.
+
 ## The single biggest lesson
 
 **Never judge a bar, or "no change", by eye. Measure it.**

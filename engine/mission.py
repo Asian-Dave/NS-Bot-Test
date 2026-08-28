@@ -589,6 +589,10 @@ class MissionRunner:
     # ZERO on six frames where the game failed to draw it and on the lobby.
     CHAR_SAT = 150
     CHAR_BAND = (200, 950)          # y: below the HUD, above the NPC rail
+    # Measured character heights: 106, 107, 123 across three maps. The tallest
+    # saturated scenery that has fooled this is a 77px shrub, so 95 sits in the
+    # gap with room on both sides.
+    CHAR_MIN_H = 95
 
     @classmethod
     def find_character(cls, frame_bgr):
@@ -609,12 +613,24 @@ class MissionRunner:
         for i in range(1, n):
             a = st[i, cv2.CC_STAT_AREA]
             bw, bh = st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
-            if not (600 <= a <= 12000) or bh < 60:
+            if not (600 <= a <= 12000) or bh < cls.CHAR_MIN_H:
                 continue
             if bw / max(1, bh) > 0.95:          # a character is TALL
                 continue
-            if best is None or a > best[0]:
-                best = (a, int(ce[i][0]) + x0, int(ce[i][1]) + y0)
+            # TALLEST WINS, NOT LARGEST. Saturated SCENERY is the competition -
+            # a yellow-green shrub on a rock at the map edge measured 48x77 with
+            # area 2534, which BEAT the real character's 79x123 / area 1585 on
+            # area alone. The bot then "found" the character at the same pixel
+            # (779, 917) every single run, always concluded "head right" because
+            # that x is left of centre, ran into the edge it was already at, and
+            # logged 8 dead ends without ever reaching the enemy standing in
+            # plain sight.
+            #
+            # Height is what actually separates them: measured character heights
+            # are 106, 107 and 123 across three maps, while the shrub is 77.
+            # A bush is short and broad; a ninja is tall and narrow.
+            if best is None or bh > best[0]:
+                best = (bh, int(ce[i][0]) + x0, int(ce[i][1]) + y0)
         return (best[1], best[2]) if best else None
 
     @staticmethod

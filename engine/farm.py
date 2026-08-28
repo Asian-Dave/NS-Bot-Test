@@ -428,7 +428,22 @@ def farm(cap, actor, log, cfg, controls=None, repeat=0):
 # Mission-in-progress anchors. All are high-margin single templates or the
 # two-button command-bar gate, so this does not repeat the mistake of using a
 # blob search to decide where we are.
-IN_MISSION = ("mission_success", "result_panel", "cutscene_continue")
+# `action_flag` is here because a battle BETWEEN TURNS has no command bar at
+# all. Measured on a live frame with three Lv64 enemies on screen and the turn
+# marker still travelling: charge 0.371, dodge 0.328, attack 0.307 - every
+# command gate silent - while `action_flag` read 0.897. With the command bar as
+# the only combat signal, `in_mission` returned None, the resume ladder called
+# the screen unknown, and after three unknowns the runner "walked" - clicking
+# the map edge in the middle of a fight. That is what "it skipped the enemy"
+# looked like from outside.
+#
+#     action_flag   combat 0.897 (no bar) .. 0.993 (bar)
+#                   traversal / lobby / mission room 0.223 .. 0.255
+#
+# A margin of 0.64, and it is the ONLY anchor that survives the between-turns
+# gap.
+IN_MISSION = ("mission_success", "result_panel", "cutscene_continue",
+              "action_flag")
 
 
 def in_mission(frame, templates):
@@ -478,7 +493,7 @@ def in_mission(frame, templates):
 NOT_IN_MISSION = ("lobby_rail_fortune", "char_slot_level", "play_btn",
                   "logged_out", "grade_tab", "mission_room",
                   "page_next", "page_prev", "mission_locked",
-                  "list_back_arrow")
+                  "list_back_arrow", "action_flag")
 
 
 def looks_like_mission_scene(frame, templates):
