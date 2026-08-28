@@ -161,6 +161,37 @@ def locked_rows(frame_gray, log=None):
     return [p[1] for p in _find_all(frame_gray, t, max_hits=6)]
 
 
+def rows_signature(frame, rows, w=48, h=8):
+    """A cheap fingerprint of what the rows SAY, for detecting a page turn.
+
+    Comparing row POSITIONS cannot work: the three rows sit at the same y on
+    every page, so the positions are identical whatever page you are on. That
+    made the paging guard fire immediately and call page 1 of a seven-page list
+    the last one. The mission NAMES are what changes, so the title bars are
+    what has to be compared.
+    """
+    if not rows:
+        return None
+    parts = []
+    fh, fw = frame.shape[:2]
+    for y in rows:
+        y0, y1 = max(0, y - 18), min(fh, y + 18)
+        x0, x1 = max(0, 1700), min(fw, 2500)
+        band = frame[y0:y1, x0:x1]
+        if band.size == 0:
+            return None
+        g = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
+        parts.append(cv2.resize(g, (w, h), interpolation=cv2.INTER_AREA))
+    return np.vstack(parts)
+
+
+def same_page(a, b, tol=6.0):
+    """Are these two row fingerprints the same page?"""
+    if a is None or b is None or a.shape != b.shape:
+        return False
+    return float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean()) <= tol
+
+
 def pick_highest(actor, cap, log, max_pages=15, settle=2.4):
     """Start the highest-level mission the character can actually play.
 
@@ -178,7 +209,13 @@ def pick_highest(actor, cap, log, max_pages=15, settle=2.4):
     SEVEN page Grade A list the last one. Whether the list actually advanced is
     the thing we care about, so measure that instead.
     """
-    nxt, prv = _tpl("page_next", 0.85), _tpl("page_prev", 0.85)
+    # The arrow is used to LOCATE the click, not to decide whether a next page
+    # exists. Its enabled and disabled renderings do differ (1.000 vs 0.806 on
+    # the frames I cut it from), but that does not hold across pages: on page 2
+    # of a SEVEN page list it scored 0.806 and the paging stopped dead. Whether
+    # the list actually advanced is the reliable signal, and `rows_signature`
+    # measures exactly that - so the threshold here is deliberately loose.
+    nxt, prv = _tpl("page_next", 0.70), _tpl("page_prev", 0.70)
     best = None                      # (page index, row y)
     page = 0
     while page < max_pages:
@@ -199,12 +236,15 @@ def pick_highest(actor, cap, log, max_pages=15, settle=2.4):
             break
         m, c = find(gray, nxt) if nxt is not None else (None, 0.0)
         if m is None or not m.found:
-            log.info("no next-page arrow (%.3f)", c)
+            log.info("no next-page arrow at all (%.3f) - stopping", c)
             break
+        before = rows_signature(frame, rows)
         actor.click_pixel(*m.center, why=f"next page ({c:.3f})")
         time.sleep(1.6)
-        if tp.find_mission_rows(cap.frame(gray=False)) == rows:
-            log.info("the rows did not change; that was the last page")
+        nf = cap.frame(gray=False)
+        after = rows_signature(nf, tp.find_mission_rows(nf))
+        if same_page(before, after):
+            log.info("the mission names did not change; that was the last page")
             break
         page += 1
 
