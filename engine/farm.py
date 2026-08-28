@@ -187,14 +187,24 @@ def pick_highest(actor, cap, log, max_pages=12, settle=2.4):
         pages = page
         m, c = find(gray, nxt)
         if not m.found:
+            log.info("no next page (arrow %.3f) - this is the last one", c)
             break
         # Every row locked from here on means we are past our level; no point
         # paging further.
         if rows and not free and best is not None:
             log.info("every row on this page is above our level; stopping here")
             break
+        before = rows
         actor.click_pixel(*m.center, why=f"next page ({c:.3f})")
         time.sleep(1.6)
+        # Belt and braces. The arrow's enabled and disabled renderings differ by
+        # only 1.000 vs 0.806, which is a real margin but not a wide one, and a
+        # paging loop that cannot tell it has stopped advancing spins forever.
+        # If the rows did not change, we did not turn a page.
+        after = tp.find_mission_rows(cap.frame(gray=False))
+        if after == before and page > 0:
+            log.info("the page did not change; treating this as the last one")
+            break
 
     if best is None:
         log.info("no startable mission in this grade - every row is locked")
