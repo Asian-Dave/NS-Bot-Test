@@ -267,7 +267,19 @@ _BOOTSTRAP = r"""
     el.querySelectorAll("[id^=v_]").forEach(n => { V[n.id] = n; });
     el.querySelector('[data-cmd="stop"]').classList.add("danger");
     el.querySelector('[data-cmd="quit"]').classList.add("danger");
-    (s.tasks || []).forEach(t => {
+  };
+
+  // The task buttons are filled in SEPARATELY from the skeleton, and re-filled
+  // whenever the list changes. The skeleton is built on the first render, and
+  // the first render comes from the bootstrap with an EMPTY state object - so
+  // building the task buttons there produced an empty Task section that nothing
+  // ever repopulated. Keyed on the task list so this costs nothing per cycle.
+  const fillTasks = (tasks) => {
+    const key = (tasks || []).map(t => t.key).join(",");
+    if (!V.v_tasks || V.v_tasks.dataset.key === key) return;
+    V.v_tasks.dataset.key = key;
+    V.v_tasks.innerHTML = "";
+    (tasks || []).forEach(t => {
       const b = document.createElement("button");
       b.dataset.cmd = "task"; b.dataset.arg = t.key; b.textContent = t.label;
       V.v_tasks.appendChild(b);
@@ -291,6 +303,7 @@ _BOOTSTRAP = r"""
     if (!el) return "missing";
     window.__nsbotState = s;
     if (!V.v_state) skeleton(el, s);
+    fillTasks(s.tasks);
 
     const mode = s.mode || "idle";
     setText("v_pill", mode,
