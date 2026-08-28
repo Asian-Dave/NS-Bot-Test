@@ -966,6 +966,28 @@ sacrifices the NPC rail at the bottom, which nothing here needs.
 and the resume ladder alternates the scroll before declaring a frame
 unrecognised.
 
+### Focus mode must be read from the PAGE, not remembered
+
+A reload does not remove the panel — `Page.addScriptToEvaluateOnNewDocument`
+re-injects it onto the new document — so the dock PRESENCE check still passes
+while the fresh document is **not focused**. `Runner.focus_on` is a Python-side
+belief, and it stayed True across the reload, so the early return meant focus was
+never re-applied. Measured right after a Relog: `__nsbotFocusOn` false and
+`scrollY` **301**, which is precisely the drift this file warns about — the game
+is 839 CSS px tall in a 720 px viewport, so 119 px is hidden and the scroll picks
+which.
+
+`ensure_focus` now reads `__nsbotFocusOn` each cycle (one cheap evaluate) and
+applies focus only when the PAGE says it is off. That keeps the convergence
+property that matters: re-injection alone never triggers a re-apply, which is
+what used to make the game jump around and the state read "unknown".
+
+**The general rule, and this is the third instance of it in this project:** any
+cached belief about page state — the no-click zone, the focus flag, a geometry
+hint — is invalidated by a navigation, and the cheap fix is to ask the page
+rather than to remember. A guard that defends where something *used to be* is
+worse than no guard, because it reads as protection.
+
 ### The HUD anchor template included the COUNTER — re-cut it
 
 `tp_seal_hud` was cut from a board reading "Skill : 1 / 4", digits included. The

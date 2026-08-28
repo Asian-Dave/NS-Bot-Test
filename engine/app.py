@@ -542,14 +542,40 @@ class Runner:
         no game to focus on, and hiding the login page would leave the operator
         staring at nothing.
         """
-        if self.focus_on and not self.focus_aligned:
-            # One re-align after the layout has settled. Converges and stops.
-            try:
-                if self.dock.align() in ("realigned", "aligned"):
-                    self.focus_aligned = True
-            except Exception:
-                pass
-        if not self.focus_wanted or self.focus_on:
+        if not self.focus_wanted:
+            return
+        # ASK THE PAGE, DO NOT TRUST THE CACHED FLAG. `focus_on` is a Python-side
+        # belief and a reload silently invalidates it: the panel re-injects
+        # itself on the new document (addScriptToEvaluateOnNewDocument), so the
+        # presence check `ensure_dock` does still passes, while the fresh
+        # document is NOT focused. `focus_on` stayed True from before the reload
+        # and the early return below meant focus was never re-applied - measured
+        # after a Relog: `__nsbotFocusOn` false and `scrollY` 301, i.e. the game
+        # had drifted out of the viewport exactly as this file warns.
+        #
+        # Reading the real state is one cheap evaluate and it also keeps the
+        # convergence property that matters: focus is re-applied only when the
+        # PAGE says it is off, never merely because we re-injected, which is what
+        # previously made the game jump around and the state read "unknown".
+        try:
+            live = self.dock.focus_state()
+        except (OSError, CDPError) as e:
+            raise Disconnected(str(e))
+        except Exception:
+            live = self.focus_on
+        if live != self.focus_on:
+            # The document changed under us; the one-shot align owes us a pass.
+            self.focus_aligned = False
+        self.focus_on = bool(live)
+
+        if self.focus_on:
+            if not self.focus_aligned:
+                # One re-align after the layout has settled. Converges and stops.
+                try:
+                    if self.dock.align() in ("realigned", "aligned"):
+                        self.focus_aligned = True
+                except Exception:
+                    pass
             return
         try:
             if not self.dock.game_ready():

@@ -1172,6 +1172,80 @@ def test_cold_command_bar_probe_is_budgeted():
           f"({warm:.2f}s vs {cold:.2f}s)")
 
 
+def test_focus_survives_a_reload():
+    """Focus mode must come back by itself after the page reloads.
+
+    `focus_on` is a Python-side belief and a reload silently invalidates it: the
+    panel re-injects onto the new document, so the dock PRESENCE check still
+    passes while the fresh document is not focused. The old code early-returned
+    on the stale flag and never re-applied - measured live after a Relog,
+    `__nsbotFocusOn` false with `scrollY` 301, i.e. the game drifted out of the
+    viewport. `ensure_focus` reads the real state instead.
+
+    Driven with a stub dock so it needs no browser.
+    """
+    print("\nfocus mode survives a reload")
+    import app as app_mod
+
+    class StubDock:
+        def __init__(self):
+            self.page_focused = False   # what the DOCUMENT says
+            self.applies = 0
+            self.aligns = 0
+        def focus_state(self):
+            return self.page_focused
+        def game_ready(self):
+            return True
+        def focus(self, on=True):
+            self.applies += 1
+            self.page_focused = bool(on)
+            return "focused"
+        def align(self):
+            self.aligns += 1
+            return "realigned"
+
+    r = app_mod.Runner.__new__(app_mod.Runner)
+    r.dock = StubDock()
+    r.log = LOG
+    r.focus_wanted = True
+    r.focus_on = False
+    r.focus_aligned = False
+
+    r.ensure_focus()
+    check(r.dock.applies == 1, "focus is applied when the page is not focused")
+    check(r.focus_on is True, "the flag follows the page")
+
+    # Steady state: already focused, so no re-apply. Re-applying on every cycle
+    # is what made the game jump around and the state read "unknown".
+    before = r.dock.applies
+    for _ in range(5):
+        r.ensure_focus()
+    check(r.dock.applies == before,
+          "an already-focused page is never re-applied (no jumping)")
+
+    # THE RELOAD. The document comes back unfocused while the flag still says
+    # True - exactly the stale-belief case.
+    r.dock.page_focused = False
+    check(r.focus_on is True, "the stale flag still claims focus after a reload")
+    r.ensure_focus()
+    check(r.dock.applies == before + 1,
+          "focus is re-applied after a reload rather than trusting the flag")
+    check(r.dock.page_focused is True, "the reloaded page ends up focused")
+
+    # And the one-shot align gets another pass, since the layout is new.
+    aligns = r.dock.aligns
+    r.ensure_focus()
+    check(r.dock.aligns > aligns, "the align one-shot re-arms for a new document")
+
+    # Focus turned OFF by the operator must stay off.
+    r.focus_wanted = False
+    r.dock.page_focused = False
+    applies = r.dock.applies
+    r.ensure_focus()
+    check(r.dock.applies == applies,
+          "focus is not forced back on when the operator turned it off")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1181,7 +1255,8 @@ def main():
                test_card_matcher, test_tp_navigation_templates,
                test_dock_and_controls, test_kekkai_digits,
                test_seal_phases, test_mission_list_is_not_scenery,
-               test_cold_command_bar_probe_is_budgeted):
+               test_cold_command_bar_probe_is_budgeted,
+               test_focus_survives_a_reload):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
