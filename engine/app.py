@@ -67,6 +67,11 @@ from cdp import CDP, CDPError, find_page_target
 VIEWPORT = (1720, 720, 2)          # the ONE pinned geometry every template
                                    # threshold in this project was measured at
 
+# What the operator can put in a rotation. AT/CH/DO are the command buttons;
+# S1..S8 are the skill slots (4 left bank, 4 right).
+SKILL_SLOTS = ["AT", "CH", "DO", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
+SKILLS_PATH = "run/skills.json"
+
 TASKS = [
     {"key": "resume_to_lobby", "label": "Resume to lobby"},
     {"key": "tp_training",     "label": "TP training"},
@@ -135,6 +140,9 @@ class Runner:
         # detected. It is not decoration: hiding the page chrome lets the game
         # reflow to the top so scrollY is 0 and STAYS 0, which is what makes the
         # bot's coordinates mean the same thing from one minute to the next.
+        # Editable from the panel, and persisted OUTSIDE the tracked config so
+        # experimenting with slots never dirties a versioned file.
+        self.skills = _read_skills()
         self.focus_wanted = True
         self.focus_on = False
         self.focus_aligned = False
@@ -158,6 +166,7 @@ class Runner:
                 "cycle": self.cycle, "uptime": self._uptime(),
                 "note": self.note, "tasks": TASKS, "log": self.log.lines[-10:],
                 "focus": self.focus_on,
+                "skills": self.skills, "skill_slots": SKILL_SLOTS,
             })
         except (OSError, CDPError) as e:
             raise Disconnected(str(e))
@@ -185,6 +194,17 @@ class Runner:
             self.mode = "stopped"
             _write_control("stop")
             self.log.info("operator: STOP (panel stays; press Run to resume)")
+        elif c == "skill":
+            k = cmd.get("arg")
+            if k in SKILL_SLOTS:
+                self.skills.append(k)
+                _write_skills(self.skills)
+                self.log.info("operator: skill order -> %s",
+                              " ".join(self.skills))
+        elif c == "skill_clear":
+            self.skills = []
+            _write_skills(self.skills)
+            self.log.info("operator: skill order cleared (Attack only)")
         elif c == "focus":
             self.focus_wanted = not self.focus_wanted
             self.dock.focus(self.focus_wanted)
@@ -323,17 +343,37 @@ class Runner:
             self.note = "mission in flight - the panel pauses until it finishes"
             self.push()
             started, banked = farm_mod.farm(self.cap, self.actor, self.log,
-                                            self.cfg, self.controls, repeat=1)
+                                            self.battle_cfg(), self.controls,
+                                            repeat=1)
             self.note = f"farm: {started} started, {banked} banked"
             self.log.info(self.note)
+
+    def battle_cfg(self):
+        """The config a mission should run with, including the panel's skills.
+
+        The rotation is applied HERE rather than written into the config file, so
+        what the operator picked in the panel is what the very next battle uses -
+        that is the whole point of it being editable live. An empty order means
+        Attack only, which is the documented safe default.
+        """
+        cfg = dict(self.cfg)
+        if self.skills:
+            b = dict(cfg.get("battle", {}))
+            b["rotation"] = list(self.skills)
+            cfg["battle"] = b
+        return cfg
 
     def _run_mission(self):
         """Play a mission that is already under way."""
         import mission as mission_mod
         from gate import Gate
+        cfg = self.battle_cfg()
+        if self.skills:
+            self.log.info("using the panel's skill order: %s",
+                          " ".join(self.skills))
         r = mission_mod.MissionRunner(
             Gate(self.cap, self.log, self.controls), self.actor, self.cap,
-            self.tpls, self.cfg, self.log, self.controls)
+            self.tpls, cfg, self.log, self.controls)
         r.grade = self.cfg.get("mission", {}).get("grade") or "A"
         try:
             out, stats = r.run()
@@ -512,6 +552,26 @@ class Runner:
                 time.sleep(tick)
         self.push()
         self.log.info("quit")
+
+
+def _read_skills():
+    p = os.path.join(ROOT, SKILLS_PATH)
+    try:
+        with open(p) as f:
+            v = json.load(f)
+        return [k for k in v if k in SKILL_SLOTS]
+    except Exception:
+        return []
+
+
+def _write_skills(order):
+    p = os.path.join(ROOT, SKILLS_PATH)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            json.dump(order, f)
+    except Exception:
+        pass
 
 
 def _write_control(value):

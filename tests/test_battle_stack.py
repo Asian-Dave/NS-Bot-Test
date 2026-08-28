@@ -761,6 +761,25 @@ def test_dock_and_controls():
     # -- the dock renders into the gutter, never over the game -------------
     check(dock_mod.WIDTH <= 385,
           f"the dock ({dock_mod.WIDTH}px) fits the measured 385px right gutter")
+    # THE PANEL'S SKILL ORDER MUST REACH THE NEXT BATTLE, and must not rewrite
+    # the loaded config to do it - that is what makes it editable live.
+    import app as _app
+    rr = _app.Runner.__new__(_app.Runner)
+    rr.cfg = {"battle": {"rotation": ["AT"], "fallback": "AT"}}
+    rr.skills = []
+    check(rr.battle_cfg()["battle"]["rotation"] == ["AT"],
+          "no skills chosen means Attack only")
+    rr.skills = ["S1", "S3"]
+    built = rr.battle_cfg()
+    check(built["battle"]["rotation"] == ["S1", "S3"],
+          "the panel's order becomes the battle rotation")
+    check(rr.cfg["battle"]["rotation"] == ["AT"],
+          "building it does NOT mutate the loaded config")
+    check(built["battle"].get("fallback") == "AT",
+          "the Attack fallback survives, so a fight never stalls")
+    check(set(_app.SKILL_SLOTS) >= {"AT", "S1", "S8"},
+          "the panel offers the command buttons and all eight slots")
+
     # A dead socket must be recognised and RECONNECTED, not spun on. Logging out
     # tore the CDP target down, every later call raised BrokenPipeError, and the
     # process stayed alive logging "panel update failed" forever - the panel gone

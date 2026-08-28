@@ -90,6 +90,8 @@ _CSS = """
 #__ID__ .warn{color:#fbbf24}
 #__ID__ .bad{color:#f87171}
 #__ID__ .g{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+#__ID__ .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+#__ID__ .g4 button{padding:5px 0;font-size:11px}
 #__ID__ button{font:inherit;padding:7px 4px;cursor:pointer;background:#232833;
   color:#e6e9ef;border:1px solid #39414f;border-radius:5px;transition:none}
 #__ID__ button:hover{background:#2b313d}
@@ -257,6 +259,10 @@ _BOOTSTRAP = r"""
         btn("run", "Run") + btn("pause", "Pause") +
         btn("relog", "Relog") + btn("stop", "Stop") +
       `</div>` +
+      `<h4>Skill order</h4>` +
+      `<div class="d" id="v_skills" style="margin-bottom:5px"></div>` +
+      `<div class="g4" id="v_slots"></div>` +
+      `<div style="margin-top:5px">` + btn("skill_clear", "Clear order") + `</div>` +
       `<h4>View</h4><div style="margin-top:2px">` +
         btn("focus", "Focus mode") +
       `</div>` +
@@ -274,6 +280,21 @@ _BOOTSTRAP = r"""
   // the first render comes from the bootstrap with an EMPTY state object - so
   // building the task buttons there produced an empty Task section that nothing
   // ever repopulated. Keyed on the task list so this costs nothing per cycle.
+  // The slot buttons never change, so build them once. Clicking one APPENDS it
+  // to the order - that is what makes the order editable without a text field,
+  // and it reads the same way the operator says it: "S1, then S3, then attack".
+  const fillSlots = (slots) => {
+    const key = (slots || []).join(",");
+    if (!V.v_slots || V.v_slots.dataset.key === key) return;
+    V.v_slots.dataset.key = key;
+    V.v_slots.innerHTML = "";
+    (slots || []).forEach(k => {
+      const b = document.createElement("button");
+      b.dataset.cmd = "skill"; b.dataset.arg = k; b.textContent = k;
+      V.v_slots.appendChild(b);
+    });
+  };
+
   const fillTasks = (tasks) => {
     const key = (tasks || []).map(t => t.key).join(",");
     if (!V.v_tasks || V.v_tasks.dataset.key === key) return;
@@ -304,6 +325,11 @@ _BOOTSTRAP = r"""
     window.__nsbotState = s;
     if (!V.v_state) skeleton(el, s);
     fillTasks(s.tasks);
+    fillSlots(s.skill_slots);
+    const ord = (s.skills || []);
+    setText("v_skills", ord.length
+        ? ord.map((k, i) => `${i + 1}. ${k}`).join("   ")
+        : "(none - Attack only)");
 
     const mode = s.mode || "idle";
     setText("v_pill", mode,
