@@ -184,39 +184,27 @@ class BattleGeometry:
         # canvas. Narrowing both is enough to find it cheaply, and the full sweep
         # remains as the fallback so an unexpected geometry is still handled.
         if scales is None and cls._hint is None:
-            # The band must not CUT a button in half. Slicing at h/2 clipped
-            # dodge, whose box spans 824..910 on a 1678-tall frame, and it
-            # scored 0.406 instead of 0.986 - the same mistake as a clip that
-            # cuts an anchor. Start well above the bar and keep the margin.
-            h = frame_gray.shape[0]
-            y0 = int(h * 0.40)
-            band = frame_gray[y0:, :]
-            ch = _best(band, charge_tpl, cls.FAST_SCALES)
-            do = _best(band, dodge_tpl, cls.FAST_SCALES)
-            if (ch is not None and do is not None
-                    and ch[0] >= min_conf and do[0] >= min_conf):
-                cf, sc, (cx, cy) = ch
-                df, _, (dx, dy) = do
-                cy += y0
-                dy += y0
-                expect = CMD_SIDE * ((sc + do[1]) / 2.0)
-                if expect > 0:
-                    err = max(abs((dx - cx) - expect),
-                              abs((cy - dy) - expect)) / expect
-                    if err <= pitch_tolerance:
-                        cls._hint = {"scale": (sc + do[1]) / 2.0,
-                                     "charge": (cx, cy), "dodge": (dx, dy),
-                                     "pitch_tolerance": pitch_tolerance}
-                        cls._misses = 0
-                        return cls((cx, cy), cls._hint["scale"],
-                                   confidence=min(cf, df))
-            cls._misses = getattr(cls, "_misses", 0) + 1
-            if cls._misses < cls.REACQUIRE_AFTER:
-                return None
-            cls._misses = 0
+            got = cls._narrow(frame_gray, charge_tpl, dodge_tpl, min_conf,
+                              pitch_tolerance)
+            if got is not None:
+                cls._misses = 0
+                return got
+            # A cold miss falls through to the FULL sweep: with no hint we do not
+            # know the layout, and being fast is worth nothing if the answer is
+            # wrong.
 
         if scales is None and cls._hint is not None:
             got = cls._from_hint(frame_gray, charge_tpl, dodge_tpl, min_conf)
+            if got is not None:
+                cls._misses = 0
+                return got
+            # The hint missing does NOT settle it. Measured: a hint taken from
+            # boss_t0 failed on boss_t1 even though the bar had not moved, so
+            # trusting a hint-miss dropped four combat frames the full sweep
+            # accepts. Fall through to the narrow sweep, which is ~25x cheaper
+            # than the full one and still finds every geometry we have seen.
+            got = cls._narrow(frame_gray, charge_tpl, dodge_tpl, min_conf,
+                              pitch_tolerance)
             if got is not None:
                 cls._misses = 0
                 return got
@@ -260,13 +248,50 @@ class BattleGeometry:
     _misses = 0             # consecutive fast-path misses
     HINT_WINDOW = 140       # px around the remembered button centres
     REACQUIRE_AFTER = 25    # misses before paying for a full sweep again
-    # The pinned viewport puts the real scale at ~1.0; measured 1.000 live.
-    FAST_SCALES = [0.90, 0.95, 1.00, 1.05, 1.10]
+    # The scales this project has ACTUALLY seen, not a guess around 1.0.
+    # CLAUDE.md records two capture geometries (templates peak at 0.46 and
+    # 0.545) and the pinned live viewport measures 1.000. A narrow band around
+    # 1.0 alone missed every boss frame in the test set, which sit at 0.54-0.55 -
+    # the exact "two geometries" trap this file warns about. The full sweep still
+    # runs as the fallback for anything outside these.
+    FAST_SCALES = [0.45, 0.46, 0.50, 0.54, 0.545, 0.55, 0.60,
+                   0.90, 0.95, 1.00, 1.05, 1.10]
 
     @classmethod
     def forget(cls):
         """Drop the cached geometry. Call after a viewport or layout change."""
         cls._hint = None
+
+    @classmethod
+    def _narrow(cls, frame_gray, charge_tpl, dodge_tpl, min_conf,
+                pitch_tolerance):
+        """Sweep only the scales this project has actually seen, lower band only.
+
+        The band must not CUT a button in half: slicing at h/2 clipped dodge,
+        whose box spans 824..910 on a 1678-tall frame, and it scored 0.406
+        instead of 0.986. It starts at 40% instead.
+        """
+        h = frame_gray.shape[0]
+        y0 = int(h * 0.40)
+        band = frame_gray[y0:, :]
+        ch = _best(band, charge_tpl, cls.FAST_SCALES)
+        do = _best(band, dodge_tpl, cls.FAST_SCALES)
+        if ch is None or do is None or ch[0] < min_conf or do[0] < min_conf:
+            return None
+        cf, sc, (cx, cy) = ch
+        df, sd, (dx, dy) = do
+        cy += y0
+        dy += y0
+        scale = (sc + sd) / 2.0
+        expect = CMD_SIDE * scale
+        if expect <= 0:
+            return None
+        err = max(abs((dx - cx) - expect), abs((cy - dy) - expect)) / expect
+        if err > pitch_tolerance:
+            return None
+        cls._hint = {"scale": scale, "charge": (cx, cy), "dodge": (dx, dy),
+                     "pitch_tolerance": pitch_tolerance}
+        return cls((cx, cy), scale, confidence=min(cf, df))
 
     @classmethod
     def _from_hint(cls, frame_gray, charge_tpl, dodge_tpl, min_conf):

@@ -128,6 +128,10 @@ class BattleRunner:
 
         c = cfg.get("battle", {})
         self.turn_timeout = c.get("turn_timeout_s", 45)
+        # "run" restores the old flee-on-watchdog behaviour. It defaults to
+        # "fight" because fleeing FAILS the mission.
+        self.watchdog_action = c.get("watchdog_action", "fight")
+        self._warned_watchdog = False
         self.action_timeout = c.get("action_timeout_s", 6)
         self.max_rounds = c.get("max_rounds", 60)
         self.target_policy = c.get("target_policy", "lowest_hp")
@@ -199,11 +203,30 @@ class BattleRunner:
 
             verdict = self._observe_progress(bgr, geo)
             if verdict in ("stalled", "regenerating"):
-                self.log.warning("battle: watchdog=%s -> taking Run", verdict)
-                self.actor.click_pixel(*geo.cmd("RN"),
-                                       why=f"abort: watchdog {verdict}")
-                return ABORTED, {"rounds": rounds, "acted": acted,
-                                 "watchdog": verdict}
+                # TAKING `Run` FAILS THE MISSION. That is a bad trade for
+                # ordinary farming: a regenerating enemy usually still dies with
+                # more rounds, whereas fleeing throws away the whole mission and
+                # the stamina behind it. Observed live - the watchdog fled a
+                # story mission on `regenerating` and the mission was lost.
+                #
+                # So the default is to keep fighting and say so. `max_rounds`
+                # still bounds the fight, so a genuinely unwinnable one ends as
+                # STALLED rather than running forever, and the mission runner's
+                # own `max_battles` and `max_steps` bound it again above that.
+                # Set combat.watchdog_action = "run" to restore fleeing.
+                if self.watchdog_action != "run":
+                    if not self._warned_watchdog:
+                        self.log.warning(
+                            "battle: watchdog=%s - NOT fleeing, because Run "
+                            "fails the mission. Fighting on; max_rounds=%d "
+                            "still bounds this.", verdict, self.max_rounds)
+                        self._warned_watchdog = True
+                else:
+                    self.log.warning("battle: watchdog=%s -> taking Run", verdict)
+                    self.actor.click_pixel(*geo.cmd("RN"),
+                                           why=f"abort: watchdog {verdict}")
+                    return ABORTED, {"rounds": rounds, "acted": acted,
+                                     "watchdog": verdict}
 
             if self._take_action(bgr, geo, rounds):
                 acted += 1
