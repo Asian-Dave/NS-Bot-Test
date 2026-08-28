@@ -102,6 +102,10 @@ _CSS = """
 #__ID__ button.on{border-color:#4ade80;color:#4ade80}
 #__ID__ button.danger:hover{border-color:#6b3030;color:#f87171}
 #__ID__ hr{border:0;border-top:1px solid #2b313d;margin:10px 0}
+#__ID__.stale{opacity:.72}
+#__ID__ .stale-note{background:#3a2a12;border:1px solid #6b5620;color:#fbbf24;
+  border-radius:6px;padding:7px 8px;margin-bottom:9px;font-size:11px;line-height:1.5}
+#__ID__ .stale-note code{color:#e6e9ef;font-size:10px;word-break:break-all}
 #__ID__ .log{font-size:11px;color:#8b94a7;white-space:pre-wrap;word-break:break-word;
   max-height:26vh;overflow:auto}
 #__ID__ .log b{color:#c9d1e0;font-weight:400}
@@ -254,6 +258,9 @@ _BOOTSTRAP = r"""
       `<button data-cmd="${cmd}"${arg ? ` data-arg="${arg}"` : ""}>${label}</button>`;
     el.innerHTML =
       `<div class="hd"><b>NS BOT</b><span class="pill" id="v_pill"></span></div>` +
+      `<div id="v_stale" class="stale-note" style="display:none">` +
+        `no bot attached — the panel is frozen.<br>run:<br>` +
+        `<code>.venv/bin/python engine/app.py --attach</code></div>` +
       row("state") + row("task") + row("cycle") + row("uptime") +
       `<div class="d" id="v_note" style="margin-top:8px"></div>` +
       `<h4>Task</h4><div class="g" id="v_tasks"></div>` +
@@ -348,6 +355,7 @@ _BOOTSTRAP = r"""
     const el = document.getElementById(ID);
     if (!el) return "missing";
     window.__nsbotState = s;
+    window.__nsbotLastRender = Date.now();
     if (!V.v_state) skeleton(el, s);
     fillTasks(s.tasks);
     fillSlots(s.skill_slots);
@@ -387,6 +395,22 @@ _BOOTSTRAP = r"""
     if (V.v_log && V.v_log.textContent !== lg) V.v_log.textContent = lg;
     return "ok";
   };
+
+  // SAY SO WHEN NOTHING IS DRIVING THE PANEL. The dock is injected by a process
+  // that then pushes state into it; if that process is not running, the panel
+  // still renders - with stale values and dead buttons - and looks broken. It
+  // has been reported as "the tasks are hidden" more than once, when in truth
+  // there was simply no bot attached. A panel that cannot tell you it is
+  // disconnected is worse than no panel.
+  setInterval(() => {
+    const el = document.getElementById(ID);
+    if (!el) return;
+    const stale = !window.__nsbotLastRender ||
+                  (Date.now() - window.__nsbotLastRender) > 6000;
+    el.classList.toggle("stale", stale);
+    const w = document.getElementById("v_stale");
+    if (w) w.style.display = stale ? "block" : "none";
+  }, 2000);
 
   if (document.documentElement) build();
   else document.addEventListener("DOMContentLoaded", build, {once: true});

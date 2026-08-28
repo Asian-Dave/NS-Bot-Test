@@ -16,8 +16,13 @@ __pycache__/
 # UI screenshot and installer). Kept locally for design reference only - not
 # ours to redistribute. Remove these lines if you want them in a private repo.
 BotSettings.json
-Configs/
+Configs/config.json
 settings.png
+
+# ...but Configs/ ALSO holds our own thresholds and geometry, which are source.
+# The rule above used to be a bare `Configs/`, which meant a fresh clone had no
+# config at all and `engine/app.py` could not start - it defaults to
+# Configs/mission.json and has no fallback. Only the third-party file is ignored.
 
 # Decompiled third-party bot, kept locally as mechanics reference only (~7 MB:
 # 61 C# files, 10 DLLs, the extracted binary). Read, never built, never imported.

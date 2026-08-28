@@ -1,0 +1,122 @@
+{
+  "_comment": "Mission farming. Translated from ref/tp/cmmhero (FormMission + the FormMain battle loop) onto our CDP/Ruffle stack. Read engine/mission.py's module docstring before changing anything here.",
+  "profile": "default",
+  "target": {
+    "url_contains": "ninjasaga",
+    "cdp": {
+      "host": "127.0.0.1",
+      "port": 9222
+    },
+    "game_url": "https://ninjasaga.cc/play"
+  },
+  "geometry": {
+    "_comment": "Pin with Emulation.setDeviceMetricsOverride. NEVER resize the ruffle-player element via CSS - that desyncs click->stage mapping inside the SWF. WHY 1720x720: Ruffle scales the stage by min(vw/960, vh/720) - the stage is 960x720, confirmed from the game's own SWF (ref/swf_assets/). Pinning HEIGHT to exactly 720 makes height the limiting factor, so scale stays exactly 1.0 and ALL extra width becomes free page margin. Measured: at 1720x720 the game canvas occupies CSS x 380..1340, leaving 380px of decorative page background on each side - enough for the control panel with ZERO occlusion of game pixels. Template confidence also improved (lobby_rail_fortune 0.958 -> 1.000). An earlier attempt widened to 1340x880 and rescaled the game; the culprit was the HEIGHT (880/720 = 1.222), not the width.",
+    "viewport": {
+      "width": 1720,
+      "height": 720,
+      "deviceScaleFactor": 2
+    },
+    "_battle_geometry_note": "Battle slot positions are NOT configured here. They are derived at runtime from the command bar by engine/geometry.py, because our canvas scale varies (measured 0.46 vs 0.545 across our own capture sets, an 18% spread). The reference bot hardcodes ~2500 absolute coordinates; it can, because it forces one window size. We cannot.",
+    "_viewport_alt": "960x839 also gives scale 1.0 (width-limited) but leaves no side margin, so the panel can only be drawn OVER the game."
+  },
+  "mission": {
+    "_comment": "grade used to be REQUIRED with no default, because guessing it wastes the run: Grade C page 1 yields 20 XP against Grade A's 4,870. It is now null by default because the bot READS the panel instead of guessing - see engine/farm.find_grades.",
+    "grade": null,
+    "grade_template": "grade_a_tab",
+    "skip_locked": true,
+    "_skip_locked_note": "Grade A spans Lv 42-78 in +2 steps. Rows above the character's level render greyed with a padlock and are INERT - clicking one does nothing forever. Turning this off will dead-loop the bot.",
+    "max_steps": 400,
+    "max_battles": 25,
+    "_max_battles_note": "Battle count is NOT the traversal node count. 'The Criminal Gathering' (Lv 56, Grade A) took 7 battles while showing 3 nodes. This is a runaway guard, not an expectation.",
+    "max_repeats": 25,
+    "state_timeout_s": 120,
+    "traversal_click": null,
+    "_traversal_note": "SUPERSEDED. Traversal is no longer a configured click point: the bot runs to a MAP EDGE, because clicking mid-ground just shuffles the character around one map forever (measured in the Kekkai work). Heading alternates on a dead end rather than being derived from the character's position - that derivation needs the red-robe blob search, which returns None once the character's gear is not red.",
+    "close_out_timeout_s": 45,
+    "_close_out_note": "A mission is NOT done when the Mission Success panel appears. It is done when its green check has been acknowledged AND the game has returned to the lobby. This bounds both waits. Returning SUCCESS on sight of the panel was a false-success bug: it ignored whether the click landed, and with --repeat N the next runner re-classified the still-open panel and banked another instant success - N missions from one panel, never returning to the lobby.",
+    "_farm_note": "grade and mission are now AUTO by default. Leave grade null to take the best unlocked grade read off the panel (S>A>B>C; a locked grade renders grey and is skipped), and leave mission_row null to take the highest-level row that is not padlocked. Set either to pin it.",
+    "mission_row": null,
+    "repeat": 0,
+    "_repeat_note": "0 = farm the same choice in a loop until stopped; N = stop after N missions.",
+    "traverse_settle_s": 5.0,
+    "traverse_heading": "right",
+    "dialogue_settle_s": 0.45,
+    "_dialogue_note": "Between dialogue clicks. A cutscene is usually several screens and they used to cost a full classify() each - and classify is the expensive part, not the click. They are now drained in one go with a cheap per-screen check, stopping the moment the dialogue does so combat or traversal takes over immediately."
+  },
+  "battle": {
+    "rotation": [
+      "AT"
+    ],
+    "_rotation_note": "Attack only, by default, and that is deliberate. Attack is the ONLY action measured to deal damage on our client (~8 percentage points per hit). Skill slots are TYPED, not uniform: right-bank slot 1 applied Strengthen(1) to self for 50 CP - a buff, zero damage - and slot costs ranged ~10 to ~100 CP. Add S1..S8 here only after measuring what each one actually does, and record it in slot_kinds.",
+    "slot_kinds": {
+      "AT": "damage",
+      "CH": "restore_cp",
+      "DO": "defend",
+      "RN": "flee"
+    },
+    "_slot_kinds_note": "Fill in S1..S8 as they are measured. An unconfigured slot is simply never clicked, which is the safe failure.",
+    "closing_action": "AT",
+    "_closing_note": "Used when nothing in the rotation resolves the turn, so a turn is never silently abandoned (an unspent turn makes the gate re-fire and the loop spin).",
+    "target_policy": "first",
+    "click_target": false,
+    "_target_note": "MEASURED FALSE and now disabled. The 8-slot centre ring was inspected live at full resolution and is a JUTSU LOADOUT panel, not a target selector - filled slots hold jutsu effect art, the centre is a figure-with-8-nodes loadout map, and 6 of 8 were empty. The reference bot's T1..T8 naming does not transfer to our client. Separately measured: clicking Attack alone RESOLVED the turn with no target click, so the two-step model is not needed for Attack. The only targeting mechanism with positive evidence here is Attack + the enemy NAME PLATE (-7.7pp verified). Do not re-enable this without new evidence.",
+    "turn_timeout_s": 45,
+    "_turn_timeout_note": "Reference constants from another private server suggest a 30s turn timer. There is no reflex pressure anywhere in this game, so this is generous on purpose. A static frame while awaiting input is NORMAL.",
+    "action_timeout_s": 6,
+    "max_rounds": 60,
+    "_max_rounds_note": "The reference client caps battles at 50 rounds; 60 leaves headroom before our own guard trips.",
+    "watchdog_stall_turns": 3,
+    "_watchdog_note": "Turns without a NEW LOW in enemy HP before we take Run. Exists because enemies regenerate: observed 50.7 -> 43.0 -> 43.0 -> 43.0 -> 47.2 percent. It went UP. A weak-damage loop can be fully cancelled by regen, producing an unwinnable fight with no error and no end condition. Do not raise this without reading engine/combat.py.",
+    "order_mode": "priority",
+    "fallback": "AT",
+    "_order_note": "'priority' presses the FIRST ready slot in `rotation` every turn and leaves the order alone - cooldown bookkeeping is what stops a slot repeating. 'rotate' is round-robin. A slot with NO configured cooldown is demoted after use even in priority mode, because nothing else could stop it being pressed every turn forever.",
+    "_fallback_note": "Used when every configured slot is cooling, so a fight never stalls with nothing to click. Attack is the only action measured to reliably deal damage on this client (~8pp per hit).",
+    "_animation_note": "Skill animations need no timing config. A turn is considered resolved when the command bar DISAPPEARS and comes back - see BattleRunner._wait_resolved - so a long animation simply delays the gate rather than desynchronising anything. Never add a sleep to 'wait for the animation'; clicks issued during the enemy's turn are silently discarded.",
+    "restricted_action": "DO",
+    "_restricted_note": "Pressed when NOTHING else resolves. A stun or similar effect disables every action except Dodge, and clicking a disabled button does nothing - so the turn never resolves and the bot re-clicks Attack forever. Observed on 'Desert Ronins': 'rotation exhausted' repeating while enemy HP sat flat at 263.7%. Dodge costs the turn and lets the restriction tick down."
+  },
+  "combat": {
+    "cooldowns": {
+      "rounds_per_slot": {},
+      "_comment": "slot -> cooldown length in ROUNDS. The game's own client decrements cooldowns once per round (nextRound -> reduceSkillCooldown(1)), so these are exact small integers and are trackable by bookkeeping. Empty means unknown, and unknown slots fall back to rotate-on-resolve (queue order as the cooldown proxy). Do NOT use icon saturation as the primary signal - measured slot saturation ran 56..191 CONTINUOUSLY with no bimodal split, and a pale-pink slot reads 56 while perfectly usable.",
+      "_how_to_fill": "slot -> cooldown in ROUNDS, e.g. {\"S1\": 3, \"S3\": 5}. The game's own client decrements once per round, so these are exact small integers. Measure each slot before adding it to battle.rotation, and record what it DOES in battle.slot_kinds - slot 1 of the right bank was measured casting Strengthen on self for 50 CP, dealing zero damage."
+    },
+    "watchdog_action": "fight",
+    "_watchdog_note": "'fight' (default) or 'run'. The watchdog spots a fight that is making no progress - a regenerating enemy, which CLAUDE.md records going 50.7 -> 43.0 -> 47.2. It used to take Run, but Run FAILS THE MISSION, and a regenerating enemy usually still dies with more rounds. Observed live: it fled a story mission and the mission was lost. max_rounds, max_battles and max_steps still bound a genuinely unwinnable fight."
+  },
+  "timing": {
+    "_comment": "Ranges, not fixed values. Fixed delays are the most machine-like signal there is.",
+    "click_delay": [
+      0.18,
+      0.55
+    ],
+    "post_click": [
+      0.4,
+      1.1
+    ],
+    "jitter_px": 3,
+    "poll_interval": 0.25,
+    "loading_timeout_s": 90,
+    "_loading_note": "Cold SWF load measured 25-30s, warm ~8s. The Hunting House sub-app is known to hang at 3% indefinitely, which is why every loading wait has a ceiling."
+  },
+  "safety": {
+    "never_click": [
+      "delete_btn",
+      "claim_daily",
+      "wish_btn",
+      "spin_btn"
+    ],
+    "_never_click_note": "delete_btn sits on the same row as Play and destroys a character permanently. Claim / Wish / SPIN are once-per-day and irreversible, so they need explicit per-use consent, never an automatic click.",
+    "halt_on": [
+      "logged_out",
+      "login_form"
+    ],
+    "_halt_note": "The bot NEVER authenticates. Sessions live in the browser profile, which is the credential store. Server-side expiry may mean a password change or a ban, so it must surface to a human.",
+    "no_token_spend": true,
+    "_token_note": "Known token sinks: Mission Room NPC recruit + buttons (T20/T40/T60) and the + buttons beside the gold/token HUD counters. The mission runner must never click a + control."
+  },
+  "logging": {
+    "redact_urls": true,
+    "_redact_note": "The /emulator URL carries a live session token (fb_at, fb_sig) and is time-signed. Never log it, never persist it, never commit it."
+  }
+}

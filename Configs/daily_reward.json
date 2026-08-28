@@ -1,0 +1,325 @@
+{
+ "_comment": "Phase 3 example: ONE behaviour end-to-end - daily reward claiming.",
+ "profile": "default",
+ "target": {
+  "url_contains": "ninjasaga",
+  "cdp": {
+   "host": "127.0.0.1",
+   "port": 9222
+  },
+  "game_url": "https://ninjasaga.cc/play",
+  "_comment": "Server URL lives here, not in source, so the engine carries no hardcoded host. url_contains is what find_page_target matches."
+ },
+ "sequence": [
+  "login",
+  "drain_login_popups"
+ ],
+ "timing": {
+  "_comment": "Ranges, not fixed values. Fixed delays are the most machine-like signal there is.",
+  "click_delay": [
+   0.18,
+   0.55
+  ],
+  "post_click": [
+   0.4,
+   1.1
+  ],
+  "jitter_px": 3,
+  "cycle_delay": [
+   0.8,
+   1.6
+  ],
+  "loading_timeout_s": 90,
+  "_loading_note": "Cold start measured at 25-30s; a sub-app stalled at 3% indefinitely."
+ },
+ "templates": {
+  "_comment": "Thresholds are MEASURED peaks minus a 0.07 margin, calibrated against ref/raw/ frames via engine/calibrate.py. Live PNG captures should score at or above these, since the references are lossy JPEG.",
+  "claim_daily": {
+   "path": "tpl/claim_daily.png",
+   "threshold": 0.74,
+   "_measured_peak": 0.8079,
+   "_flag": "Peak 0.808 is well below its peers (median 0.973) - the button likely has an animated gloss. RE-MEASURE against a live capture before trusting this threshold."
+  },
+  "close_popup_x": {
+   "path": "tpl/close_popup_x.png",
+   "threshold": 0.88,
+   "scales": [
+    1.0,
+    1.07
+   ],
+   "_measured_peak": 0.9505
+  },
+  "close_popup_x_large": {
+   "path": "tpl/close_popup_x_large.png",
+   "threshold": 0.76,
+   "_measured_peak": 0.999,
+   "_note": "re-cut from a reference frame and upscaled x2.204. The previous crop was flat ~0.547 at every scale and never fired, which made the calendar popup unclassifiable. Also matches the lucky-spin X at 0.830."
+  },
+  "close_back_arrow": {
+   "path": "tpl/close_popup_back_arrow.png",
+   "threshold": 0.88,
+   "_measured_peak": 0.9454
+  },
+  "loading_text": {
+   "path": "tpl/loading_text.png",
+   "threshold": 0.9,
+   "_measured_peak": 0.97
+  },
+  "lobby_logo": {
+   "path": "tpl/lobby_logo.png",
+   "threshold": 0.9,
+   "_measured_peak": 0.9729
+  },
+  "nav_jutsu": {
+   "path": "tpl/nav_jutsu.png",
+   "threshold": 0.9,
+   "_measured_peak": 0.9704
+  },
+  "lobby_rail_fortune": {
+   "path": "tpl/lobby_rail_fortune.png",
+   "threshold": 0.9,
+   "_measured_peak": 0.997,
+   "_note": "POSITIVE lobby anchor. The village labels are semi-transparent over animated art and unusable; this rail icon is opaque and absent in combat (0.356). Reads ~0.69 with a popup open, since the rail is still on screen behind the modal - popup states are checked first."
+  },
+  "close_popup_back_arrow": {
+   "path": "tpl/close_popup_back_arrow.png",
+   "threshold": 0.8,
+   "_note": "re-cut and upscaled x2.204 from a reference frame; the original crop was flat ~0.55 at every scale and never fired."
+  }
+ },
+ "states": {
+  "_comment": "Declarative FSM. No state logic in engine code.",
+  "loading": {
+   "identify": {
+    "any_of": [
+     "loading_text"
+    ]
+   },
+   "on_match": {
+    "action": "wait",
+    "seconds": [
+     2.0,
+     4.0
+    ]
+   },
+   "timeout": {
+    "after_s": 90,
+    "goto": "stalled"
+   }
+  },
+  "daily_reward_popup": {
+   "identify": {
+    "any_of": [
+     "claim_daily"
+    ]
+   },
+   "_comment": "Claim is DISABLED by default. Claiming is irreversible and once-per-day.",
+   "on_match": {
+    "action": "click",
+    "template": "claim_daily",
+    "enabled": false
+   },
+   "verify": {
+    "_comment": "Confirm via colour mask, not template. The two claimed ticks measured 3318 and 3323 px - counting green blobs is sturdier than matching a tick.",
+    "method": "mask_count_increase",
+    "bgr_range": [
+     [
+      40,
+      190,
+      110
+     ],
+     [
+      130,
+      255,
+      215
+     ]
+    ],
+    "min_increase_px": 2000
+   },
+   "then": "drain_login_popups"
+  },
+  "drain_login_popups": {
+   "_comment": "Login queues FOUR popups: Daily Reward -> Calendar -> Wishing Tree -> Lucky Spin. Dismiss controls are NOT uniform, hence a set.",
+   "identify": {
+    "any_of": [
+     "close_popup_x",
+     "close_popup_x_large",
+     "close_back_arrow"
+    ]
+   },
+   "on_match": {
+    "action": "click_best_match"
+   },
+   "max_cycles": 8,
+   "then": "lobby"
+  },
+  "lobby": {
+   "_comment": "Anchor on the opaque bottom-bar icons and the logo. Never on the village text labels - they are semi-transparent over animated art.",
+   "identify": {
+    "all_of": [
+     "lobby_logo"
+    ],
+    "any_of": [
+     "nav_jutsu"
+    ]
+   },
+   "on_match": {
+    "action": "idle"
+   }
+  },
+  "stalled": {
+   "on_match": {
+    "action": "log_and_stop",
+    "reason": "loading exceeded timeout"
+   }
+  }
+ },
+ "safety": {
+  "dry_run": true,
+  "_dry_run_note": "Detect and log only, never click. Keep true until thresholds are calibrated.",
+  "control_file": "run/bot.control",
+  "once_per_day_guard": [
+   "claim_daily",
+   "wish_btn",
+   "spin_btn"
+  ],
+  "_guard_note": "These consume a daily resource. Never auto-click without an explicit opt-in."
+ },
+ "logging": {
+  "level": "INFO",
+  "log_confidences": true,
+  "_comment": "Log every template's OBSERVED confidence each cycle, including misses - that number is what you tune against.",
+  "redact": [
+   "url",
+   "console"
+  ],
+  "_redact_note": "The SWF request URL carries a live session token. Never log URLs or console output."
+ },
+ "counters": [
+  "cycles",
+  "claims",
+  "popups_dismissed",
+  "errors",
+  "stalls"
+ ],
+ "geometry": {
+  "_comment": "Pin with Emulation.setDeviceMetricsOverride. NEVER resize the ruffle-player element via CSS - that desyncs click->stage mapping inside the SWF. WHY 1720x720: Ruffle scales the stage by min(vw/960, vh/720) - the stage is 960x720, confirmed from the game's own SWF (ref/swf_assets/). Pinning HEIGHT to exactly 720 makes height the limiting factor, so scale stays exactly 1.0 and ALL extra width becomes free page margin. Measured: at 1720x720 the game canvas occupies CSS x 380..1340, leaving 380px of decorative page background on each side - enough for the control panel with ZERO occlusion of game pixels. Template confidence also improved (lobby_rail_fortune 0.958 -> 1.000). An earlier attempt widened to 1340x880 and rescaled the game; the culprit was the HEIGHT (880/720 = 1.222), not the width.",
+  "method": "Emulation.setDeviceMetricsOverride",
+  "viewport": {
+   "width": 1720,
+   "height": 720,
+   "deviceScaleFactor": 2
+  },
+  "_why_pinned": "Text templates lose ~0.4 confidence at 8% scale error (loading_text 0.489). matchTemplate is not scale-invariant.",
+  "_forbidden": "ruffle-player.style.width / .height",
+  "_canonical": "960x839 @ dsf2 -> canvas 1920x1678 native, which is the geometry the templates were cut at, so they match at scale ~1.0. Earlier this said 1728x851, contradicting CLAUDE.md and putting the true peak (~0.55) outside the locked scale band - every template scored wrong.",
+  "_viewport_alt": "960x839 also gives scale 1.0 (width-limited) but leaves no side margin, so the panel can only be drawn OVER the game."
+ },
+ "perception": {
+  "hp_bar_mask_bgr": {
+   "lo": [
+    0,
+    0,
+    140
+   ],
+   "hi": [
+    70,
+    70,
+    255
+   ],
+   "_comment": "Bright red only. A looser range (R>=90) matches the dark EMPTY track and reports every bar as 100% full."
+  }
+ },
+ "combat": {
+  "_comment": "Derived from two full mission runs. See CLAUDE.md for the measurements.",
+  "turn_gate": {
+   "method": "template_present",
+   "template": "attack_btn",
+   "_why": "Marker position and fixed timing both fail; command-bar presence does not."
+  },
+  "state_priority": [
+   "result_panel",
+   "cutscene",
+   "loading",
+   "combat_input",
+   "traversal"
+  ],
+  "_priority_why": "The Victory panel draws OVER the command bar; presence alone is ambiguous.",
+  "skill_slots": {
+   "_comment": "Slots are typed and costs vary. Verify each before enabling.",
+   "S1": {
+    "type": "damage",
+    "cp": null,
+    "verified": true
+   },
+   "S2": {
+    "type": "damage",
+    "cp": null,
+    "verified": true
+   },
+   "S3": {
+    "type": "unknown",
+    "cp": null,
+    "verified": false
+   },
+   "S4": {
+    "type": "unknown",
+    "cp": null,
+    "verified": false,
+    "_note": "pale palette - reads low saturation while READY; needs baseline compare"
+   },
+   "S5": {
+    "type": "buff",
+    "cp": 50,
+    "verified": true,
+    "_effect": "Strengthen(1) on self"
+   },
+   "S6": {
+    "type": "unknown",
+    "cp": null,
+    "verified": false
+   },
+   "S7": {
+    "type": "unknown",
+    "cp": null,
+    "verified": false
+   },
+   "S8": {
+    "type": "unknown",
+    "cp": null,
+    "verified": false
+   }
+  },
+  "targeting": {
+   "attack": "name_plate",
+   "skill": "sprite",
+   "_unresolved": "skill targeting produced no damage on both plate and sprite in the boss fight; investigate",
+   "_mechanism": "Game resolves targets by character ID internally; the UI maps a click to an ID. Reference bots expose Auto vs ID selection for this reason."
+  },
+  "watchdog": {
+   "stall_turns": 3,
+   "regen_tolerance_pp": 1.0,
+   "on_stall": "run",
+   "_why": "Enemies regenerate; observed 43.0 -> 47.2 with attacks landing."
+  },
+  "damage_reference": {
+   "attack_pp_per_hit": 8,
+   "max_rounds": 50
+  },
+  "cooldowns": {
+   "_comment": "Cooldowns are integer ROUNDS (client decrements once per round). Track by bookkeeping via engine/combat.CooldownTracker; do NOT rely on icon saturation.",
+   "unit": "rounds",
+   "rounds_per_slot": {},
+   "_how_to_fill": "Use a slot, count rounds until it works again, record here."
+  },
+  "status_effects": {
+   "_comment": "The (n) suffix is DURATION IN ROUNDS, not a stack count.",
+   "observed": [
+    "Blood Feed",
+    "Strengthen",
+    "Blind"
+   ],
+   "render": "named red text with (rounds) suffix"
+  }
+ }
+}
