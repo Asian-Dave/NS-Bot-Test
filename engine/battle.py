@@ -161,6 +161,10 @@ class BattleRunner:
         # similar restriction disables every other action and leaves it as the
         # only thing the game will accept.
         self.restricted_action = c.get("restricted_action", "DO")
+        # Consecutive non-resolving actions in ONE turn before we stop probing
+        # and take `restricted_action`. Two, because one failure is ambiguous
+        # (cooldown, bad click) while two in a row is the stun signature.
+        self.RESTRICTED_AFTER = int(c.get("restricted_after", 2))
         self._warned_watchdog = False
         self.action_timeout = c.get("action_timeout_s", 6)
         self.max_rounds = c.get("max_rounds", 60)
@@ -347,7 +351,26 @@ class BattleRunner:
         """Spend our turn. Returns True if something resolved it."""
         target = self._choose_target(frame_bgr, geo)
 
+        # STOP PROBING ONCE RESTRICTION IS OBVIOUS. A stunned player has every
+        # action greyed out except Dodge, and clicking a disabled button does
+        # nothing - so each candidate burns a full resolve timeout (~6 s) to
+        # tell us what the previous one already did. Measured live: S4, S5 and
+        # S1 each timed out in one round, ~24 s to reach a Dodge that was always
+        # the only legal move.
+        #
+        # One failure is ambiguous (a cooldown, a bad click). TWO consecutive
+        # failures in the same turn is the signature of a restriction, so break
+        # out and take the restricted action instead of finishing the rotation.
+        # If the restriction is real, Dodge resolves immediately and the turn
+        # ends; if it was not, the next turn tries the rotation again from the
+        # top, so nothing is permanently given up.
+        misses = 0
         for slot in self.rotation.candidates():
+            if misses >= self.RESTRICTED_AFTER and self.restricted_action:
+                self.log.info("battle: %d actions did not resolve - treating "
+                              "this as a restriction and skipping the rest of "
+                              "the rotation", misses)
+                break
             point = geo.slot(slot) if slot.startswith("S") else geo.cmd(slot)
             self.actor.click_pixel(*point, why=f"action {slot} (round {rounds})")
 
@@ -362,6 +385,7 @@ class BattleRunner:
                 self.rotation.resolved(slot)
                 return True
             self.rotation.failed(slot)
+            misses += 1
 
         # NOTHING RESOLVED. The usual cause is not a bad click: the player is
         # STUNNED or otherwise restricted, and every action except Dodge is

@@ -546,6 +546,23 @@ Measured live, same stuck mission, before and after:
 | alternating heading, fixed GROUND_Y | 13 | 5 | 0 |
 | character-derived heading and row | **2** | **0** | **1** |
 
+### A stunned turn must not probe the whole rotation
+
+Stun greys out every action except Dodge, and clicking a disabled button does
+nothing at all — so each rotation candidate burns a full resolve timeout (~6 s)
+to establish what the previous one already did. Measured live on "Desert
+Ronins": S4, S5 and S1 each timed out inside ONE round, about **24 s** to reach
+a Dodge that was the only legal move the whole time.
+
+One failure is ambiguous — a cooldown, or a click that missed. **Two consecutive
+failures in the same turn is the stun signature**, so `_take_action` stops there
+and takes `restricted_action` (default `DO`). Nothing is permanently given up:
+if the restriction was real, Dodge resolves at once; if it was not, the next
+turn starts the rotation again from the top. `battle.restricted_after` tunes it.
+
+Note this is the *cheap* direction of the trade. Probing more costs 6 s a go and
+tells us nothing new; probing less costs at most one turn spent dodging.
+
 ## The single biggest lesson
 
 **Never judge a bar, or "no change", by eye. Measure it.**

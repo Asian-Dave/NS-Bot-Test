@@ -1304,6 +1304,76 @@ def test_character_finder_drives_heading():
                   f"no character invented on {os.path.basename(rel)}")
 
 
+def test_restriction_short_circuits_the_rotation():
+    """A stunned turn must not probe the whole rotation.
+
+    Every action but Dodge is greyed out, and clicking a disabled button does
+    nothing, so each candidate burns a full ~6s resolve timeout to learn what
+    the previous one already established. Measured live: S4, S5 and S1 each
+    timed out in a single round - ~24s to reach a Dodge that was the only legal
+    move all along.
+
+    One failure is ambiguous (a cooldown, a bad click); two consecutive
+    failures in one turn is the stun signature.
+    """
+    print("\nrestriction short-circuits the rotation")
+    import battle as battle_mod
+
+    order = ["S1", "S3", "S4", "S5"]
+    cfg = {"battle": {"rotation": order, "restricted_action": "DO",
+                      "click_target": False}}
+
+    class StubGeo:
+        def slot(self, s): return (100, 100)
+        def cmd(self, s): return (200, 200)
+        def target(self, t): return (300, 300)
+
+    class StubActor:
+        def __init__(self): self.clicks = []
+        def click_pixel(self, x, y, why=""): self.clicks.append(why)
+
+    r = battle_mod.BattleRunner.__new__(battle_mod.BattleRunner)
+    r.cfg = cfg
+    r.log = LOG
+    r.actor = StubActor()
+    r.restricted_action = "DO"
+    r.RESTRICTED_AFTER = 2
+    r.closing_action = None
+    r.target_policy = "first"
+    import combat as combat_mod
+    r.rotation = battle_mod.SkillRotation(order, combat_mod.CooldownTracker(), LOG)
+    r._choose_target = lambda *a, **k: None
+
+    # Nothing resolves except the restricted action - the stun case.
+    tried = []
+    def wait_resolved(slot):
+        tried.append(slot)
+        return slot == "DO"
+    r._wait_resolved = wait_resolved
+
+    ok = r._take_action(None, StubGeo(), rounds=1)
+    check(ok is True, "the turn is still spent (Dodge resolves)")
+    check("DO" in tried, "it reaches the restricted action")
+    skills = [t for t in tried if t != "DO"]
+    check(len(skills) == 2,
+          f"it stops after 2 failed actions, not {len(order)} (tried {skills})")
+    check(len(tried) < len(order) + 1,
+          "the whole rotation is NOT probed on a restricted turn")
+
+    # A turn where the FIRST action works must be untouched by this.
+    r2 = battle_mod.BattleRunner.__new__(battle_mod.BattleRunner)
+    r2.cfg = cfg; r2.log = LOG; r2.actor = StubActor()
+    r2.restricted_action = "DO"; r2.RESTRICTED_AFTER = 2
+    r2.closing_action = None; r2.target_policy = "first"
+    r2.rotation = battle_mod.SkillRotation(order, combat_mod.CooldownTracker(), LOG)
+    r2._choose_target = lambda *a, **k: None
+    seen = []
+    r2._wait_resolved = lambda slot: (seen.append(slot), True)[1]
+    check(r2._take_action(None, StubGeo(), rounds=1) is True,
+          "a normal turn resolves on its first action")
+    check(seen == [order[0]], f"and tries only that one action ({seen})")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1315,7 +1385,8 @@ def main():
                test_seal_phases, test_mission_list_is_not_scenery,
                test_cold_command_bar_probe_is_budgeted,
                test_focus_survives_a_reload,
-               test_character_finder_drives_heading):
+               test_character_finder_drives_heading,
+               test_restriction_short_circuits_the_rotation):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
