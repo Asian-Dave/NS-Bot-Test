@@ -137,6 +137,7 @@ class Runner:
         # bot's coordinates mean the same thing from one minute to the next.
         self.focus_wanted = True
         self.focus_on = False
+        self.focus_aligned = False
         self.resumer = resume.Resumer(cap, actor, tpls, log, controls=controls)
         # Without this the dock deadlocks the bot: Pause parks a task inside
         # `Controls.wait_if_paused`, and the loop that reads the operator's next
@@ -229,6 +230,22 @@ class Runner:
             self.log.error("HALT: %s", self.note)
             self.mode = "paused"
             return
+        if self.state in ("unknown",) or out == "unknown":
+            # THE LADDER'S "unknown" IS NOT THE OPERATOR'S "unknown". The resume
+            # ladder only knows login -> lobby and result panels; a battle, a
+            # cutscene or a minigame is not its job, so it correctly reports
+            # "unknown" and the panel then showed `state: unknown` for the whole
+            # of a perfectly healthy mission. That is alarming and wrong.
+            # Ask the classifier that DOES know those screens before giving up
+            # on naming what we are looking at.
+            try:
+                import minigame as mg
+                kind, _ = mg.classify(self.cap.frame(gray=False))
+                if kind != mg.UNKNOWN:
+                    self.state = kind
+            except Exception:
+                pass
+
         if out != resume.ARRIVED:
             # BOUND THE UNKNOWN STREAK. `Resumer.run()` has a `max_unknown`
             # guard; `advance()` does not, and this loop calls `advance()`. Live,
@@ -270,16 +287,16 @@ class Runner:
             return
 
         if self.task == "farm_missions":
-            import mission as mission_mod
-            from gate import Gate
+            # Choose by READING the grade panel rather than by config: the grade
+            # bars are colour coded and a locked grade renders grey, so "best
+            # available" is a measurement. See engine/farm.py.
+            import farm as farm_mod
             self.note = "mission in flight - the panel pauses until it finishes"
             self.push()
-            r = mission_mod.MissionRunner(
-                Gate(self.cap, self.log, self.controls), self.actor, self.cap,
-                self.tpls, self.cfg, self.log, self.controls)
-            res = r.run()
-            self.note = f"mission: {res}"
-            self.log.info("mission result: %s", res)
+            started, banked = farm_mod.farm(self.cap, self.actor, self.log,
+                                            self.cfg, self.controls, repeat=1)
+            self.note = f"farm: {started} started, {banked} banked"
+            self.log.info(self.note)
 
     def reconnect(self):
         """Rebuild the connection after the socket dies.
@@ -319,6 +336,13 @@ class Runner:
         no game to focus on, and hiding the login page would leave the operator
         staring at nothing.
         """
+        if self.focus_on and not self.focus_aligned:
+            # One re-align after the layout has settled. Converges and stops.
+            try:
+                if self.dock.align() in ("realigned", "aligned"):
+                    self.focus_aligned = True
+            except Exception:
+                pass
         if not self.focus_wanted or self.focus_on:
             return
         try:
@@ -327,6 +351,7 @@ class Runner:
             r = self.dock.focus(True)
             if r in ("focused", "already"):
                 self.focus_on = True
+                self.focus_aligned = False
                 self.log.info("focus mode on - page chrome hidden, game pinned "
                               "to the top (scroll is now deterministic)")
         except (OSError, CDPError) as e:

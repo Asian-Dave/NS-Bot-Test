@@ -213,51 +213,109 @@ _BOOTSTRAP = r"""
     return on ? "focused" : "restored";
   };
 
+  // Re-run ONLY the top-alignment. Focus is applied as soon as the game appears,
+  // which can be before the layout has settled - measured, the nudge computed a
+  // correction of ~0 and the game then settled 58 px high, cutting the top off
+  // the panel. This converges: once the game is at y=0 it changes nothing, so it
+  // is safe to call again.
+  window.__nsbotAlign = () => {
+    const g = gameEl();
+    if (!g || !window.__nsbotFocusOn) return "not-focused";
+    const r = g.getBoundingClientRect();
+    if (Math.abs(r.y) <= 1) return "aligned";
+    if (!g.hasAttribute("data-nsbot-mt")) {
+      g.setAttribute("data-nsbot-mt", g.style.marginTop || "");
+    }
+    const cur = parseFloat(getComputedStyle(g).marginTop) || 0;
+    g.style.marginTop = Math.round(cur - r.y) + "px";
+    return "realigned";
+  };
+
+  // Renders by UPDATING values, never by rewriting the panel.
+  //
+  // The first version replaced innerHTML on every cycle. Since `cycle` and
+  // `uptime` change every second that meant a full repaint every second: every
+  // button was destroyed and recreated, so the focus toggle and the active-task
+  // highlight visibly flashed on and off, hover states dropped, and the whole
+  // panel looked loose and unstable. Nothing was actually toggling - focus was
+  // applied exactly once - but you cannot tell that by looking at it.
+  //
+  // So the skeleton is built ONCE and only text and classes are touched after.
+  const V = {};                       // id -> element, for the value cells
+
+  const skeleton = (el, s) => {
+    const row = (k) =>
+      `<div class="row"><span class="d">${k}</span><span id="v_${k}"></span></div>`;
+    const btn = (cmd, label, arg) =>
+      `<button data-cmd="${cmd}"${arg ? ` data-arg="${arg}"` : ""}>${label}</button>`;
+    el.innerHTML =
+      `<div class="hd"><b>NS BOT</b><span class="pill" id="v_pill"></span></div>` +
+      row("state") + row("task") + row("cycle") + row("uptime") +
+      `<div class="d" id="v_note" style="margin-top:8px"></div>` +
+      `<h4>Task</h4><div class="g" id="v_tasks"></div>` +
+      `<h4>Run</h4><div class="g">` +
+        btn("run", "Run") + btn("pause", "Pause") +
+        btn("relog", "Relog") + btn("stop", "Stop") +
+      `</div>` +
+      `<h4>View</h4><div style="margin-top:2px">` +
+        btn("focus", "Focus mode") +
+      `</div>` +
+      `<div style="margin-top:6px">` +
+        btn("quit", "Quit (closes this panel)") +
+      `</div>` +
+      `<h4>Log</h4><div class="log" id="v_log"></div>`;
+    el.querySelectorAll("[id^=v_]").forEach(n => { V[n.id] = n; });
+    el.querySelector('[data-cmd="stop"]').classList.add("danger");
+    el.querySelector('[data-cmd="quit"]').classList.add("danger");
+    (s.tasks || []).forEach(t => {
+      const b = document.createElement("button");
+      b.dataset.cmd = "task"; b.dataset.arg = t.key; b.textContent = t.label;
+      V.v_tasks.appendChild(b);
+    });
+  };
+
+  const setText = (id, txt, cls) => {
+    const n = V[id];
+    if (!n) return;
+    const t = String(txt);
+    if (n.textContent !== t) n.textContent = t;
+    if (cls !== undefined && n.className !== cls) n.className = cls;
+  };
+  const setOn = (btn, on) => {
+    if (!btn) return;
+    if (btn.classList.contains("on") !== !!on) btn.classList.toggle("on", !!on);
+  };
+
   window.__nsbotRender = (s) => {
     const el = document.getElementById(ID);
     if (!el) return "missing";
     window.__nsbotState = s;
+    if (!V.v_state) skeleton(el, s);
+
     const mode = s.mode || "idle";
-    const pill = mode === "running" ? "run" : mode === "paused" ? "pause"
-               : mode === "stopped" ? "stop" : "";
-    const row = (k, v, cls) =>
-      `<div class="row"><span class="d">${k}</span><span class="${cls||''}">${v}</span></div>`;
-    const btn = (cmd, label, arg, on, danger) =>
-      `<button data-cmd="${cmd}"${arg?` data-arg="${arg}"`:""}` +
-      ` class="${on?"on":""}${danger?" danger":""}">${label}</button>`;
-    const tasks = s.tasks || [];
-    el.innerHTML =
-      `<div class="hd"><b>NS BOT</b><span class="pill ${pill}">${mode}</span></div>` +
-      row("state", s.state || "-", s.state === "unknown" ? "warn" : "ok") +
-      row("task",  s.task  || "-") +
-      row("cycle", s.cycle == null ? "-" : s.cycle) +
-      row("uptime", s.uptime || "-") +
-      (s.gold   != null ? row("gold", s.gold) : "") +
-      (s.tokens != null ? row("tokens", s.tokens) : "") +
-      (s.note ? `<hr><div class="d">${s.note}</div>` : "") +
-      `<h4>Task</h4><div class="g">` +
-        tasks.map(t => btn("task", t.label, t.key, t.key === s.task)).join("") +
-      `</div>` +
-      `<h4>Run</h4><div class="g">` +
-        btn("run", "Run", null, mode === "running") +
-        btn("pause", "Pause", null, mode === "paused") +
-        btn("relog", "Relog") +
-        btn("stop", "Stop", null, mode === "stopped", true) +
-      `</div>` +
-      // Quit is deliberately SEPARATE from Stop and full width. Stop stops the
-      // bot; the panel stays. Quit ends the process, and the panel goes with it
-      // because the injection lives in the CDP session that made it - there is
-      // no way to leave a panel behind without a process holding the socket.
-      `<h4>View</h4><div style="margin-top:2px">` +
-        btn("focus", s.focus ? "Focus mode: ON" : "Focus mode: off", null,
-            !!s.focus) +
-      `</div>` +
-      `<div style="margin-top:6px">` +
-        btn("quit", "Quit (closes this panel)", null, false, true) +
-      `</div>` +
-      `<h4>Log</h4><div class="log">` +
-        (s.log || []).map(l => `<b>${l}</b>`).join("\n") +
-      `</div>`;
+    setText("v_pill", mode,
+            "pill " + (mode === "running" ? "run"
+                     : mode === "paused" ? "pause"
+                     : mode === "stopped" ? "stop" : ""));
+    setText("v_state", s.state || "-", s.state === "unknown" ? "warn" : "ok");
+    setText("v_task", s.task || "-");
+    setText("v_cycle", s.cycle == null ? "-" : s.cycle);
+    setText("v_uptime", s.uptime || "-");
+    setText("v_note", s.note || "");
+
+    el.querySelectorAll('[data-cmd="task"]').forEach(b =>
+      setOn(b, b.dataset.arg === s.task));
+    setOn(el.querySelector('[data-cmd="run"]'), mode === "running");
+    setOn(el.querySelector('[data-cmd="pause"]'), mode === "paused");
+    setOn(el.querySelector('[data-cmd="stop"]'), mode === "stopped");
+    const fb = el.querySelector('[data-cmd="focus"]');
+    if (fb) {
+      const want = s.focus ? "Focus mode: ON" : "Focus mode: off";
+      if (fb.textContent !== want) fb.textContent = want;
+      setOn(fb, !!s.focus);
+    }
+    const lg = (s.log || []).join("\n");
+    if (V.v_log && V.v_log.textContent !== lg) V.v_log.textContent = lg;
     return "ok";
   };
 
@@ -372,6 +430,11 @@ class Dock:
         return self.cdp.evaluate(
             f"(window.__nsbotFocus ? window.__nsbotFocus({str(bool(on)).lower()})"
             f" : 'no-panel')")
+
+    def align(self):
+        """Re-assert top alignment once the layout has settled."""
+        return self.cdp.evaluate(
+            "(window.__nsbotAlign ? window.__nsbotAlign() : 'no-panel')")
 
     def focus_state(self):
         try:
