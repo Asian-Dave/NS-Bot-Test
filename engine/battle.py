@@ -242,6 +242,22 @@ class BattleRunner:
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
             geo = self._geometry(gray)
             if geo is None:
+                # THE GATE HAS ALREADY SAID THE COMMAND BAR IS THERE, which
+                # invalidates the fast path's whole assumption. `locate` budgets
+                # its misses on the premise that a miss means the bar is absent
+                # - true on a cutscene or a panel, false here. So force one full
+                # re-acquire instead of trusting the budget.
+                #
+                # Without this, a single budgeted miss ended the MISSION: live,
+                # a fight went "gate -> command_bar (0.44s)" then immediately
+                # "geometry failed -> stalled", and the runner fell back to the
+                # resume ladder, walked, met the next encounter and stalled the
+                # same way - a loop that never finished a battle.
+                self.log.info("battle: geometry missed a gated command bar - "
+                              "forcing a full re-acquire")
+                BattleGeometry.forget()
+                geo = self._geometry(gray)
+            if geo is None:
                 self.log.warning("battle: command bar gated but geometry failed")
                 return STALLED, {"rounds": rounds, "acted": acted}
 

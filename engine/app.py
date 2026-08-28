@@ -165,7 +165,38 @@ class Runner:
         s = int(time.time() - self.t0)
         return f"{s//3600}h {s%3600//60}m" if s >= 3600 else f"{s//60}m {s%60}s"
 
+    def _refresh_no_click_zone(self):
+        """Re-read where the panel actually is, every cycle.
+
+        THE ZONE WENT STALE AND THE BOT PRESSED THE OPERATOR'S OWN BUTTONS. It
+        was captured once at attach and never updated, so any layout shift left
+        the guard defending empty space. Observed live: the panel moved, and bot
+        clicks aimed at the game landed on the dock - setting a mission pin,
+        toggling focus mode twice, and finally hitting RELOG, which reloaded the
+        page and dropped the session back to character select. None of those were
+        operator commands; the log recorded them as though they were.
+
+        `dock_rect()` is a single JS evaluate, so re-reading it per cycle is far
+        cheaper than one wrong click. The zone is REPLACED, never appended, or
+        the list would grow without bound.
+        """
+        try:
+            rect = self.dock.dock_rect()
+        except Exception:
+            return
+        if not rect:
+            return
+        if getattr(self, "_zone", None) != rect:
+            if getattr(self, "_zone", None) in self.actor.no_click_zones:
+                self.actor.no_click_zones.remove(self._zone)
+            if rect not in self.actor.no_click_zones:
+                self.actor.no_click_zones.append(rect)
+            if getattr(self, "_zone", None) is not None:
+                self.log.info("dock moved; no-click zone is now %s", rect)
+            self._zone = rect
+
     def push(self):
+        self._refresh_no_click_zone()
         try:
             self.dock.render({
                 "mode": self.mode, "state": self.state, "task": self.task,

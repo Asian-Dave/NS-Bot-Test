@@ -1093,6 +1093,85 @@ def test_seal_phases():
           "parks the round forever")
 
 
+def test_mission_list_is_not_scenery():
+    """A mission LIST page must never be mistaken for a walkable map.
+
+    This is the bug that made farming look broken: on Grade A page 5/7 - three
+    padlocked rows, both page arrows - none of the six original NOT_IN_MISSION
+    anchors matched, so `looks_like_mission_scene` said True and the runner
+    "walked" by clicking the map edge INSIDE the mission list. The mission never
+    started and the bot never left the page.
+    """
+    print("\nmission list vs mission scenery")
+    from perceive import find
+    import farm, bot as botmod
+    import json as _json
+    cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
+    tpls = botmod.load_templates(cfg, LOG)
+
+    listing = os.path.join(ROOT, "ref/auto/mission/list_all_locked.png")
+    frame = cv2.imread(listing)
+    check(frame is not None, "the all-locked list frame is committed")
+    if frame is None:
+        return
+    check(farm.looks_like_mission_scene(frame, tpls) is False,
+          "an all-locked mission list is NOT a walkable scene")
+
+    # The anchors that carry it, with the margins they were chosen for.
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    for name, floor in (("page_next", 0.90), ("page_prev", 0.90),
+                        ("mission_locked", 0.90), ("list_back_arrow", 0.90)):
+        c = find(gray, tpl(name))[1]
+        check(c >= floor, f"{name} anchors the list page ({c:.3f} >= {floor})")
+
+    # ...and must NOT fire on a real in-mission frame, or the fix would block
+    # traversal instead - trading one stuck state for another.
+    combat = cv2.cvtColor(
+        cv2.imread(os.path.join(ROOT, "ref/auto/mission/COMBAT.png")),
+        cv2.COLOR_BGR2GRAY)
+    for name in ("page_next", "page_prev", "mission_locked", "list_back_arrow"):
+        c = find(combat, tpl(name))[1]
+        check(c < 0.88, f"{name} stays silent in combat ({c:.3f} < 0.88)")
+
+
+def test_cold_command_bar_probe_is_budgeted():
+    """A missing command bar must not cost a full sweep on every cycle.
+
+    The full 90-scale sweep measures ~13 s on a 3440x1440 frame. The hint path
+    already budgeted its misses; the COLD path (no hint cached) did not, so a
+    process that had never seen a battle paid 13 s per farm cycle to be told
+    there was no command bar. The panel froze for 40 s at a time and operator
+    commands were not read until the sweep finished.
+    """
+    print("\ncold command-bar probe is budgeted")
+    from geometry import BattleGeometry
+    frame = cv2.imread(os.path.join(ROOT, "ref/auto/mission/list_all_locked.png"))
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    ch, do = tpl("charge_btn"), tpl("dodge_btn")
+
+    BattleGeometry.forget()
+    check(BattleGeometry._cold_probed is False,
+          "forget() disarms the cold budget so a layout change can re-probe")
+
+    t0 = time.time()
+    first = BattleGeometry.locate(gray, ch, do)
+    cold = time.time() - t0
+    check(first is None, "no command bar on a mission list page")
+    check(BattleGeometry._cold_probed is True,
+          "the first cold miss still pays for a full sweep")
+
+    t0 = time.time()
+    for _ in range(5):
+        check_none = BattleGeometry.locate(gray, ch, do)
+    warm = (time.time() - t0) / 5.0
+    check(check_none is None, "still correctly reports no command bar")
+    # The point of the change is the RATIO, so assert on that rather than on a
+    # wall-clock number that would vary by machine.
+    check(warm < cold / 3.0,
+          f"a budgeted miss is far cheaper than the sweep "
+          f"({warm:.2f}s vs {cold:.2f}s)")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1101,7 +1180,8 @@ def main():
                test_resume_ladder_panels, test_minigame_classifier,
                test_card_matcher, test_tp_navigation_templates,
                test_dock_and_controls, test_kekkai_digits,
-               test_seal_phases):
+               test_seal_phases, test_mission_list_is_not_scenery,
+               test_cold_command_bar_probe_is_budgeted):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

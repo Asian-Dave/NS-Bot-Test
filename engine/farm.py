@@ -310,10 +310,23 @@ def to_grade_panel(actor, cap, log):
     if entry is not None and tp.click_when(actor, cap, entry, "enter Mission Room"):
         if find_grades(cap.frame(gray=False)):
             return True
-    # In the Mission Room but on the Special tab: the Story tab is the way back.
-    story = _tpl("story_tab")
-    if story is not None and tp.click_when(actor, cap, story, "Story tab"):
-        return bool(find_grades(cap.frame(gray=False)))
+    # ALREADY DEEPER IN: a mission list page or a detail panel. Both carry the
+    # same back arrow, and backing out is the only way to the grade panel from
+    # there - `mission_room_entry` does not match once the room is already open,
+    # so without this the farm loop simply could not recover. Live, it sat on
+    # Grade A page 5/7 (all three rows padlocked) and never got out.
+    #
+    # Up to two presses: detail -> list -> grades. Each is verified rather than
+    # assumed, and the loop stops the moment the grade panel appears.
+    back = _tpl("list_back_arrow")
+    if back is not None:
+        for i in range(2):
+            if not tp.click_when(actor, cap, back, f"back out of the list ({i + 1})"):
+                break
+            time.sleep(0.45)
+            if find_grades(cap.frame(gray=False)):
+                log.info("backed out to the grade panel")
+                return True
     log.info("could not reach the grade panel")
     return bool(find_grades(cap.frame(gray=False)))
 
@@ -445,8 +458,27 @@ def in_mission(frame, templates):
 
 
 # Anchors that prove we are NOT in a mission. All are high-margin.
+#
+# The list-page anchors are here because their absence was the actual bug. On
+# Grade A page 5/7 - three padlocked rows, both page arrows, the back arrow -
+# NONE of the original six matched (grade_tab 0.506, mission_room 0.417, the
+# rest 0.28..0.51), so `looks_like_mission_scene` returned True and the runner
+# "walked" by clicking the map edge INSIDE the mission list. Measured on that
+# frame and every recorded mission frame:
+#
+#     template          list pages        everything else
+#     page_next         0.973 .. 1.000    0.445 .. 0.600
+#     page_prev         0.973 .. 1.000    0.496 .. 0.600
+#     mission_locked    0.946 .. 1.000    0.381 .. 0.402
+#     list_back_arrow   0.960 .. 1.000    0.417 .. 0.467
+#
+# Every one separates by more than 0.37, so the 0.88 gate sits clear of both
+# sides. `list_back_arrow` is the broadest - it is on the list AND the detail
+# panel - which is what makes it the reliable "this is list UI, not scenery".
 NOT_IN_MISSION = ("lobby_rail_fortune", "char_slot_level", "play_btn",
-                  "logged_out", "grade_tab", "mission_room")
+                  "logged_out", "grade_tab", "mission_room",
+                  "page_next", "page_prev", "mission_locked",
+                  "list_back_arrow")
 
 
 def looks_like_mission_scene(frame, templates):

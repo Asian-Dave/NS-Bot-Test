@@ -138,11 +138,12 @@ Enforced in code, not by convention:
 
 ## Known gaps
 
-* **The player HUD is read as enemy bars.** Every reading carries four constant
-  `51.0` entries. The watchdog's direction of change is still right, but its
-  counts are inflated.
 * **The resume ladder cannot leave a battle.** Nothing wedges today, but a fight
   it cannot end has no exit.
+* **Traversal heading is a coin flip on the first run of a map.** The Kekkai
+  runner derives it from where the character spawned, but that finder keys on a
+  red robe and this character wears purple, so it returns nothing and mission
+  traversal alternates instead. A wrong first guess costs one run.
 * `close_popup_x_large` never matches at any scale; the Daily Login Calendar is
   unclassifiable until it is re-cut.
 * No positive lobby anchor beyond the icon rail — the village labels are

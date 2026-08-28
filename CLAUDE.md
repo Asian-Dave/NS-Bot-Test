@@ -400,6 +400,80 @@ first, and each failed silently:
 * The `Loading...` interstitial resolves normally (0% -> done). The Hunting House
   hang at 3% was specific to that sub-app, not a general loading defect.
 
+## Navigation — two measured faults behind "clunky" farming
+
+Both found by watching a live farm run stall on Grade A page 5/7, and both
+reproduced offline against `ref/auto/mission/list_all_locked.png`.
+
+**1. A missing command bar cost a FULL SWEEP on every cycle.**
+`BattleGeometry.locate` already budgeted its misses on the *hint* path, but the
+*cold* path — no hint cached — fell straight through to the 90-scale sweep.
+Measured **12.9 s** on a 3440x1440 frame. `farm.in_mission` calls it once per
+cycle, so a process that had never seen a battle paid 12.9 s per cycle to be
+told there is no command bar, forever. Symptoms: the dock froze for 40 s at a
+time, `uptime` stopped advancing, and an operator Stop was not read until the
+sweep finished — it looked like a hang, and was 100% CPU in `matchTemplate`.
+
+Fixed by giving the cold path the same `REACQUIRE_AFTER` budget. The FIRST cold
+miss still pays in full, so an unfamiliar geometry is still discovered; after
+that the narrow sweep carries it. Measured **12.94 s -> 0.96 s**, and combat is
+untouched because it runs on the hint path (~62 ms).
+
+**2. A mission LIST page was classified as walkable scenery.**
+`looks_like_mission_scene` is a negative definition — it returns True when none
+of the "not in a mission" anchors match — and on Grade A page 5/7 *none of the
+six matched*: `grade_tab` 0.506, `mission_room` 0.417, the rest 0.28..0.51. So
+the runner "walked" by clicking the map edge INSIDE the mission list, the
+mission never started, and it never left the page.
+
+The list page does carry high-margin anchors; they simply were not in the set:
+
+| template | list pages | everything else |
+|---|---|---|
+| `page_next` | 0.973 .. 1.000 | 0.445 .. 0.600 |
+| `page_prev` | 0.973 .. 1.000 | 0.496 .. 0.600 |
+| `mission_locked` | 0.946 .. 1.000 | 0.381 .. 0.402 |
+| `list_back_arrow` | 0.960 .. 1.000 | 0.417 .. 0.467 |
+
+All four separate by >0.37. `list_back_arrow` (newly cut) is the broadest — it
+is on the list AND the detail panel — which makes it the reliable "this is list
+UI, not scenery" signal.
+
+**Corollary: `to_grade_panel` could not back out of a list.** It handled lobby,
+Mission Room and grade panel, but from a list or detail page `mission_room_entry`
+does not match and the `story_tab` branch was dead code — **there is no
+`story_tab` template**. It now presses `list_back_arrow` up to twice
+(detail -> list -> grades), verifying after each.
+
+**A negative definition needs a positive veto for every UI surface it can meet.**
+That is the general lesson: "no anchor matched" is not evidence of scenery, it is
+evidence that the anchor set is incomplete — and the action it licensed here was
+blind clicking.
+
+### Do not take CLIPPED screenshots from a second CDP client while the bot runs
+
+`Page.captureScreenshot` with a `clip` applies its own device-metrics override
+and restores it afterwards. A second client polling clipped frames therefore
+RESIZES THE PAGE repeatedly, fighting the viewport `browser.pin_viewport` pins.
+
+Observed while recording a farm run for debugging: the canvas and the dock moved
+under the bot, and clicks aimed at the game landed on the panel instead —
+setting a mission pin, toggling focus mode twice, and pressing **Relog**, which
+reloaded the page and dropped the session to character select. The log shows all
+of them as `operator:` events; no operator issued any of them.
+
+Two lasting consequences:
+
+* Record with FULL-frame captures, or drive recording from the bot's own client.
+* The no-click zone must be re-read every cycle, not captured once at attach —
+  a guard that defends where the panel *used to be* is worse than none, because
+  it reads as protection. `Runner._refresh_no_click_zone` does this now.
+
+The safety rule that DID hold: the resume ladder reached character select and
+clicked **Play by template** (`play_btn` 0.979), never by offset, so `Delete` —
+which sits beside it — was never a candidate. That is exactly why the rule is
+"whitelist Play by template".
+
 ## The single biggest lesson
 
 **Never judge a bar, or "no change", by eye. Measure it.**

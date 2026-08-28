@@ -154,14 +154,37 @@ def enemy_bar_fill(frame_bgr, x, y, w, h=10):
     return (cols.max() + 1) / w * 100 if len(cols) else 0.0
 
 
-def find_enemy_bars(frame_bgr, x0, x1, y0, y1, bar_h=10, min_run=40):
+# The PLAYER HUD lives in the top band of the frame and is built from the same
+# bright red as an enemy HP bar, so a scan that starts at y=0 returns it as
+# enemies. Measured on a live 1440-tall combat frame:
+#
+#     player HUD   y =  40,  60,  87, 102   ( 2.8% .. 7.1% down)  all 51.0%
+#     real enemies y = 620, 835, 881        (43.1% .. 61.2% down)  25.9 .. 30.9%
+#
+# The HUD entries are identical every turn while real bars move, which is how
+# they were spotted: a fight showed `enemies=10, total=418.1%` when three
+# enemies were on screen. That inflates the watchdog's total and count, and a
+# bar-derived click in that row would land in the HUD - which is where the token
+# `+` sinks are. The gap between 7.1% and 43.1% is wide, so a 15% floor clears
+# the HUD with room to spare and still sits far above any real bar seen.
+HUD_GUARD_FRAC = 0.15
+
+
+def find_enemy_bars(frame_bgr, x0, x1, y0, y1, bar_h=10, min_run=40,
+                    hud_guard=HUD_GUARD_FRAC):
     """Locate every enemy HP bar by scanning VERTICALLY.
 
     Multi-enemy encounters are the norm (2, 3 and 4 seen). Each enemy's plate and
     bar sit at their own y, so a single fixed bar position is wrong. Returns
     [(y, fill_pct)] top to bottom.
+
+    `hud_guard` floors the scan below the player HUD; pass 0 to disable it.
     """
     lo, hi = HP_FILL_BGR
+    if hud_guard:
+        y0 = max(y0, int(frame_bgr.shape[0] * hud_guard))
+    if y1 <= y0:
+        return []
     region = frame_bgr[y0:y1, x0:x1]
     m = cv2.inRange(region, np.array(lo, np.uint8), np.array(hi, np.uint8))
     rows = (m > 0).sum(axis=1)

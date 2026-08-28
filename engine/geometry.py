@@ -188,10 +188,32 @@ class BattleGeometry:
                               pitch_tolerance)
             if got is not None:
                 cls._misses = 0
+                cls._cold_misses = 0
                 return got
-            # A cold miss falls through to the FULL sweep: with no hint we do not
-            # know the layout, and being fast is worth nothing if the answer is
-            # wrong.
+            # A cold miss falls through to the FULL sweep so an unfamiliar
+            # geometry is still discovered - but ONLY OCCASIONALLY, on the same
+            # budget the hint path uses.
+            #
+            # Measured: the full sweep costs 12.9 s on a 3440x1440 frame, and
+            # with no hint cached NOTHING limited how often it ran. The farm loop
+            # calls this every cycle through `farm.in_mission`, so on any screen
+            # that is not a battle - the Mission Room, a list page, a cutscene -
+            # the bot paid 12.9 s per cycle to be told there is no command bar.
+            # A process that had never seen a battle never cached a hint, so it
+            # never left that state: the panel froze for 40 s at a time and the
+            # operator's Stop was not read until the sweep finished. That is the
+            # "clunky navigation" as experienced.
+            #
+            # The first cold call still pays in full, so an unexpected geometry
+            # is found immediately; after that a miss is taken at face value and
+            # the re-probe is budgeted. The narrow sweep still runs every call,
+            # so a bar at any geometry we have actually seen is found at once.
+            if cls._cold_probed:
+                cls._cold_misses += 1
+                if cls._cold_misses < cls.REACQUIRE_AFTER:
+                    return None
+                cls._cold_misses = 0
+            cls._cold_probed = True
 
         if scales is None and cls._hint is not None:
             got = cls._from_hint(frame_gray, charge_tpl, dodge_tpl, min_conf)
@@ -246,6 +268,8 @@ class BattleGeometry:
     # -- the fast path -------------------------------------------------------
     _hint = None            # {scale, charge, dodge} from the last full locate
     _misses = 0             # consecutive fast-path misses
+    _cold_misses = 0        # consecutive misses with NO hint cached
+    _cold_probed = False    # has a full sweep ever been paid for on this frame set
     HINT_WINDOW = 140       # px around the remembered button centres
     REACQUIRE_AFTER = 25    # misses before paying for a full sweep again
     # The scales this project has ACTUALLY seen, not a guess around 1.0.
@@ -261,6 +285,12 @@ class BattleGeometry:
     def forget(cls):
         """Drop the cached geometry. Call after a viewport or layout change."""
         cls._hint = None
+        # The cold-miss budget must reset too. A layout change is exactly the
+        # case where the full sweep needs to be paid again, so leaving the
+        # budget armed would suppress the one probe that could re-find the bar.
+        cls._misses = 0
+        cls._cold_misses = 0
+        cls._cold_probed = False
 
     @classmethod
     def _narrow(cls, frame_gray, charge_tpl, dodge_tpl, min_conf,
