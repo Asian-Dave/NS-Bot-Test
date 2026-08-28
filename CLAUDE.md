@@ -502,6 +502,50 @@ what a leftward map draws — a mirrored arrow, a badge on the other side, or
 nothing. Until then traversal keeps alternating, which costs one wasted run on a
 wrong first guess and is honest about not knowing.
 
+### Traversal heading comes from the CHARACTER, found by saturation not hue
+
+The operator's "it cannot find the target from the next area" was a heading
+coin-flip. `kekkai_play.find_character` keys on a RED robe; at Lv 65 this
+character wears purple, so it returned None and mission traversal ALTERNATED
+instead. Combined with `_scene_changed` reporting "moved on" when the character
+merely walks WITHIN a map, that oscillates:
+
+    right -> dead end -> left -> moved on -> left -> dead end -> right -> ...
+    13 traversal runs, 5 dead ends, 0 encounters
+
+**Hue is the wrong invariant - gear changes.** Saturation is not: a player
+sprite is far more saturated than the painted scenery, and is small and TALL.
+Measured with the map band isolated (below the HUD, above the NPC rail):
+
+| | saturation / shape |
+|---|---|
+| desert sand | median 111, p90 **126** |
+| character (purple robe) | area 1245, bbox 62x107, at (2431, 587) |
+| character (same, other map) | area 1291, bbox 62x106, at (911, 487) |
+
+A gate at **150** leaves exactly ONE blob on a frame with the character, and
+ZERO on the lobby, on combat, and on six frames from the render-stalled mission
+where the game never drew it. `MissionRunner.find_character` does this.
+
+Then the spawn rule this file already records for Kekkai applies: you enter a
+map through one edge, so head AWAY from it — `x < centre -> right`, else left.
+
+**Independently corroborated:** on the entry map the detector put the character
+at x=911 and said "head right", and the game itself drew a right-pointing
+**"Go!" arrow** on that very frame.
+
+**Also: click the CHARACTER'S OWN ROW, not a fixed ground line.** `GROUND_Y` is
+880, which on the desert map is ~240 px BELOW the character's feet — off the
+walkable path, so the run barely moved and then read as a dead end. That is half
+of why the oscillation never resolved.
+
+Measured live, same stuck mission, before and after:
+
+| | runs | dead ends | encounters |
+|---|---|---|---|
+| alternating heading, fixed GROUND_Y | 13 | 5 | 0 |
+| character-derived heading and row | **2** | **0** | **1** |
+
 ## The single biggest lesson
 
 **Never judge a bar, or "no change", by eye. Measure it.**

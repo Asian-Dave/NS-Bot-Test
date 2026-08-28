@@ -52,6 +52,7 @@ locked-row detector is mandatory or the bot dead-loops on a dead row. That is
 import time
 
 import cv2
+import numpy as np
 
 import battle as battle_mod
 from gate import Stopped, template as cond_template
@@ -569,6 +570,53 @@ class MissionRunner:
             self.log.info("mission: advanced %d dialogue screen(s)", n)
         return n
 
+    # Character detection, by SATURATION rather than by hue.
+    #
+    # `kekkai_play.find_character` keys on a RED robe, and at Lv 65 this
+    # character wears purple, so it returns None here and the heading was a coin
+    # flip. Hue is the wrong invariant: gear changes. What does not change is
+    # that a player sprite is far more saturated than the painted scenery, and
+    # is small and TALL.
+    #
+    # Measured on live frames (map band only, so the HUD and the NPC rail are
+    # excluded):
+    #
+    #     desert sand           saturation median 111, p90 126
+    #     character (purple)    area 1245, bbox  62x107, at (2431, 587)
+    #     character (same map)  area 1291, bbox  62x106, at ( 911, 487)
+    #
+    # A gate at 150 leaves exactly ONE blob on a frame with the character, and
+    # ZERO on six frames where the game failed to draw it and on the lobby.
+    CHAR_SAT = 150
+    CHAR_BAND = (200, 950)          # y: below the HUD, above the NPC rail
+
+    @classmethod
+    def find_character(cls, frame_bgr):
+        """Where our own character is standing. (x, y) in captured px, or None."""
+        h, w = frame_bgr.shape[:2]
+        y0, y1 = cls.CHAR_BAND
+        x0, x1 = cls.CANVAS_X0, cls.CANVAS_X1
+        x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
+        y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        hsv = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+        m = (((hsv[:, :, 1] > cls.CHAR_SAT) & (hsv[:, :, 2] > 60))
+             .astype(np.uint8) * 255)
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+        n, _, st, ce = cv2.connectedComponentsWithStats(m)
+        best = None
+        for i in range(1, n):
+            a = st[i, cv2.CC_STAT_AREA]
+            bw, bh = st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
+            if not (600 <= a <= 12000) or bh < 60:
+                continue
+            if bw / max(1, bh) > 0.95:          # a character is TALL
+                continue
+            if best is None or a > best[0]:
+                best = (a, int(ce[i][0]) + x0, int(ce[i][1]) + y0)
+        return (best[1], best[2]) if best else None
+
     @staticmethod
     def _scene_hash(frame_bgr):
         """A coarse fingerprint of the MAP AREA, for detecting movement.
@@ -623,12 +671,40 @@ class MissionRunner:
         The wait is a GATE, not a sleep, so an ambush mid-run is picked up the
         moment the command bar appears rather than after a fixed delay.
         """
-        heading = getattr(self, "_heading", "right")
+        # HEADING FROM WHERE THE CHARACTER IS STANDING, when we can see it.
+        #
+        # You enter a map through one edge, so you appear NEAR that edge and the
+        # way onward is AWAY from it - the rule CLAUDE.md already records for the
+        # Kekkai runner. Mission traversal could not use it because that finder
+        # keys on a red robe, so it alternated instead, and alternating produced
+        # exactly the loop the operator reported: right, dead end, left, moved
+        # on, left, dead end, right... 13 runs and 5 dead ends without reaching
+        # the next encounter, because `_scene_changed` reports "moved on" when
+        # the character merely walks WITHIN the same map.
+        #
+        # Corroborated on the entry map: the detector put the character at
+        # x=911 (left of centre) and said "right", and the game itself drew a
+        # right-pointing "Go!" arrow on that very frame.
+        pos = self.find_character(frame_bgr)
+        centre = (self.CANVAS_X0 + self.CANVAS_X1) // 2
+        if pos is not None:
+            heading = "right" if pos[0] < centre else "left"
+            self._heading = heading
+        else:
+            heading = getattr(self, "_heading", "right")
         x = (self.CANVAS_X1 - self.EDGE_MARGIN if heading == "right"
              else self.CANVAS_X0 + self.EDGE_MARGIN)
-        self.log.info("mission: traversing - running %s to the map edge", heading)
+        # RUN ALONG THE CHARACTER'S OWN ROW, not a fixed ground line. GROUND_Y is
+        # 880, which on the desert map is ~240 px BELOW the character's feet -
+        # off the walkable path, so the run barely moved and read as a dead end.
+        y = pos[1] if pos is not None else self.GROUND_Y
+        if pos is not None:
+            self.log.info("mission: character at %s - running %s", pos, heading)
+        else:
+            self.log.info("mission: traversing - running %s to the map edge",
+                          heading)
         before = self._scene_hash(frame_bgr)
-        self.actor.click_pixel(x, self.GROUND_Y, why=f"run {heading} to map edge")
+        self.actor.click_pixel(x, y, why=f"run {heading} to map edge")
 
         # Anything that means "stop walking" - in priority order, as everywhere.
         watch = [c for c in (self.conditions.get("command_bar"),

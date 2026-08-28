@@ -1246,6 +1246,64 @@ def test_focus_survives_a_reload():
           "focus is not forced back on when the operator turned it off")
 
 
+def test_character_finder_drives_heading():
+    """Traversal heading must come from where the character stands.
+
+    The old code alternated, because kekkai_play.find_character keys on a RED
+    robe and this character wears purple - so it returned None and the heading
+    was a coin flip. Live, that produced the loop the operator reported: right,
+    dead end, left, moved on, left, dead end, right... 13 runs, 5 dead ends, no
+    encounter, because _scene_changed reports "moved on" when the character
+    merely walks WITHIN a map.
+
+    Hue is the wrong invariant (gear changes); saturation is not. Measured with
+    the map band isolated: desert sand peaks at saturation ~126 while the
+    character sits above 150, is small, and is TALL.
+    """
+    print("\ncharacter finder drives traversal heading")
+    import mission as mission_mod
+    R = mission_mod.MissionRunner
+    centre = (R.CANVAS_X0 + R.CANVAS_X1) // 2
+
+    right = cv2.imread(os.path.join(ROOT, "ref/auto/mission/traverse_char_right.png"))
+    left = cv2.imread(os.path.join(ROOT, "ref/auto/mission/traverse_char_left.png"))
+    check(right is not None and left is not None,
+          "both traversal frames are committed")
+    if right is None or left is None:
+        return
+
+    p = R.find_character(right)
+    check(p is not None, f"character found on the right-hand frame ({p})")
+    if p:
+        check(p[0] > centre, f"it is right of centre (x={p[0]} > {centre})")
+        check(("right" if p[0] < centre else "left") == "left",
+              "so the heading is LEFT - away from the edge it entered by")
+
+    p2 = R.find_character(left)
+    check(p2 is not None, f"character found on the entry frame ({p2})")
+    if p2:
+        check(p2[0] < centre, f"it is left of centre (x={p2[0]} < {centre})")
+        check(("right" if p2[0] < centre else "left") == "right",
+              "so the heading is RIGHT - and the game drew a right-pointing "
+              "'Go!' arrow on that same frame")
+
+    # The click must follow the character's own row. GROUND_Y is 880, which on
+    # the desert map is ~240px BELOW its feet - off the walkable path, so the
+    # run barely moved and read as a dead end.
+    if p:
+        check(abs(p[1] - R.GROUND_Y) > 100,
+              f"the character's row ({p[1]}) is far from GROUND_Y "
+              f"({R.GROUND_Y}) - a fixed ground line misses the path")
+
+    # It must NOT invent a character where the game drew none, or traversal
+    # would follow a phantom.
+    for rel in ("ref/auto/lobby_full.png", "ref/auto/mission/COMBAT.png"):
+        pp = os.path.join(ROOT, rel)
+        if os.path.exists(pp):
+            check(R.find_character(cv2.imread(pp)) is None,
+                  f"no character invented on {os.path.basename(rel)}")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1256,7 +1314,8 @@ def main():
                test_dock_and_controls, test_kekkai_digits,
                test_seal_phases, test_mission_list_is_not_scenery,
                test_cold_command_bar_probe_is_budgeted,
-               test_focus_survives_a_reload):
+               test_focus_survives_a_reload,
+               test_character_finder_drives_heading):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
