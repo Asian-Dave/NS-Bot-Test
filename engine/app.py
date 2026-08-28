@@ -71,6 +71,8 @@ VIEWPORT = (1720, 720, 2)          # the ONE pinned geometry every template
 # S1..S8 are the skill slots (4 left bank, 4 right).
 SKILL_SLOTS = ["AT", "CH", "DO", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
 SKILLS_PATH = "run/skills.json"
+FARM_PATH = "run/farm.json"
+GRADES = ["auto", "S", "A", "B", "C"]
 
 TASKS = [
     {"key": "resume_to_lobby", "label": "Resume to lobby"},
@@ -143,6 +145,10 @@ class Runner:
         # Editable from the panel, and persisted OUTSIDE the tracked config so
         # experimenting with slots never dirties a versioned file.
         self.skills = _read_skills()
+        f = _read_json(FARM_PATH, {})
+        self.grade = f.get("grade")          # None == auto
+        self.pin_page = f.get("page")        # None == highest unlocked
+        self.pin_row = f.get("row")
         self.focus_wanted = True
         self.focus_on = False
         self.focus_aligned = False
@@ -167,6 +173,9 @@ class Runner:
                 "note": self.note, "tasks": TASKS, "log": self.log.lines[-10:],
                 "focus": self.focus_on,
                 "skills": self.skills, "skill_slots": SKILL_SLOTS,
+                "grades": GRADES, "grade": self.grade,
+                "pin": (f"page {self.pin_page} row {self.pin_row}"
+                        if self.pin_page and self.pin_row else None),
             })
         except (OSError, CDPError) as e:
             raise Disconnected(str(e))
@@ -205,6 +214,31 @@ class Runner:
             self.skills = []
             _write_skills(self.skills)
             self.log.info("operator: skill order cleared (Attack only)")
+        elif c == "grade":
+            g = cmd.get("arg")
+            self.grade = None if g == "auto" else (g if g in GRADES else self.grade)
+            self._save_farm()
+            self.log.info("operator: grade -> %s", self.grade or "auto")
+        elif c in ("page_up", "page_dn", "row_up", "row_dn"):
+            # Stepping either one turns the pin ON; both default to 1 so the
+            # first press pins page 1 row 1 rather than something arbitrary.
+            self.pin_page = self.pin_page or 1
+            self.pin_row = self.pin_row or 1
+            if c == "page_up":
+                self.pin_page += 1
+            elif c == "page_dn":
+                self.pin_page = max(1, self.pin_page - 1)
+            elif c == "row_up":
+                self.pin_row = min(3, self.pin_row + 1)
+            else:
+                self.pin_row = max(1, self.pin_row - 1)
+            self._save_farm()
+            self.log.info("operator: pinned mission -> page %d row %d",
+                          self.pin_page, self.pin_row)
+        elif c == "pin_off":
+            self.pin_page = self.pin_row = None
+            self._save_farm()
+            self.log.info("operator: mission -> highest unlocked")
         elif c == "focus":
             self.focus_wanted = not self.focus_wanted
             self.dock.focus(self.focus_wanted)
@@ -348,6 +382,10 @@ class Runner:
             self.note = f"farm: {started} started, {banked} banked"
             self.log.info(self.note)
 
+    def _save_farm(self):
+        _write_json(FARM_PATH, {"grade": self.grade, "page": self.pin_page,
+                                "row": self.pin_row})
+
     def battle_cfg(self):
         """The config a mission should run with, including the panel's skills.
 
@@ -361,6 +399,10 @@ class Runner:
             b = dict(cfg.get("battle", {}))
             b["rotation"] = list(self.skills)
             cfg["battle"] = b
+        m = dict(cfg.get("mission", {}))
+        m["grade"] = self.grade
+        m["mission_page"], m["mission_row"] = self.pin_page, self.pin_row
+        cfg["mission"] = m
         return cfg
 
     def _run_mission(self):
@@ -554,24 +596,30 @@ class Runner:
         self.log.info("quit")
 
 
-def _read_skills():
-    p = os.path.join(ROOT, SKILLS_PATH)
+def _read_json(rel, default):
     try:
-        with open(p) as f:
-            v = json.load(f)
-        return [k for k in v if k in SKILL_SLOTS]
+        with open(os.path.join(ROOT, rel)) as f:
+            return json.load(f)
     except Exception:
-        return []
+        return default
 
 
-def _write_skills(order):
-    p = os.path.join(ROOT, SKILLS_PATH)
+def _write_json(rel, value):
+    p = os.path.join(ROOT, rel)
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w") as f:
-            json.dump(order, f)
+            json.dump(value, f)
     except Exception:
         pass
+
+
+def _read_skills():
+    return [k for k in _read_json(SKILLS_PATH, []) if k in SKILL_SLOTS]
+
+
+def _write_skills(order):
+    _write_json(SKILLS_PATH, order)
 
 
 def _write_control(value):

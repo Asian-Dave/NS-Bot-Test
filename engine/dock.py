@@ -91,6 +91,8 @@ _CSS = """
 #__ID__ .bad{color:#f87171}
 #__ID__ .g{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 #__ID__ .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+#__ID__ .g5{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+#__ID__ .g5 button{padding:5px 0;font-size:10px}
 #__ID__ .g4 button{padding:5px 0;font-size:11px}
 #__ID__ button{font:inherit;padding:7px 4px;cursor:pointer;background:#232833;
   color:#e6e9ef;border:1px solid #39414f;border-radius:5px;transition:none}
@@ -259,6 +261,16 @@ _BOOTSTRAP = r"""
         btn("run", "Run") + btn("pause", "Pause") +
         btn("relog", "Relog") + btn("stop", "Stop") +
       `</div>` +
+      `<h4>Farm target</h4>` +
+      `<div class="row"><span class="d">grade</span><span id="v_grade"></span></div>` +
+      `<div class="g5" id="v_grades"></div>` +
+      `<div class="row" style="margin-top:5px"><span class="d">mission</span>` +
+        `<span id="v_pin"></span></div>` +
+      `<div class="g5" style="margin-top:3px">` +
+        btn("pin_off", "Highest") + btn("page_dn", "Page -") +
+        btn("page_up", "Page +") + btn("row_dn", "Row -") +
+        btn("row_up", "Row +") +
+      `</div>` +
       `<h4>Skill order</h4>` +
       `<div class="d" id="v_skills" style="margin-bottom:5px"></div>` +
       `<div class="g4" id="v_slots"></div>` +
@@ -283,6 +295,19 @@ _BOOTSTRAP = r"""
   // The slot buttons never change, so build them once. Clicking one APPENDS it
   // to the order - that is what makes the order editable without a text field,
   // and it reads the same way the operator says it: "S1, then S3, then attack".
+  const fillGrades = (grades) => {
+    const key = (grades || []).join(",");
+    if (!V.v_grades || V.v_grades.dataset.key === key) return;
+    V.v_grades.dataset.key = key;
+    V.v_grades.innerHTML = "";
+    (grades || []).forEach(g => {
+      const b = document.createElement("button");
+      b.dataset.cmd = "grade"; b.dataset.arg = g;
+      b.textContent = g === "auto" ? "Auto" : g;
+      V.v_grades.appendChild(b);
+    });
+  };
+
   const fillSlots = (slots) => {
     const key = (slots || []).join(",");
     if (!V.v_slots || V.v_slots.dataset.key === key) return;
@@ -326,6 +351,11 @@ _BOOTSTRAP = r"""
     if (!V.v_state) skeleton(el, s);
     fillTasks(s.tasks);
     fillSlots(s.skill_slots);
+    fillGrades(s.grades);
+    setText("v_grade", s.grade || "auto (best available)");
+    setText("v_pin", s.pin || "highest unlocked");
+    el.querySelectorAll('[data-cmd="grade"]').forEach(b =>
+      setOn(b, b.dataset.arg === (s.grade || "auto")));
     const ord = (s.skills || []);
     setText("v_skills", ord.length
         ? ord.map((k, i) => `${i + 1}. ${k}`).join("   ")

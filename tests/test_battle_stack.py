@@ -766,7 +766,7 @@ def test_dock_and_controls():
     import app as _app
     rr = _app.Runner.__new__(_app.Runner)
     rr.cfg = {"battle": {"rotation": ["AT"], "fallback": "AT"}}
-    rr.skills = []
+    rr.skills, rr.grade, rr.pin_page, rr.pin_row = [], None, None, None
     check(rr.battle_cfg()["battle"]["rotation"] == ["AT"],
           "no skills chosen means Attack only")
     rr.skills = ["S1", "S3"]
@@ -779,6 +779,29 @@ def test_dock_and_controls():
           "the Attack fallback survives, so a fight never stalls")
     check(set(_app.SKILL_SLOTS) >= {"AT", "S1", "S8"},
           "the panel offers the command buttons and all eight slots")
+
+    # THE FARM TARGET IS EDITABLE FROM THE PANEL TOO. Auto means "read the grade
+    # panel and take the highest unlocked mission"; a pin overrides both.
+    rr.cfg = {"battle": {"rotation": ["AT"]}, "mission": {"grade": "A"}}
+    rr.skills, rr.grade, rr.pin_page, rr.pin_row = [], None, None, None
+    m = rr.battle_cfg()["mission"]
+    check(m["grade"] is None,
+          "auto grade overrides a grade left in the config file")
+    check(m["mission_page"] is None and m["mission_row"] is None,
+          "no pin means the highest unlocked mission")
+    rr.grade, rr.pin_page, rr.pin_row = "B", 3, 2
+    m = rr.battle_cfg()["mission"]
+    check((m["grade"], m["mission_page"], m["mission_row"]) == ("B", 3, 2),
+          "a panel pin reaches the farm loop")
+    check(rr.cfg["mission"]["grade"] == "A",
+          "building it does NOT mutate the loaded config")
+    check(_app.GRADES[0] == "auto" and set(_app.GRADES) >= {"A", "B", "C"},
+          "the panel offers auto plus the grades")
+
+    import inspect as _i
+    src = _i.getsource(__import__("farm").start_best)
+    check("page and row" in src or "page, row" in src,
+          "start_best routes a pinned page/row to the pinned starter")
 
     # A dead socket must be recognised and RECONNECTED, not spun on. Logging out
     # tore the CDP target down, every later call raised BrokenPipeError, and the

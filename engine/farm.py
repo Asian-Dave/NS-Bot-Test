@@ -290,16 +290,62 @@ def to_grade_panel(actor, cap, log):
     return bool(find_grades(cap.frame(gray=False)))
 
 
-def start_best(cap, actor, log, grade=None, row=None):
-    """Pick and start a mission. Returns the grade played, or None."""
+def start_at(actor, cap, log, page_no, row_no, settle=2.4):
+    """Start a PINNED mission: 1-based page, 1-based row within it.
+
+    Pinning is by position rather than by name because the list has no stable
+    identifier we can read - and position is what the operator can actually see
+    and count. Paging is confirmed by the row content changing, the same way
+    `pick_highest` does it, so asking for a page that does not exist stops
+    rather than clicking a stale arrow forever.
+    """
+    nxt = _tpl("page_next", 0.70)
+    for _ in range(max(0, page_no - 1)):
+        frame = cap.frame(gray=False)
+        rows = tp.find_mission_rows(frame)
+        before = rows_signature(frame, rows)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        m, c = find(gray, nxt) if nxt is not None else (None, 0.0)
+        if m is None or not m.found:
+            log.info("cannot reach page %d - no next-page arrow", page_no)
+            return False
+        actor.click_pixel(*m.center, why=f"next page ({c:.3f})")
+        time.sleep(1.6)
+        nf = cap.frame(gray=False)
+        if same_page(before, rows_signature(nf, tp.find_mission_rows(nf))):
+            log.info("cannot reach page %d - the list stops earlier", page_no)
+            return False
+    frame = cap.frame(gray=False)
+    rows = tp.find_mission_rows(frame)
+    if not rows or row_no < 1 or row_no > len(rows):
+        log.info("page %d has %d row(s); row %d does not exist",
+                 page_no, len(rows), row_no)
+        return False
+    y = rows[row_no - 1]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    locked = locked_rows(gray, log) or []
+    if any(abs(y - ly) < 60 for ly in locked):
+        log.info("the pinned mission (page %d row %d) is PADLOCKED - it is "
+                 "above our level and clicking it does nothing", page_no, row_no)
+        return False
+    log.info("starting the pinned mission (page %d, row %d, y=%d)",
+             page_no, row_no, y)
+    return tp.start_row(actor, cap, log, y, settle=settle)
+
+
+def start_best(cap, actor, log, grade=None, page=None, row=None):
+    """Pick and start a mission. Returns the grade played, or None.
+
+    `grade` None means "best available, read off the panel". `page`/`row` None
+    means "the highest unlocked mission"; give both to pin one.
+    """
     if not to_grade_panel(actor, cap, log):
         return None
     g = pick_grade(actor, cap, log, prefer=grade)
     if g is None:
         return None
-    if row is not None:
-        log.info("mission row pinned by config at y=%s", row)
-        return g if tp.start_row(actor, cap, log, row) else None
+    if page and row:
+        return g if start_at(actor, cap, log, page, row) else None
     return g if pick_highest(actor, cap, log) else None
 
 
@@ -309,7 +355,8 @@ def farm(cap, actor, log, cfg, controls=None, repeat=0):
     from gate import Gate
 
     m = cfg.get("mission", {})
-    grade, row = m.get("grade"), m.get("mission_row")
+    grade = m.get("grade")
+    page, row = m.get("mission_page"), m.get("mission_row")
     started = banked = 0
     n = repeat or m.get("repeat", 0) or 0
     while True:
@@ -318,7 +365,7 @@ def farm(cap, actor, log, cfg, controls=None, repeat=0):
             break
         if n and started >= n:
             break
-        g = start_best(cap, actor, log, grade, row)
+        g = start_best(cap, actor, log, grade, page, row)
         if g is None:
             log.info("nothing startable; stopping")
             break
