@@ -160,6 +160,13 @@ _BOOTSTRAP = r"""
   window.__nsbotFocus = (on) => {
     const g = gameEl();
     if (!g) return "no-game";
+    // IDEMPOTENT. Re-applying focus recomputed the margin nudge from whatever
+    // the layout happened to be at that instant, so calling it every cycle made
+    // the game JUMP - and every jump moved the anchors, which the state
+    // classifier then read as "unknown". Focus is a one-shot: if it is already
+    // on, say so and change nothing.
+    if (on && window.__nsbotFocusOn) return "already";
+    if (!on && !window.__nsbotFocusOn) return "already";
     if (on) {
       for (let el = g; el && el !== document.documentElement; el = el.parentElement) {
         for (const sib of Array.from(el.parentElement ? el.parentElement.children : [])) {

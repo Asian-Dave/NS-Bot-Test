@@ -325,7 +325,7 @@ class Runner:
             if not self.dock.game_ready():
                 return
             r = self.dock.focus(True)
-            if r == "focused":
+            if r in ("focused", "already"):
                 self.focus_on = True
                 self.log.info("focus mode on - page chrome hidden, game pinned "
                               "to the top (scroll is now deterministic)")
@@ -355,7 +355,10 @@ class Runner:
         self.log.info("dock missing (navigation?) - re-injecting")
         try:
             self.dock.install(verify=False)
-            self.focus_on = False          # a fresh document is unfocused
+            # A fresh document really is unfocused, but ASK rather than assume -
+            # assuming forced a re-apply on every re-injection, and re-applying
+            # is what made the game jump around and the state read "unknown".
+            self.focus_on = self.dock.focus_state()
             return True
         except Exception as e:
             self.log.error("could not re-inject the dock: %s", e)
