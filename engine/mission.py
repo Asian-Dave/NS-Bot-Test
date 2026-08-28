@@ -185,9 +185,13 @@ class MissionRunner:
         """
         c = {}
         t = self.templates
+        # `action_flag` is the only combat signal that survives BETWEEN TURNS,
+        # when the game draws no command bar at all (measured 0.897 there,
+        # against 0.223..0.255 outside combat). Without it, engaging an enemy
+        # could not be confirmed until it happened to be our turn.
         for key in ("result_panel", "mission_success", "mission_start",
                     "mission_room", "mission_room_entry", "mission_locked",
-                    "page_next", "cutscene_continue"):
+                    "page_next", "cutscene_continue", "action_flag"):
             if key in t:
                 c[key] = cond_template(key, t[key])
         if "loading_text" in t:
@@ -633,6 +637,74 @@ class MissionRunner:
                 best = (bh, int(ce[i][0]) + x0, int(ce[i][1]) + y0)
         return (best[1], best[2]) if best else None
 
+    # Figures (our character AND enemies) stand out from the map by COLOUR
+    # DISTANCE from the map's own background, which adapts per map - desert sand
+    # and forest green are both "the flat thing most pixels are".
+    #
+    #     flat sand   frac(distance > 60) = 0.002
+    #     enemy       frac(distance > 60) = 0.150
+    #     our char    frac(distance > 60) = 0.570
+    FIG_DIST = 60
+    FIG_MIN_H, FIG_MAX_H = 90, 400
+    FIG_MIN_AREA = 3000
+    FIG_MAX_ASPECT = 2.5        # blobs merge with their shadow, so this is loose
+
+    @classmethod
+    def find_figures(cls, frame_bgr):
+        """Every figure-like blob on the map. [(x, y, area)], biggest first.
+
+        Includes our own character, enemies, and - unavoidably - some scenery:
+        a rock measured identically at (1033, 748) on two different frames.
+        Callers must treat a candidate as a GUESS and verify that acting on it
+        did something.
+        """
+        h, w = frame_bgr.shape[:2]
+        y0, y1 = cls.CHAR_BAND
+        x0, x1 = cls.CANVAS_X0, cls.CANVAS_X1
+        x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
+        y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return []
+        roi = frame_bgr[y0:y1, x0:x1]
+        bg = np.median(roi.reshape(-1, 3), axis=0)
+        d = np.linalg.norm(roi.astype(np.float32) - bg, axis=2)
+        m = cv2.morphologyEx((d > cls.FIG_DIST).astype(np.uint8) * 255,
+                             cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+        n, _, st, ce = cv2.connectedComponentsWithStats(m)
+        out = []
+        for i in range(1, n):
+            a = st[i, cv2.CC_STAT_AREA]
+            bw, bh = st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
+            if a < cls.FIG_MIN_AREA or not (cls.FIG_MIN_H <= bh <= cls.FIG_MAX_H):
+                continue
+            if bw / max(1, bh) > cls.FIG_MAX_ASPECT:
+                continue
+            out.append((int(ce[i][0]) + x0, int(ce[i][1]) + y0, int(a)))
+        return sorted(out, key=lambda r: -r[2])
+
+    def find_enemy_on_map(self, frame_bgr, me):
+        """A figure on this map that is not us. (x, y) or None.
+
+        THE MISSION IS NOT "WALK TO THE EDGE" - it is "clear this map, then move
+        on", which is what the operator described and what the runner got wrong.
+        Running to the edge along our OWN row walks straight past an enemy that
+        is standing at a different depth: measured on one map, the enemy sat at
+        y=460 while our character was at y=864, so a run along y=864 passed
+        400 px below it and never made contact.
+
+        Scenery can land in here too, so the caller must verify. A wrong guess
+        costs exactly what a dead end already costs - one cycle.
+        """
+        best = None
+        for (x, y, a) in self.find_figures(frame_bgr):
+            if me is not None and abs(x - me[0]) < 220 and abs(y - me[1]) < 220:
+                continue                       # that one is us
+            if (x, y) in getattr(self, "_dud_targets", ()):
+                continue                       # clicking it did nothing before
+            if best is None or a > best[2]:
+                best = (x, y, a)
+        return (best[0], best[1]) if best else None
+
     @staticmethod
     def _scene_hash(frame_bgr):
         """A coarse fingerprint of the MAP AREA, for detecting movement.
@@ -703,6 +775,42 @@ class MissionRunner:
         # right-pointing "Go!" arrow on that very frame.
         pos = self.find_character(frame_bgr)
         centre = (self.CANVAS_X0 + self.CANVAS_X1) // 2
+
+        # CLEAR THE MAP BEFORE LEAVING IT. An enemy standing on this map has to
+        # be killed first; running to the edge past it is what made a mission
+        # "skip" its first fight and then wander. The enemy is usually at a
+        # different DEPTH than us (measured: enemy y=460, us y=864), so a run
+        # along our own row never touches it - we have to go to the enemy.
+        #
+        # The candidate is a GUESS: `find_figures` cannot fully separate a
+        # sprite from scenery, and a rock measured identically on two frames.
+        # So this is self-correcting rather than trusted - if the click does not
+        # produce a battle, the spot is remembered as a dud and the normal
+        # edge-run happens instead, which costs exactly what a dead end already
+        # costs.
+        foe = self.find_enemy_on_map(frame_bgr, pos)
+        if foe is not None:
+            self.log.info("mission: enemy on this map at %s - engaging before "
+                          "moving on", foe)
+            self.actor.click_pixel(*foe, why="engage enemy on the map")
+            watch = [c for c in (self.conditions.get("command_bar"),
+                                 self.conditions.get("action_flag"),
+                                 self.conditions.get("result_panel"),
+                                 self.conditions.get("cutscene_continue"))
+                     if c is not None]
+            if watch:
+                got = self.gate.wait_for_any(watch, timeout=self.traverse_settle,
+                                             why="engage")
+                if got:
+                    self.log.info("mission: engaged (%s)", got.name)
+                    return
+            # It was not an enemy, or we did not reach it. Do not keep clicking
+            # the same pixel every cycle.
+            self._dud_targets = set(getattr(self, "_dud_targets", set()))
+            self._dud_targets.add(foe)
+            self.log.info("mission: %s did not start a fight; treating it as "
+                          "scenery and running on", foe)
+
         if pos is not None:
             heading = "right" if pos[0] < centre else "left"
             self._heading = heading

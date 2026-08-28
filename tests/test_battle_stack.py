@@ -1453,6 +1453,53 @@ def test_character_finder_rejects_scenery():
               "it is already standing on")
 
 
+def test_map_is_cleared_before_leaving():
+    """An enemy standing on the map must be engaged, not walked past.
+
+    The runner only ever ran to the MAP EDGE - a rule carried over from Kekkai
+    seal-hunting, where it is right. In a story mission it is wrong: the map has
+    to be cleared first. And because the enemy stands at a different DEPTH
+    (measured: enemy y=460 while our character was at y=864), a run along our
+    own row passes 400px beneath it and never makes contact - so the mission
+    "skipped" its first fight and then wandered.
+
+    `find_figures` cannot fully separate a sprite from scenery - a CACTUS at
+    (1033, 748) is proposed as a figure - so engagement is a GUESS that the game
+    verifies: no fight means the spot is remembered as a dud and the normal
+    edge-run happens instead.
+    """
+    print("\nthe map is cleared before leaving it")
+    import mission as mission_mod
+    R = mission_mod.MissionRunner
+
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/mission/traverse_shrub_decoy.png"))
+    check(f is not None, "the frame with an enemy on the map is committed")
+    if f is None:
+        return
+
+    me = R.find_character(f)
+    check(me is not None and me[0] > 2400, f"our character is located ({me})")
+
+    figs = R.find_figures(f)
+    check(len(figs) >= 2, f"both figures are seen ({[(x, y) for x, y, a in figs]})")
+
+    inst = R.__new__(R)
+    inst._dud_targets = set()
+    foe = inst.find_enemy_on_map(f, me)
+    check(foe is not None, f"an enemy is proposed ({foe})")
+    if foe:
+        check(abs(foe[0] - 2282) < 80 and abs(foe[1] - 460) < 80,
+              f"it is the ninja at ~(2282, 460), not us ({foe})")
+        check(abs(foe[1] - me[1]) > 300,
+              f"and it stands at a different depth ({foe[1]} vs {me[1]}) - which "
+              f"is exactly why running along our own row missed it")
+
+    # A dud must not be proposed twice.
+    inst._dud_targets = {foe}
+    again = inst.find_enemy_on_map(f, me)
+    check(again != foe, "a spot that produced no fight is not proposed again")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1467,7 +1514,8 @@ def main():
                test_character_finder_drives_heading,
                test_restriction_short_circuits_the_rotation,
                test_battle_between_turns_is_not_scenery,
-               test_character_finder_rejects_scenery):
+               test_character_finder_rejects_scenery,
+               test_map_is_cleared_before_leaving):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

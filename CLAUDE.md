@@ -602,6 +602,44 @@ shrub's 77, so height separates cleanly where area inverts the answer: a bush is
 short and broad, a ninja is tall and narrow. `CHAR_MIN_H` is 95 and the TALLEST
 qualifying blob wins.
 
+### A story map must be CLEARED before you leave it
+
+`_traverse` only ever ran to the MAP EDGE. That rule came from the Kekkai
+seal-hunt, where it is correct, and it is WRONG for story missions: the map has
+to be cleared first, then you move on. The operator put it exactly right — "it
+should run towards it and only when killed shall it walk to the next map".
+
+Worse, running to the edge along OUR OWN ROW cannot even collide with the enemy.
+Measured on one desert map: the enemy stood at **y=460** while our character was
+at **y=864**, so the run passed 400 px beneath it. The mission skipped its first
+fight and then wandered.
+
+Figures — ours and theirs — are found by **colour distance from the map's own
+background**, which adapts per map instead of assuming sand or grass:
+
+| region | frac(distance > 60) |
+|---|---|
+| flat sand | 0.002 |
+| enemy ninja | 0.150 |
+| our character | 0.570 |
+
+**The detector cannot fully separate a sprite from scenery, and that is
+accepted rather than papered over.** A CACTUS at (1033, 748) is proposed as a
+figure on two different frames. Things that do NOT work, both measured:
+
+* skin tone — desert sand scores **0.951**, higher than the ninja's 0.841
+* dark outlines — the enemy is low-contrast tan-on-tan and is missed entirely
+
+So engagement is a GUESS THE GAME VERIFIES: click the candidate, wait on
+`command_bar` / `action_flag` / a result panel; if no fight starts, the spot is
+remembered in `_dud_targets` and never offered again, and the ordinary edge-run
+happens. A wrong guess therefore costs exactly what a dead end already cost —
+one cycle — and cannot loop.
+
+**Still weak:** calibrated on ONE frame that contains an enemy. More
+frames-with-enemies, across map types, are needed before the figure filter can
+be tightened.
+
 ## The single biggest lesson
 
 **Never judge a bar, or "no change", by eye. Measure it.**
