@@ -239,9 +239,8 @@ class BattleRunner:
     def _observe_progress(self, frame_bgr, geo):
         """Feed the watchdog. Returns its verdict.
 
-        We track the BEST (lowest) enemy fill seen, which is what
-        DamageWatchdog wants — it counts turns since a new low, precisely so that
-        one good early hit cannot mask a fight going nowhere.
+        Feeds TOTAL enemy HP and the enemy count, not the lowest bar - see the
+        note in the body and in DamageWatchdog.observe.
         """
         bars = combat.find_enemy_bars(
             frame_bgr,
@@ -253,10 +252,17 @@ class BattleRunner:
             # trigger an abort.
             self.log.info("battle: no enemy HP bar located this turn")
             return "continue"
-        lowest = min(f for _, f in bars)
-        v = self.watchdog.observe(lowest)
-        self.log.info("battle: enemy bars=%s lowest=%.1f%% watchdog=%s",
-                      [f"{f:.1f}" for _, f in bars], lowest, v)
+        # TOTAL, not lowest. The lowest bar jumps UP the moment the weakest
+        # enemy dies - measured 18.4 -> 39.7 on a fight that was being won - and
+        # the watchdog read that as regeneration and fled. Total enemy HP falls
+        # both when an enemy is damaged and when one is killed, and the count
+        # makes a kill count as progress on its own.
+        total = sum(f for _, f in bars)
+        v = self.watchdog.observe(total, enemy_count=len(bars))
+        self.log.info("battle: enemies=%d total=%.1f%% lowest=%.1f%% "
+                      "watchdog=%s bars=%s", len(bars), total,
+                      min(f for _, f in bars), v,
+                      [f"{f:.1f}" for _, f in bars])
         return v
 
     # -- acting --------------------------------------------------------------

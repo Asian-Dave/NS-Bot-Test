@@ -88,9 +88,25 @@ class DamageWatchdog:
         self.stall_turns = stall_turns
         self.regen_tolerance_pp = regen_tolerance_pp
         self.history = []
+        self.counts = []
 
-    def observe(self, enemy_fill_pct):
+    def observe(self, enemy_fill_pct, enemy_count=None):
+        """Record a turn. `enemy_count` makes KILLING one count as progress.
+
+        THE SCALAR MUST NOT GO UP WHEN YOU ARE WINNING. Fed the LOWEST enemy
+        bar, this watchdog fires when the weakest enemy DIES: the minimum over
+        the survivors jumps up, which is indistinguishable from regeneration.
+        Measured in a live fight, the reading went 18.4 -> 39.7 the moment the
+        low-HP enemy dropped off the list, and the watchdog called it
+        "regenerating" and fled a mission that was being won.
+
+        So the caller now feeds TOTAL enemy HP, which falls both when an enemy
+        is damaged and when one dies, and the count is tracked alongside: a
+        fight with fewer enemies than before is making progress whatever the
+        percentages say.
+        """
         self.history.append(float(enemy_fill_pct))
+        self.counts.append(None if enemy_count is None else int(enemy_count))
         return self.verdict()
 
     def verdict(self):
@@ -111,6 +127,12 @@ class DamageWatchdog:
         # turns parked at 43.0% are three turns of no progress, not one.
         first_best = min(i for i, v in enumerate(h) if v <= best + 1e-9)
         since_best = (len(h) - 1) - first_best
+        # Killing an enemy IS progress, even if no new low in total HP followed.
+        c = [x for x in self.counts if x is not None]
+        if len(c) >= 2 and len(c) == len(h):
+            fewest = min(c)
+            first_fewest = min(i for i, v in enumerate(c) if v <= fewest)
+            since_best = min(since_best, (len(c) - 1) - first_fewest)
         if since_best >= self.stall_turns:
             if h[-1] > best + self.regen_tolerance_pp:
                 return "regenerating"

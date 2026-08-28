@@ -152,6 +152,27 @@ def test_watchdog_recorded_sequence():
 
 # --- 5. rotate-on-resolve --------------------------------------------------
 def test_skill_rotation():
+    # A KILL MUST NOT READ AS REGENERATION. Fed the LOWEST enemy bar, the
+    # watchdog fired whenever the weakest enemy died: the minimum over the
+    # survivors jumps up, which is indistinguishable from healing. Measured live
+    # at 18.4 -> 39.7 the moment a low-HP enemy dropped off the list, and it
+    # fled a mission that was being won.
+    w = combat.DamageWatchdog()
+    verdicts = [w.observe(t, n) for t, n in
+                [(300, 6), (280, 6), (260, 6), (240, 5), (235, 5), (230, 5)]]
+    check(all(v == "continue" for v in verdicts),
+          f"damage plus a kill never aborts (got {verdicts[-1]})")
+
+    w = combat.DamageWatchdog()
+    verdicts = [w.observe(300, n) for n in (6, 5, 4, 3, 2)]
+    check(all(v == "continue" for v in verdicts),
+          "killing an enemy each turn is progress even with total HP flat")
+
+    w = combat.DamageWatchdog()
+    verdicts = [w.observe(t, 6) for t in (300, 295, 298, 301, 299)]
+    check(verdicts[-1] == "regenerating",
+          f"a genuinely regenerating fight still aborts (got {verdicts[-1]})")
+
     print("\n[5] SkillRotation: rotate-on-resolve and cooldown skipping")
     tracker = combat.CooldownTracker({"S1": 3})
     r = SkillRotation(["S1", "S2", "AT"], tracker, LOG)
