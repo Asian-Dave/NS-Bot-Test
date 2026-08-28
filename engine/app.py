@@ -220,6 +220,27 @@ class Runner:
             self.state = "idle"
             return
 
+        # ALREADY IN A MISSION? Then play it, and do not ask the resume ladder
+        # to find the lobby first - it cannot, because battles and traversal are
+        # deliberately not its job. Demanding the lobby before acting is why a
+        # session that began mid-mission logged "no anchor matched" forever
+        # while a battle sat waiting for input.
+        if self.task == "farm_missions":
+            try:
+                import farm as farm_mod
+                where = farm_mod.in_mission(self.cap.frame(gray=False), self.tpls)
+            except (OSError, CDPError) as e:
+                raise Disconnected(str(e))
+            except Exception:
+                where = None
+            if where:
+                self.state = where
+                self.note = f"mission already in progress ({where}) - playing it"
+                self.log.info("%s", self.note)
+                self.push()
+                self._run_mission()
+                return
+
         gray = cv2.cvtColor(self.cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
         out, info = self.resumer.advance(gray)
         self.state = info.get("step", out)
@@ -230,21 +251,8 @@ class Runner:
             self.log.error("HALT: %s", self.note)
             self.mode = "paused"
             return
-        if self.state in ("unknown",) or out == "unknown":
-            # THE LADDER'S "unknown" IS NOT THE OPERATOR'S "unknown". The resume
-            # ladder only knows login -> lobby and result panels; a battle, a
-            # cutscene or a minigame is not its job, so it correctly reports
-            # "unknown" and the panel then showed `state: unknown` for the whole
-            # of a perfectly healthy mission. That is alarming and wrong.
-            # Ask the classifier that DOES know those screens before giving up
-            # on naming what we are looking at.
-            try:
-                import minigame as mg
-                kind, _ = mg.classify(self.cap.frame(gray=False))
-                if kind != mg.UNKNOWN:
-                    self.state = kind
-            except Exception:
-                pass
+        if self.state == "unknown":
+            self.state = self._name_screen() or "unknown"
 
         if out != resume.ARRIVED:
             # BOUND THE UNKNOWN STREAK. `Resumer.run()` has a `max_unknown`
@@ -298,6 +306,23 @@ class Runner:
             self.note = f"farm: {started} started, {banked} banked"
             self.log.info(self.note)
 
+    def _run_mission(self):
+        """Play a mission that is already under way."""
+        import mission as mission_mod
+        from gate import Gate
+        r = mission_mod.MissionRunner(
+            Gate(self.cap, self.log, self.controls), self.actor, self.cap,
+            self.tpls, self.cfg, self.log, self.controls)
+        r.grade = self.cfg.get("mission", {}).get("grade") or "A"
+        try:
+            out, stats = r.run()
+            self.note = f"mission: {out} {stats}"
+            self.log.info("%s", self.note)
+        except Exception as e:
+            self.note = f"mission runner: {type(e).__name__}: {e}"
+            self.log.error("%s", self.note)
+            self.mode = "paused"
+
     def reconnect(self):
         """Rebuild the connection after the socket dies.
 
@@ -328,6 +353,53 @@ class Runner:
             return True
         self.log.error("could not reconnect after 30 attempts")
         return False
+
+    def _name_screen(self):
+        """A conservative label for a screen the resume ladder cannot name.
+
+        DO NOT use `minigame.classify` here. That function is for deciding what
+        to PLAY once a TP mission is already open, where the only possibilities
+        are its three minigames or a battle. Pointed at arbitrary screens it
+        false-positives: on the character-select screen it reports "kekkai",
+        because its seal search is a dark-red blob search and CLAUDE.md already
+        records that the same search hits village architecture and the
+        character's own red robe. A label is not worth a wrong answer - the
+        operator reads it and believes it.
+
+        So this uses only HIGH-MARGIN anchors, and stays silent otherwise:
+
+          * combat     two corroborating command buttons via BattleGeometry,
+                       the same gate MissionRunner uses. On character select it
+                       correctly declines: charge 0.370, dodge 0.353, locate None.
+          * the TP minigame HUDs, which are single templates measuring 1.000
+            against 0.27..0.36 everywhere else.
+
+        Anything else stays "unknown", which is an honest answer.
+        """
+        try:
+            frame = self.cap.frame(gray=False)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        except (OSError, CDPError) as e:
+            raise Disconnected(str(e))
+        except Exception:
+            return None
+
+        from perceive import find
+        for name, label in (("tp_seal_hud", "hand-seal minigame"),
+                            ("tp_cards_hud", "memory board")):
+            t = self.tpls.get(name)
+            if t is not None and find(gray, t)[0].found:
+                return label
+
+        ch, do = self.tpls.get("charge_btn"), self.tpls.get("dodge_btn")
+        if ch is not None and do is not None:
+            try:
+                from geometry import BattleGeometry
+                if BattleGeometry.locate(gray, ch, do) is not None:
+                    return "combat"
+            except Exception:
+                pass
+        return None
 
     def ensure_focus(self):
         """Apply focus mode once the game is on the page.
@@ -439,6 +511,28 @@ def main():
                     help="skip the panel (headless-ish; controls via run/bot.control)")
     a = ap.parse_args()
 
+    # ONE RUNNER AT A TIME. Nothing stopped a second instance attaching to the
+    # same tab, and instances stack silently: eight of them were found running
+    # together, each pushing its own state into the shared panel every second and
+    # each CLICKING THE GAME. From the outside that looks like the panel toggling
+    # at random and the bot fighting itself - which is exactly what it was.
+    lock = os.path.join(ROOT, "run/app.lock")
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    try:
+        with open(lock) as f:
+            other = int((f.read() or "0").strip() or 0)
+        os.kill(other, 0)                     # raises unless it is alive
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+        other = None
+    except Exception:
+        other = None
+    if other and other != os.getpid():
+        print(f"  another bot window is already running (pid {other}). "
+              f"Close it first, or: kill {other}", flush=True)
+        return 3
+    with open(lock, "w") as f:
+        f.write(str(os.getpid()))
+
     cfg = json.load(open(a.config))
     url = cfg.get("target", {}).get("game_url", "")
     profile = os.path.join(ROOT, "run/chrome-profile")
@@ -476,6 +570,12 @@ def main():
         log.info("interrupted")
     finally:
         c.close()
+        try:
+            with open(lock) as f:
+                if f.read().strip() == str(os.getpid()):
+                    os.unlink(lock)
+        except Exception:
+            pass
     return 0
 
 

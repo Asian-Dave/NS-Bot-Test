@@ -288,3 +288,35 @@ def farm(cap, actor, log, cfg, controls=None, repeat=0):
             banked += 1
     log.info("farm: %d started, %d banked", started, banked)
     return started, banked
+
+
+# Mission-in-progress anchors. All are high-margin single templates or the
+# two-button command-bar gate, so this does not repeat the mistake of using a
+# blob search to decide where we are.
+IN_MISSION = ("mission_success", "result_panel", "cutscene_continue")
+
+
+def in_mission(frame, templates):
+    """Are we already inside a mission? Returns the anchor name, or None.
+
+    THIS IS WHAT LETS THE FARM LOOP FIGHT. The loop used to require the resume
+    ladder to reach the LOBBY before doing anything - which is fine from the
+    village and useless once a mission is already running, because the ladder
+    deliberately does not classify battles or traversal. So a session that
+    started mid-mission sat there logging "no anchor matched" while a battle
+    waited for input, and combat never reacted at all.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    ch, do = templates.get("charge_btn"), templates.get("dodge_btn")
+    if ch is not None and do is not None:
+        try:
+            from geometry import BattleGeometry
+            if BattleGeometry.locate(gray, ch, do) is not None:
+                return "command_bar"
+        except Exception:
+            pass
+    for name in IN_MISSION:
+        t = templates.get(name)
+        if t is not None and find(gray, t)[0].found:
+            return name
+    return None
