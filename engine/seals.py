@@ -142,8 +142,12 @@ INK_MARGIN = 1.10
 HUD_REF = (1028, 255)
 
 
-def anchor_offset(frame, log=None):
-    """How far the panel has moved from the reference layout. (0,0) if unknown."""
+def anchor_offset(frame, log=None, origin=(0, 0)):
+    """How far the panel has moved from the reference layout, or None if unknown.
+
+    `origin` is the frame's top-left in captured px, so a clipped frame yields
+    the same ABSOLUTE offset a full frame would.
+    """
     from perceive import find
     t = _hud()
     if t is None:
@@ -153,8 +157,15 @@ def anchor_offset(frame, log=None):
         return (0, 0)
     m, c = find(g, t)
     if not m.found:
-        return (0, 0)
-    off = (m.center[0] - HUD_REF[0], m.center[1] - HUD_REF[1])
+        # None means UNKNOWN, and unknown is not zero. Returning (0,0) here was
+        # a silent, wrong default: when the anchor was cut off by a clip, every
+        # tile and slot was computed at the reference position, 117 px away from
+        # the real one, and the bot clicked confidently at nothing. A caller
+        # that cannot locate the panel must refuse to act, not act as if the
+        # panel were exactly where it expected.
+        return None
+    off = (m.center[0] + origin[0] - HUD_REF[0],
+           m.center[1] + origin[1] - HUD_REF[1])
     if log and off != (0, 0):
         log.info("panel offset %s (HUD at %s, conf %.3f)", off, m.center, c)
     return off
@@ -188,7 +199,7 @@ def tile_crop(frame, i, off=(0, 0)):
     return _crop(frame, (x + off[0], y + off[1]), TILE_HALF, TILE_HALF)
 
 
-def find_slots(frame, lo=1300, hi=2200, step=12, dark=230.0, off=(0, 0)):
+def find_slots(frame, lo=1100, hi=2380, step=12, dark=230.0, off=(0, 0)):
     """Where the slot cards are, and how many. Measured per frame.
 
     The parchment behind the row reads a flat 255; a card is always darker. The
@@ -323,6 +334,66 @@ def same_seal(a, b, gate=0.12):
     return d <= gate, d
 
 
+_CAT = None
+
+
+def load_catalogue():
+    """seal id -> {'slot': [sig,...], 'tile': [sig,...]} from the built catalogue.
+
+    THIS IS WHAT REMOVES THE GUESSING. The game draws each seal TWICE, and
+    differently: small over animated flames on a slot card, large in a wooden
+    frame on a tile. Comparing those two drawings is the weak direction -
+    measured 5..16x separation on most seals and 1.1x on a couple, and every
+    wrong input this project has produced came out of that thin band.
+
+    Comparing a drawing to the SAME drawing is the strong direction:
+
+        tile vs tile, two independent frames   10/10 correct, 6.5x .. 391000x
+        slot vs slot, 90 crops                 11 clean clusters, i.e. 10 seals
+
+    So identity is established within each rendering, and the two are linked ONCE
+    offline by an assignment over aggregate distances - which also uses the fact
+    that the mapping is one-to-one, so the single ambiguous pair is settled by
+    elimination rather than by a coin flip.
+    """
+    global _CAT
+    if _CAT is not None:
+        return _CAT
+    import glob
+    d = os.path.join(ROOT, "ref/auto/tp/seal_catalogue")
+    cat = {}
+    for f in sorted(glob.glob(os.path.join(d, "seal*_*.png"))):
+        b = os.path.basename(f)
+        try:
+            sid = int(b[4:6])
+        except ValueError:
+            continue
+        kind = "slot" if "_slot" in b else "tile"
+        sig = _shape(blue_mask(cv2.imread(f)))
+        if sig is None:
+            continue
+        cat.setdefault(sid, {"slot": [], "tile": []})[kind].append(sig)
+    _CAT = {k: v for k, v in cat.items() if v["slot"] and v["tile"]}
+    return _CAT
+
+
+def identify(crop, kind, cat=None, gate=0.14):
+    """Which catalogue seal is this crop? (seal_id, distance, margin) or None."""
+    cat = cat if cat is not None else load_catalogue()
+    sig = _shape(blue_mask(crop))
+    if sig is None or not cat:
+        return None
+    scored = sorted((min(dist(sig, e) for e in v[kind]), k)
+                    for k, v in cat.items() if v[kind])
+    if not scored:
+        return None
+    d0, sid = scored[0]
+    d1 = scored[1][0] if len(scored) > 1 else 1e9
+    if d0 > gate:
+        return None
+    return sid, d0, d1 / max(1e-6, d0)
+
+
 def rank_candidates_from(art, tile_frame, log=None, off=(0, 0)):
     """For each recorded sign, the tiles ranked best-first. None if unreadable."""
     tiles = [_shape(blue_mask(tile_crop(tile_frame, i, off))) for i in range(N_TILES)]
@@ -401,7 +472,23 @@ def read_answer(reveal_frame, tile_frame, log=None, force=False):
     return picks
 
 
-def capture_sequence(cap, log=None, timeout=25.0, poll=0.10):
+# The panel plus both rows, in captured px, with room for the offset to swing.
+# Clipping is worth ~3x: a full frame is ~170 ms, this is ~55 ms, and the look
+# phase has to be sampled fast enough to catch signs that appear one at a time.
+# Must contain the HUD anchor at EVERY panel position we have seen, including
+# focus mode, which lifts the whole panel by ~117 px. A clip that cuts the anchor
+# in half does not fail loudly - the match simply misses.
+PANEL_BOX = (820, 30, 1820, 1150)
+
+
+def panel_frame(cap):
+    """One clipped read of the seal panel: (image, origin in captured px)."""
+    x, y, w, h = PANEL_BOX
+    clip, origin = cap.clip_for(x, y, w, h)
+    return cap.frame(gray=False, clip=clip), origin
+
+
+def capture_sequence(cap, log=None, timeout=25.0, poll=0.04):
     """Watch the whole reveal and record each sign AS IT APPEARS.
 
     THE SIGNS ARE SHOWN ONE AT A TIME, not all at once. Measured live on a
@@ -425,17 +512,44 @@ def capture_sequence(cap, log=None, timeout=25.0, poll=0.10):
     seen = 0
     off = (0, 0)
     while time.time() - t0 < timeout:
-        f = cap.frame(gray=False)
+        f, origin = panel_frame(cap)
         if slots is None:
-            off = anchor_offset(f, log)
-            slots = find_slots(f, off=off)
+            base = anchor_offset(f, log, origin)
+            if base is None:
+                if log:
+                    log.info("   cannot locate the panel - not reading the "
+                             "prompt from guessed coordinates")
+                return [None], list(SLOTS), None
+            off = base
+            slots = find_slots(f, off=_rel(base, origin))
+            slots = [(x + origin[0], y + origin[1]) for x, y in slots]
             art = [None] * len(slots)
+        rel = _rel(off, origin)
+
+        # THE TILES TELL YOU WHICH PHASE THIS IS, AND THE SLOTS DO NOT.
+        # The slot row means two different things at two different times: during
+        # the look phase it shows the sequence, and during input it shows what
+        # YOU have clicked. Reading it without knowing which is which is how a
+        # run got stuck reporting "recorded 5 of 6 sign(s)" forever - some of
+        # those slots held signs the bot had entered itself on an earlier
+        # attempt, so it waited for a reveal that had already happened.
+        #
+        # The tiles are unambiguous: greyed while the sequence is being shown,
+        # full colour once it is your turn. So the moment they go live, the
+        # prompt is over and nothing more may be recorded.
+        if tiles_live(f, rel)[0]:
+            if log:
+                log.info("   tiles went live - the prompt is over")
+            break
+
         for i in range(len(slots)):
             if art[i] is not None:
                 continue
-            m = blue_mask(slot_crop(f, i, slots))
+            local = (slots[i][0] - origin[0], slots[i][1] - origin[1])
+            c = _crop(f, local, SLOT_HW, SLOT_HH)
+            m = blue_mask(c)
             if m is not None and float((m > 0).mean()) >= SLOT_REVEALED_BLUE:
-                art[i] = slot_crop(f, i, slots).copy()
+                art[i] = c.copy()
                 seen += 1
                 if log:
                     log.info("   sign %d of %d shown", i + 1, len(slots))
@@ -443,6 +557,11 @@ def capture_sequence(cap, log=None, timeout=25.0, poll=0.10):
             break
         time.sleep(poll)
     return art, (slots or list(SLOTS)), off
+
+
+def _rel(off, origin):
+    """An absolute offset expressed against a clipped frame's origin."""
+    return (off[0] - origin[0], off[1] - origin[1])
 
 
 def wait_for(cap, pred, timeout, poll=0.12):
@@ -457,7 +576,7 @@ def wait_for(cap, pred, timeout, poll=0.12):
 
 
 def play_round(cap, actor, log, save_crops=False, commit=True,
-               recover_parked=True):
+               recover_parked=False):
     """One round: Start -> read the answer -> click the two tiles. True if played.
 
     With `commit` (the default) a low-confidence read is still played, because
@@ -497,11 +616,38 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
             log.info("pressing Start (%.3f)", sc)
             actor.click_pixel(*m.center, why="Start the hand-seal round")
         else:
+            # NO START AND THE TILES ARE ALREADY LIVE = we joined during the
+            # INPUT phase. The sequence was shown while nobody was looking and
+            # cannot be recovered, so do not sit here re-reading the slot row -
+            # those slots hold whatever was entered before, not the prompt.
+            off0 = anchor_offset(f) or (0, 0)
+            if tiles_live(f, off0)[0]:
+                log.info("no Start, and the tiles are already live - this round "
+                         "is PARKED: the prompt is gone and the slots now show "
+                         "input, not the sequence")
+                if recover_parked and commit:
+                    slots0 = find_slots(f, off=off0)
+                    log.warning(
+                        "SACRIFICING A HEART ON PURPOSE: clicking %d arbitrary "
+                        "tiles to end a round whose prompt we never saw. This "
+                        "is NOT an attempt to answer - it cannot be, the "
+                        "sequence is gone - it is the only way to get a fresh "
+                        "round out of the game.", len(slots0))
+                    for k in range(len(slots0)):
+                        o2 = anchor_offset(cap.frame(gray=False)) or (0, 0)
+                        actor.click_pixel(TILES[k % N_TILES][0] + o2[0],
+                                          TILES[k % N_TILES][1] + o2[1],
+                                          why=f"clear parked round ({k+1})")
+                        time.sleep(0.3)
+                return False
             log.info("no Start button - a round is already in progress")
     else:
         actor.click_pixel(*START_XY, why="Start the hand-seal round")
 
     art, slots, off = capture_sequence(cap, log, timeout=25.0)
+    if off is None:
+        log.info("the panel could not be located; refusing to click blind")
+        return False
     got = sum(a is not None for a in art)
     if got:
         log.info("look phase: recorded %d of %d sign(s), in order", got, len(art))
@@ -526,7 +672,7 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
                 g = cap.frame(gray=False)
                 if board_present(g) is False:
                     return False
-                o2 = anchor_offset(g)
+                o2 = anchor_offset(g) or (0, 0)
                 actor.click_pixel(TILES[k % N_TILES][0] + o2[0],
                                   TILES[k % N_TILES][1] + o2[1],
                                   why=f"clear parked round ({k + 1}/{len(slots)})")
@@ -538,10 +684,18 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
 
     # The tiles are greyed during the look phase, so wait for them to go live and
     # read their artwork from THAT frame. Positions do not move in between.
-    tf = wait_for(cap, lambda x: tiles_live(x, off)[0], timeout=20.0)
+    tf = torigin = None
+    t_end = time.time() + 20.0
+    while time.time() < t_end:
+        cf, corigin = panel_frame(cap)
+        if tiles_live(cf, _rel(off, corigin))[0]:
+            tf, torigin = cf, corigin
+            break
+        time.sleep(0.05)
     if tf is None:
         log.info("the tiles never became active")
         return False
+    toff = _rel(off, torigin)
 
     if save_crops:
         d = os.path.join(ROOT, "ref/auto/tp/seals")
@@ -551,19 +705,59 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
             if a is not None:
                 cv2.imwrite(os.path.join(d, f"{ts}_sign{i}.png"), a)
         for i in range(N_TILES):
-            cv2.imwrite(os.path.join(d, f"{ts}_tile{i}.png"), tile_crop(tf, i, off))
+            cv2.imwrite(os.path.join(d, f"{ts}_tile{i}.png"), tile_crop(tf, i, toff))
 
     # `art` already holds the signs AS SHOWN, in order - captured one at a time
     # as they appeared, which is the order the game tests.
     want = art
 
-    ranked = rank_candidates_from(art, tf, log, off)
+    ranked = rank_candidates_from(art, tf, log, toff)
     if ranked is None:
         log.info("cannot read the signs at all - nothing to click")
         return False
     if not commit:
         log.info("commit=False - not clicking (this leaves the round parked)")
         return False
+
+    # CATALOGUE FIRST. Identify every tile and every shown sign against the
+    # catalogue - each in its own rendering - and pair them by identity. Only
+    # fall back to comparing a slot drawing with a tile drawing when the
+    # catalogue cannot place something.
+    cat = load_catalogue()
+    tile_id = {}
+    if cat:
+        for i in range(N_TILES):
+            r = identify(tile_crop(tf, i, toff), "tile", cat)
+            if r:
+                tile_id[r[0]] = i
+        sign_id = []
+        for a in want:
+            r = identify(a, "slot", cat) if a is not None else None
+            sign_id.append(r)
+        by_cat = [tile_id.get(r[0]) if r else None for r in sign_id]
+        if all(x is not None for x in by_cat) and len(set(by_cat)) == len(by_cat):
+            log.info("catalogue: signs -> tiles %s", by_cat)
+            for si, choice in enumerate(by_cat):
+                r = sign_id[si]
+                log.info("sign %d = seal %d -> tile %d (d=%.3f, margin %.2fx)",
+                         si, r[0], choice, r[1], r[2])
+                g = cap.frame(gray=False)
+                if board_present(g) is False:
+                    log.info("board vanished mid-answer - stopping")
+                    return False
+                now = anchor_offset(g)
+                if now is None:
+                    log.info("lost the panel mid-answer - stopping")
+                    return False
+                actor.click_pixel(TILES[choice][0] + now[0],
+                                  TILES[choice][1] + now[1],
+                                  why=f"hand sign {si} = seal {r[0]}")
+                time.sleep(0.18)
+            log.info("played %s from the catalogue", by_cat)
+            return True
+        log.info("catalogue could not place every sign (%s) - falling back to "
+                 "cross-rendering matching",
+                 [None if r is None else r[0] for r in sign_id])
 
     picked, ok_all = [], True
     for si in range(len(want)):
@@ -583,8 +777,8 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
         if margin < BLUE_MARGIN and len(order) > 1 and want[si] is not None:
             a, b = order[0], order[1]
             si_ink = _shape(ink_mask(want[si]))
-            ea = dist(si_ink, _shape(ink_mask(tile_crop(tf, a, off))))
-            eb = dist(si_ink, _shape(ink_mask(tile_crop(tf, b, off))))
+            ea = dist(si_ink, _shape(ink_mask(tile_crop(tf, a, toff))))
+            eb = dist(si_ink, _shape(ink_mask(tile_crop(tf, b, toff))))
             if eb < ea:
                 log.info("   blue was thin (%.2fx); ink prefers tile %d over %d "
                          "(%.3f vs %.3f) - switching", margin, b, a, eb, ea)
@@ -606,12 +800,15 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
             log.info("board vanished mid-answer - stopping")
             return False
         now = anchor_offset(g)
+        if now is None:
+            log.info("   lost the panel just before clicking - not guessing")
+            return False
         if now != off:
             log.info("   panel moved %s -> %s since the read; clicking at the "
                      "current position", off, now)
         actor.click_pixel(TILES[choice][0] + now[0], TILES[choice][1] + now[1],
                           why=f"hand sign {si} = tile {choice}")
-        time.sleep(0.6)
+        time.sleep(0.18)
 
         # VERIFY IN THE SAME RENDERING. Clicking a tile fills the slot with that
         # seal drawn as SLOT art - exactly the rendering we memorised. Comparing
@@ -634,7 +831,7 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
             cv2.imwrite(os.path.join(d2, f"{ts}_s{si}_filled_tile{choice}_"
                                          f"{'ok' if verdict else 'bad'}.png"), got)
             cv2.imwrite(os.path.join(d2, f"{ts}_s{si}_tile{choice}_art.png"),
-                        tile_crop(tf, choice, off))
+                        tile_crop(tf, choice, toff))
         picked.append(choice)
 
     log.info("played %s - %s", picked,
@@ -654,17 +851,38 @@ def play(cap, actor, log, max_rounds=12, save_crops=False):
     cannot be played at all.
     """
     won = 0
+    # A parked round may be sacrificed AT MOST ONCE, at the very start, to get
+    # out of a mission a previous attempt left mid-round.
+    #
+    # It used to be allowed on every round, and that was a bad call: the
+    # sacrifice clicks the first few tiles, so from the outside it is
+    # indistinguishable from the bot mindlessly clicking cards - which is
+    # exactly what it looked like. Worse, it hid the real problem. If the prompt
+    # is being missed repeatedly the answer is to fix the capture, not to keep
+    # buying fresh rounds with the player's hearts.
+    salvage = True
     for r in range(max_rounds):
         f = cap.frame(gray=False)
         if board_present(f) is not True:
             log.info("the hand-seal board is gone after %d round(s)", r)
             break
         log.info("--- hand-seal round %d ---", r + 1)
-        ok = play_round(cap, actor, log, save_crops=save_crops)
+        ok = play_round(cap, actor, log, save_crops=save_crops,
+                        recover_parked=salvage)
+        salvage = False
         if ok:
             won += 1
-        elif ok is False and board_present(cap.frame(gray=False)) is not True:
-            break
+        elif ok is False:
+            if board_present(cap.frame(gray=False)) is not True:
+                break
+            # Still on the board but the round did not play. Do not grind.
+            f2 = cap.frame(gray=False)
+            o2 = anchor_offset(f2) or (0, 0)
+            if tiles_live(f2, o2)[0]:
+                log.info("the round is waiting for input we cannot supply - the "
+                         "prompt was never captured. Stopping rather than "
+                         "clicking tiles at random.")
+                break
         time.sleep(2.5)
     log.info("hand-seal mission: %d round(s) played cleanly", won)
     return won
