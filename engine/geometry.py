@@ -161,6 +161,22 @@ class BattleGeometry:
         command bar — the two templates match 340px apart at wildly different
         scales, and this is the check that rejects them.
         """
+        # SPEED. The full sweep is 90 scales x 2 templates, measured at 8,021 ms
+        # against 62 ms for a single find - and it was being redone from scratch
+        # on EVERY poll, which is what made a turn gate take 12.3 seconds and
+        # combat feel dead.
+        #
+        # The viewport is pinned, so the command bar does not change size or
+        # place within a session. Once found, remember the scale and the anchor
+        # and re-check only THERE, at that one scale, inside a small window. If
+        # the fast path fails for any reason the full sweep still runs, so this
+        # is an accelerator and never a new way to be wrong: the two-button gate
+        # and the pitch cross-check below are applied identically either way.
+        if scales is None and cls._hint is not None:
+            got = cls._from_hint(frame_gray, charge_tpl, dodge_tpl, min_conf)
+            if got is not None:
+                return got
+
         scales = scales or [round(0.30 + i * 0.01, 2) for i in range(90)]
         ch = _best(frame_gray, charge_tpl, scales)
         do = _best(frame_gray, dodge_tpl, scales)
@@ -179,7 +195,48 @@ class BattleGeometry:
         err = max(abs((dx - cx) - expect), abs((cy - dy) - expect)) / expect
         if err > pitch_tolerance:
             return None
+        cls._hint = {"scale": scale, "charge": (cx, cy), "dodge": (dx, dy),
+                     "pitch_tolerance": pitch_tolerance}
         return cls((cx, cy), scale, confidence=min(conf_ch, conf_do))
+
+    # -- the fast path -------------------------------------------------------
+    _hint = None            # {scale, charge, dodge} from the last full locate
+    HINT_WINDOW = 140       # px around the remembered button centres
+
+    @classmethod
+    def forget(cls):
+        """Drop the cached geometry. Call after a viewport or layout change."""
+        cls._hint = None
+
+    @classmethod
+    def _from_hint(cls, frame_gray, charge_tpl, dodge_tpl, min_conf):
+        """Re-check the remembered command bar at its known scale and place."""
+        h = cls._hint
+        if not h:
+            return None
+        w = cls.HINT_WINDOW
+        found = {}
+        for key, tpl in (("charge", charge_tpl), ("dodge", dodge_tpl)):
+            px, py = h[key]
+            x0, y0 = max(0, px - w), max(0, py - w)
+            sub = frame_gray[y0:py + w, x0:px + w]
+            if sub.size == 0:
+                return None
+            got = _best(sub, tpl, [h["scale"]])
+            if got is None or got[0] < min_conf:
+                return None
+            conf, sc, (cx, cy) = got
+            found[key] = (conf, sc, (cx + x0, cy + y0))
+        (conf_ch, s_ch, (cx, cy)) = found["charge"]
+        (conf_do, _, (dx, dy)) = found["dodge"]
+        expect = CMD_SIDE * h["scale"]
+        if expect <= 0:
+            return None
+        err = max(abs((dx - cx) - expect), abs((cy - dy) - expect)) / expect
+        if err > h.get("pitch_tolerance", 0.12):
+            return None
+        cls._hint = dict(h, charge=(cx, cy), dodge=(dx, dy))
+        return cls((cx, cy), h["scale"], confidence=min(conf_ch, conf_do))
 
     # -- lookups -------------------------------------------------------------
     def _at(self, table, key):
