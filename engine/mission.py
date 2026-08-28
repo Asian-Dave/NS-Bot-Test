@@ -157,6 +157,11 @@ class MissionRunner:
         self.max_steps = m.get("max_steps", 400)
         self.max_battles = m.get("max_battles", 25)
         self.state_timeout = m.get("state_timeout_s", 120)
+        # A run to the edge plus the map transition. Measured in the Kekkai work:
+        # a short walk settles quickly but a map change needs ~4.5s, and scanning
+        # mid-transition reads as "nothing here".
+        self.traverse_settle = m.get("traverse_settle_s", 5.0)
+        self._heading = m.get("traverse_heading", "right")
         self.traversal_click = m.get("traversal_click")   # (x, y) fraction of canvas
 
         self.conditions = self._build_conditions()
@@ -497,24 +502,61 @@ class MissionRunner:
         self.actor.click_pixel(*m.center, why="next page of mission list")
         return True
 
-    def _traverse(self, frame_bgr):
-        """Nudge the character along the traversal track.
+    # Traversal geometry, shared with the Kekkai runner: the canvas at the
+    # pinned viewport spans x 760..2680, and the walkable ground is at y 880.
+    CANVAS_X0, CANVAS_X1, GROUND_Y = 760, 2680, 880
+    EDGE_MARGIN = 40
 
-        Encounters trigger on MOVEMENT, so standing still stalls the mission
-        without any error. The click point is configured as a fraction of the
-        canvas rather than an absolute pixel, because canvas geometry varies (see
-        geometry.py). With nothing configured we do nothing and say so — clicking
-        a guessed point on an unrecognised screen is how a bot ends up pressing
-        Delete next to Play.
+    def _traverse(self, frame_bgr):
+        """Walk. Encounters trigger on MOVEMENT, so standing still stalls a
+        mission with no error at all - which is exactly what was happening: the
+        bot sat on a traversal screen logging "observing only" while the mission
+        waited for it to move.
+
+        RUN TO A MAP EDGE, DO NOT POKE AT THE MIDDLE. CLAUDE.md records this from
+        the Kekkai work: clicking mid-ground just shuffles the character around
+        one map forever. The way onward is the left or right edge, and the
+        location changes during the run.
+
+        HEADING IS ALTERNATED, NOT DERIVED. The Kekkai runner picks a heading
+        from where the character is standing, because you spawn near the edge you
+        entered through - but it finds the character by its RED ROBE, and at
+        Lv 65 this character wears purple, so that blob search returns None and
+        the heading would be a coin flip dressed up as a measurement. Alternating
+        on a dead end reaches the same place without pretending to know: a wrong
+        first guess costs one run, and the next one goes the other way.
+
+        The wait is a GATE, not a sleep, so an ambush mid-run is picked up the
+        moment the command bar appears rather than after a fixed delay.
         """
-        if not self.traversal_click:
-            self.log.info("mission: unknown state and no traversal_click "
-                          "configured; observing only")
-            time.sleep(1.0)
-            return
-        fx, fy = self.traversal_click
-        h, w = frame_bgr.shape[:2]
-        self.actor.click_pixel(int(w * fx), int(h * fy), why="traverse")
+        heading = getattr(self, "_heading", "right")
+        x = (self.CANVAS_X1 - self.EDGE_MARGIN if heading == "right"
+             else self.CANVAS_X0 + self.EDGE_MARGIN)
+        self.log.info("mission: traversing - running %s to the map edge", heading)
+        self.actor.click_pixel(x, self.GROUND_Y, why=f"run {heading} to map edge")
+
+        # Anything that means "stop walking" - in priority order, as everywhere.
+        watch = [c for c in (self.conditions.get("command_bar"),
+                             self.conditions.get("mission_success"),
+                             self.conditions.get("result_panel"),
+                             self.conditions.get("cutscene_continue"))
+                 if c is not None]
+        if watch:
+            got = self.gate.wait_for_any(watch, timeout=self.traverse_settle,
+                                         why="traverse")
+            if got:
+                self.log.info("mission: traversal interrupted by %s", got.name)
+                self._heading = heading      # it worked; keep going this way
+                return
+        else:
+            time.sleep(self.traverse_settle)
+
+        # Nothing happened. Either this edge is a dead end or the map simply had
+        # nothing on the way; either way, try the other direction next time.
+        self._heading = "left" if heading == "right" else "right"
+        self._traverse_runs = getattr(self, "_traverse_runs", 0) + 1
+        self.log.info("mission: nothing on that run; turning %s (run %d)",
+                      self._heading, self._traverse_runs)
 
 
 def _find_all(frame_gray, tpl, max_hits=8, suppress=None, scales=None,

@@ -320,3 +320,34 @@ def in_mission(frame, templates):
         if t is not None and find(gray, t)[0].found:
             return name
     return None
+
+
+# Anchors that prove we are NOT in a mission. All are high-margin.
+NOT_IN_MISSION = ("lobby_rail_fortune", "char_slot_level", "play_btn",
+                  "logged_out", "grade_tab", "mission_room")
+
+
+def looks_like_mission_scene(frame, templates):
+    """Are we plausibly standing in a mission map?
+
+    This is a NEGATIVE definition and that deserves care, because the thing it
+    licenses is a click on the map edge - and a map-edge click in the village
+    lands on a building. So it is deliberately conservative: it must find none of
+    the anchors that positively identify the village, the Mission Room, the grade
+    panel, character select or the logged-out page. Any one of those, and the
+    answer is no.
+
+    It exists because a traversal screen has NO positive anchor of its own. It is
+    just scenery, which is exactly why the bot sat on one logging "no anchor
+    matched" while the mission waited for it to walk.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    for name in NOT_IN_MISSION:
+        t = templates.get(name)
+        if t is None:
+            continue
+        if t.h > gray.shape[0] or t.w > gray.shape[1]:
+            continue
+        if find(gray, t)[0].found:
+            return False
+    return True

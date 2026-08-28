@@ -240,6 +240,27 @@ class Runner:
                 self.push()
                 self._run_mission()
                 return
+            # A traversal screen has no anchor of its own - it is scenery - so
+            # the ladder cannot name it and the bot used to sit there while the
+            # mission waited for it to walk. Hand over only after the ladder has
+            # failed REPEATEDLY and nothing says we are in the village, because
+            # what this licenses is a click on the map edge, and a map-edge click
+            # in the village lands on a building.
+            if self.unknown >= 3:
+                try:
+                    scene = farm_mod.looks_like_mission_scene(
+                        self.cap.frame(gray=False), self.tpls)
+                except Exception:
+                    scene = False
+                if scene:
+                    self.state = "traversal"
+                    self.note = ("no anchor anywhere and nothing says village - "
+                                 "treating this as a mission map and walking")
+                    self.log.info("%s", self.note)
+                    self.push()
+                    self.unknown = 0
+                    self._run_mission()
+                    return
 
         gray = cv2.cvtColor(self.cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
         out, info = self.resumer.advance(gray)
