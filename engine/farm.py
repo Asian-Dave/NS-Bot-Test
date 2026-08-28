@@ -161,6 +161,35 @@ def locked_rows(frame_gray, log=None):
     return [p[1] for p in _find_all(frame_gray, t, max_hits=6)]
 
 
+def wait_page_turn(cap, before, log=None, timeout=3.0, poll=0.12):
+    """Poll until the row content changes. Returns True if the page turned.
+
+    A fixed sleep after clicking the arrow cost 1.6 s per page whatever the game
+    actually did, and Grade A is seven pages - so paging to the level ceiling
+    spent ten seconds waiting on a transition that usually takes a fraction of
+    that. Polling for the thing we already measure (the row content) ends the
+    wait as soon as the page is really there.
+    """
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        f = cap.frame(gray=False)
+        after = rows_signature(f, tp.find_mission_rows(f))
+        # A page whose rows ALL went away is still a page turn - and it is the
+        # important one. An all-locked page has no detectable rows at all
+        # (padlocked rows do not render the title bar this scans for), so the
+        # signature is None, and requiring a non-None signature meant the page
+        # AT THE LEVEL CEILING never registered as turned. The search then
+        # reported "that was the last page" one page early.
+        turned = (after is None) if before is not None else (after is not None)
+        if turned or (after is not None and not same_page(before, after)):
+            if log:
+                log.info("   page turned in %.2fs%s", time.time() - t0,
+                         " (rows all locked)" if after is None else "")
+            return True
+        time.sleep(poll)
+    return False
+
+
 def rows_signature(frame, rows, w=48, h=8):
     """A cheap fingerprint of what the rows SAY, for detecting a page turn.
 
@@ -240,10 +269,7 @@ def pick_highest(actor, cap, log, max_pages=15, settle=2.4):
             break
         before = rows_signature(frame, rows)
         actor.click_pixel(*m.center, why=f"next page ({c:.3f})")
-        time.sleep(1.6)
-        nf = cap.frame(gray=False)
-        after = rows_signature(nf, tp.find_mission_rows(nf))
-        if same_page(before, after):
+        if not wait_page_turn(cap, before, log):
             log.info("the mission names did not change; that was the last page")
             break
         page += 1
@@ -259,8 +285,10 @@ def pick_highest(actor, cap, log, max_pages=15, settle=2.4):
             log.info("no previous-page arrow; cannot get back to page %d",
                      want_page + 1)
             return None
+        before = rows_signature(cap.frame(gray=False),
+                                tp.find_mission_rows(cap.frame(gray=False)))
         actor.click_pixel(*m.center, why="previous page")
-        time.sleep(1.6)
+        wait_page_turn(cap, before, log)
     log.info("starting the highest unlocked mission (page %d, y=%d)",
              want_page + 1, y)
     return tp.start_row(actor, cap, log, y, settle=settle)
@@ -310,9 +338,7 @@ def start_at(actor, cap, log, page_no, row_no, settle=2.4):
             log.info("cannot reach page %d - no next-page arrow", page_no)
             return False
         actor.click_pixel(*m.center, why=f"next page ({c:.3f})")
-        time.sleep(1.6)
-        nf = cap.frame(gray=False)
-        if same_page(before, rows_signature(nf, tp.find_mission_rows(nf))):
+        if not wait_page_turn(cap, before, log):
             log.info("cannot reach page %d - the list stops earlier", page_no)
             return False
     frame = cap.frame(gray=False)

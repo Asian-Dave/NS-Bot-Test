@@ -569,6 +569,38 @@ class MissionRunner:
             self.log.info("mission: advanced %d dialogue screen(s)", n)
         return n
 
+    @staticmethod
+    def _scene_hash(frame_bgr):
+        """A coarse fingerprint of the MAP AREA, for detecting movement.
+
+        Excludes the HUD and the bottom bar: those never change and would only
+        dilute the signal.
+        """
+        a = frame_bgr[300:1150, 780:2660]
+        if a.size == 0:
+            a = frame_bgr
+        g = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+        s = cv2.resize(g, (32, 18), interpolation=cv2.INTER_AREA)
+        return s > s.mean()
+
+    @staticmethod
+    def _scene_changed(before, after, thr=0.10):
+        """Did the run actually take us somewhere?
+
+        Measured over five real runs on "Desert Ronins":
+
+            moved / map changed   0.161, 0.193, 0.557
+            went nowhere          0.010, 0.066
+
+        so 0.10 sits in the gap. A whole-frame mean-absolute-difference does NOT
+        separate these anywhere near as cleanly (CLAUDE.md records a real map
+        change measuring only 0.053 there, because the scenes are similarly lit);
+        a coarse light/dark hash does.
+        """
+        if before is None or after is None or before.shape != after.shape:
+            return True
+        return float((before != after).mean()) >= thr
+
     def _traverse(self, frame_bgr):
         """Walk. Encounters trigger on MOVEMENT, so standing still stalls a
         mission with no error at all - which is exactly what was happening: the
@@ -595,6 +627,7 @@ class MissionRunner:
         x = (self.CANVAS_X1 - self.EDGE_MARGIN if heading == "right"
              else self.CANVAS_X0 + self.EDGE_MARGIN)
         self.log.info("mission: traversing - running %s to the map edge", heading)
+        before = self._scene_hash(frame_bgr)
         self.actor.click_pixel(x, self.GROUND_Y, why=f"run {heading} to map edge")
 
         # Anything that means "stop walking" - in priority order, as everywhere.
@@ -613,12 +646,22 @@ class MissionRunner:
         else:
             time.sleep(self.traverse_settle)
 
-        # Nothing happened. Either this edge is a dead end or the map simply had
-        # nothing on the way; either way, try the other direction next time.
-        self._heading = "left" if heading == "right" else "right"
+        # No ambush. That does NOT mean the run failed - MOVING WITHOUT MEETING
+        # ANYTHING IS THE NORMAL CASE. Flipping heading every quiet run made the
+        # bot ping-pong between the two edges forever, which is what the messy
+        # navigation looked like: right, left, right, left, never getting
+        # anywhere. Only turn round when the scene did not change, which means
+        # we genuinely could not go that way.
         self._traverse_runs = getattr(self, "_traverse_runs", 0) + 1
-        self.log.info("mission: nothing on that run; turning %s (run %d)",
-                      self._heading, self._traverse_runs)
+        after = self._scene_hash(self.capture.frame(gray=False))
+        if self._scene_changed(before, after):
+            self.log.info("mission: moved on (run %d); still heading %s",
+                          self._traverse_runs, heading)
+            self._heading = heading
+            return
+        self._heading = "left" if heading == "right" else "right"
+        self.log.info("mission: that way is a dead end (run %d); turning %s",
+                      self._traverse_runs, self._heading)
 
 
 def _find_all(frame_gray, tpl, max_hits=8, suppress=None, scales=None,

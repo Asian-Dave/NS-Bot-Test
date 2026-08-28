@@ -157,6 +157,10 @@ class BattleRunner:
         # "run" restores the old flee-on-watchdog behaviour. It defaults to
         # "fight" because fleeing FAILS the mission.
         self.watchdog_action = c.get("watchdog_action", "fight")
+        # What to press when NOTHING else resolves. Dodge, because a stun or
+        # similar restriction disables every other action and leaves it as the
+        # only thing the game will accept.
+        self.restricted_action = c.get("restricted_action", "DO")
         self._warned_watchdog = False
         self.action_timeout = c.get("action_timeout_s", 6)
         self.max_rounds = c.get("max_rounds", 60)
@@ -198,10 +202,22 @@ class BattleRunner:
             waits = [self.conditions["result_panel"]]
             if "defeat_panel" in self.conditions:
                 waits.append(self.conditions["defeat_panel"])
+            # A FIGHT CAN END STRAIGHT INTO DIALOGUE, with no Victory panel at
+            # all. Observed on "Desert Ronins": the last enemy fell and the game
+            # cut to "These ronins are stronger than we thought", while this gate
+            # waited 45 s for a turn that could never come and then reported the
+            # battle stalled. A cutscene is an end condition, not a stall.
+            if "cutscene_continue" in self.conditions:
+                waits.append(self.conditions["cutscene_continue"])
             waits.append(self.conditions["command_bar"])
 
             fired = self.gate.wait_for_any(waits, self.turn_timeout,
                                            why=f"battle turn {rounds + 1}")
+            if fired and fired.name == "cutscene_continue":
+                self.log.info("battle: ended into dialogue after %d round(s)",
+                              rounds)
+                return VICTORY, {"rounds": rounds, "acted": acted,
+                                 "ended": "cutscene"}
             if isinstance(fired, Stopped):
                 return STOPPED, {"rounds": rounds, "acted": acted}
             if not fired:
@@ -331,7 +347,25 @@ class BattleRunner:
                 return True
             self.rotation.failed(slot)
 
-        # Nothing in the rotation worked. Fall back to the configured closing
+        # NOTHING RESOLVED. The usual cause is not a bad click: the player is
+        # STUNNED or otherwise restricted, and every action except Dodge is
+        # disabled. Clicking a disabled button does nothing at all, so the turn
+        # never resolves and the bot re-clicks Attack forever - observed live on
+        # "Desert Ronins", where the log filled with "rotation exhausted" while
+        # enemy HP sat flat at 263.7% for a dozen rounds.
+        #
+        # Dodge is what the game leaves available, so take it. It costs the turn
+        # and lets the restriction tick down, which is exactly what a human does.
+        if self.restricted_action:
+            slot = self.restricted_action
+            self.log.info("battle: nothing resolved - the player looks "
+                          "restricted (stun?), taking %s", slot)
+            self.actor.click_pixel(*geo.cmd(slot),
+                                   why=f"restricted -> {slot} (round {rounds})")
+            if self._wait_resolved(slot):
+                return True
+
+        # Fall back to the configured closing
         # action so the turn is not simply abandoned — an unspent turn means the
         # gate will just re-fire and we will spin.
         if self.closing_action:
