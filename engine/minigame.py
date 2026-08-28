@@ -170,7 +170,10 @@ def solve(cap, actor, log, frame=None):
                  "90-way guess this file used to describe. Matching slot art to "
                  "tile art is only partly reliable so far (5.13x separation on "
                  "some seals, 1.10x on others); see engine/seals.py.")
-        ok = se.play_round(cap, actor, log, save_crops=True)
+        # The WHOLE mission, not one round: `Skill : N / 4` means the board has
+        # to be beaten several times, and playing once then closing out left a
+        # run reporting "close-out timed out" on a mission still in progress.
+        ok = se.play(cap, actor, log, save_crops=True)
         return kind, bool(ok)
 
     if kind == COMBAT:

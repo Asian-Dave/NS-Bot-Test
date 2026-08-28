@@ -136,6 +136,76 @@ _BOOTSTRAP = r"""
     window.__nsbotRender(window.__nsbotState || {});
   };
 
+  // ---- FOCUS MODE -------------------------------------------------------
+  // Hides everything on the page except the game, and pins it to the top of
+  // the viewport.
+  //
+  // This is not only cosmetic. The page is much taller than the viewport, so
+  // where the game sits depends on the scroll position, and that DRIFTED across
+  // a session (scrollY 458 -> 301 -> 242). Every drift moved the game with it:
+  // template anchors fell into the hidden band and the bot reported "could not
+  // find the Special tab" and "no anchor matched" on screens that were
+  // perfectly healthy, just scrolled away.
+  //
+  // Hiding the siblings lets the game reflow to the top, so scrollY is 0 and
+  // stays 0. Deterministic geometry is the real prize; the calm is a bonus.
+  //
+  // It hides SIBLINGS ONLY and never touches the game element itself.
+  // CLAUDE.md is emphatic that resizing `ruffle-player` via CSS desyncs
+  // click -> stage mapping inside the SWF and looks exactly like a hang.
+  const gameEl = () =>
+    document.querySelector('iframe[src*="emulator"]') ||
+    document.querySelector('iframe[src*="play"]');
+
+  window.__nsbotFocus = (on) => {
+    const g = gameEl();
+    if (!g) return "no-game";
+    if (on) {
+      for (let el = g; el && el !== document.documentElement; el = el.parentElement) {
+        for (const sib of Array.from(el.parentElement ? el.parentElement.children : [])) {
+          if (sib === el || sib.id === ID || sib.tagName === "STYLE") continue;
+          if (!sib.hasAttribute("data-nsbot-hid")) {
+            sib.setAttribute("data-nsbot-hid", sib.style.display || "");
+            sib.style.display = "none";
+          }
+        }
+      }
+      document.body.style.margin = "0";
+      // TOP-ALIGN, do not centre. The game is 839 CSS px tall in a 720 px
+      // viewport, so 119 px is cut off whatever we do - but WHICH 119 matters.
+      // Left to itself the layout centres the game and loses 59 px off the top,
+      // which is exactly where the panel tabs and headers live. Aligning the
+      // top instead puts the whole upper game in view and sacrifices the NPC
+      // rail at the bottom, which nothing here needs.
+      // Nudge with a MARGIN, never a size. Once the siblings are hidden the
+      // document is no taller than the game, so there is nothing left to
+      // scroll - the remaining offset is the container centring the game, and
+      // scrollTo cannot undo it. A margin shifts the iframe without touching
+      // its width or height, so the SWF's own scaling is unaffected. Resizing
+      // it would desync click -> stage mapping inside the game (CLAUDE.md).
+      scrollTo(0, 0);
+      const r0 = g.getBoundingClientRect();
+      if (Math.abs(r0.y) > 1) {
+        if (!g.hasAttribute("data-nsbot-mt")) {
+          g.setAttribute("data-nsbot-mt", g.style.marginTop || "");
+        }
+        const cur = parseFloat(getComputedStyle(g).marginTop) || 0;
+        g.style.marginTop = Math.round(cur - r0.y) + "px";
+      }
+    } else {
+      document.querySelectorAll("[data-nsbot-hid]").forEach(el => {
+        el.style.display = el.getAttribute("data-nsbot-hid");
+        el.removeAttribute("data-nsbot-hid");
+      });
+      if (g.hasAttribute("data-nsbot-mt")) {
+        g.style.marginTop = g.getAttribute("data-nsbot-mt");
+        g.removeAttribute("data-nsbot-mt");
+      }
+    }
+    window.__nsbotFocusOn = !!on;
+    return on ? "focused" : "restored";
+  };
+
   window.__nsbotRender = (s) => {
     const el = document.getElementById(ID);
     if (!el) return "missing";
@@ -171,6 +241,10 @@ _BOOTSTRAP = r"""
       // bot; the panel stays. Quit ends the process, and the panel goes with it
       // because the injection lives in the CDP session that made it - there is
       // no way to leave a panel behind without a process holding the socket.
+      `<h4>View</h4><div style="margin-top:2px">` +
+        btn("focus", s.focus ? "Focus mode: ON" : "Focus mode: off", null,
+            !!s.focus) +
+      `</div>` +
       `<div style="margin-top:6px">` +
         btn("quit", "Quit (closes this panel)", null, false, true) +
       `</div>` +
@@ -212,6 +286,17 @@ class Dock:
         self.cdp.call("Page.enable")
         self.cdp.watch("Runtime.bindingCalled")
         self.cdp.add_binding(BINDING)
+        # Clear any PREVIOUS injection first. The bootstrap guards on
+        # `__nsbotDockInit` so it is idempotent across navigations, but that same
+        # guard makes it ignore a NEWER version of itself - so after the module
+        # changed, install() silently kept running the old code and new controls
+        # came back "no-panel".
+        try:
+            self.cdp.evaluate(
+                f"(()=>{{document.getElementById({PANEL_ID!r})?.remove();"
+                f"window.__nsbotDockInit=false;return 1;}})()")
+        except Exception:
+            pass
         src = self._source()
         r = self.cdp.call("Page.addScriptToEvaluateOnNewDocument", source=src)
         self._script_id = r.get("identifier")
@@ -274,6 +359,27 @@ class Dock:
         payload = json.dumps(state)
         return self.cdp.evaluate(
             f"(window.__nsbotRender ? window.__nsbotRender({payload}) : 'no-panel')")
+
+    def focus(self, on=True):
+        """Hide the rest of the page so only the game (and this panel) shows."""
+        return self.cdp.evaluate(
+            f"(window.__nsbotFocus ? window.__nsbotFocus({str(bool(on)).lower()})"
+            f" : 'no-panel')")
+
+    def focus_state(self):
+        try:
+            return bool(self.cdp.evaluate("!!window.__nsbotFocusOn"))
+        except Exception:
+            return False
+
+    def game_ready(self):
+        """Is the game actually loaded — i.e. is the SWF's iframe present?"""
+        try:
+            return bool(self.cdp.evaluate(
+                '!!(document.querySelector(\'iframe[src*="emulator"]\')'
+                ' || document.querySelector(\'iframe[src*="play"]\'))'))
+        except Exception:
+            return False
 
     def commands(self, poll=0.0):
         """Buttons the operator pressed since the last call, oldest first."""

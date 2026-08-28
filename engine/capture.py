@@ -87,6 +87,42 @@ class Capture:
                 w / self.dpr, h / self.dpr)
         return clip, (x, y)
 
+    def scroll_game(self, frac=0.0):
+        """Park the page scroll so a known part of the game is on screen.
+
+        THE GAME DOES NOT FIT THE VIEWPORT. Measured: the /play iframe is 839
+        CSS px tall against a 720 px viewport, so **119 px is always hidden**,
+        and which 119 depends on where the page happens to be scrolled. At
+        scrollY=458 the top of the game sat 157 px above the viewport and the
+        Special tab was not on screen at all - the bot reported "could not find
+        the Special tab" while looking at a perfectly healthy Mission Room, and
+        the resume ladder halted on a screen it knows, because that screen's
+        anchor was scrolled out of view.
+
+        Raising the viewport is NOT the fix: Ruffle scales by
+        min(vw/960, vh/720), so a taller viewport rescales the whole game and
+        invalidates every template threshold in the project. The scroll is what
+        has to be pinned instead.
+
+        `frac` 0.0 puts the top of the game at the top of the viewport, 1.0 the
+        bottom. Anything that might sit in the hidden band must be looked for at
+        both.
+        """
+        js = """(() => {
+          const f = document.querySelector('iframe[src*="emulator"]')
+                 || document.querySelector('iframe[src*="play"]');
+          if (!f) return -1;
+          const r = f.getBoundingClientRect();
+          const top = r.y + scrollY;
+          const over = Math.max(0, r.height - innerHeight);
+          scrollTo(0, Math.round(top + over * %f));
+          return scrollY;
+        })()""" % float(frac)
+        try:
+            return self.cdp.evaluate(js)
+        except Exception:
+            return None
+
     def to_click_coords(self, px, py):
         """Captured-pixel point -> CSS coordinates for Input.dispatchMouseEvent."""
         return px / self.dpr, py / self.dpr

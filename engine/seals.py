@@ -133,7 +133,13 @@ INK_MARGIN = 1.10
 # RELATIVE, never absolute" - and it applies here for the same reason. The
 # "Skill : N / 4" HUD is the anchor: it is present in EVERY phase (unlike Start)
 # and lands at exactly (1106, 255) on every correctly-aligned frame.
-HUD_REF = (1106, 255)
+# NOTE the anchor template was RE-CUT. The original `tp_seal_hud` included the
+# counter digits, so it was cut from a board reading "Skill : 1 / 4" and dropped
+# to 0.791 - below its own gate - the moment a mission read "2 / 5". A whole
+# mission was reported as "the board is gone" because of it. The template now
+# covers only the invariant "Skill :" and scores 1.000 on 1/4, 2/5 and 3/4
+# alike, against a 0.356 worst negative. Its match centre moved with the crop.
+HUD_REF = (1028, 255)
 
 
 def anchor_offset(frame, log=None):
@@ -208,8 +214,22 @@ def find_slots(frame, lo=1300, hi=2200, step=12, dark=230.0, off=(0, 0)):
     span = (x1 - x0) - SLOT_W
     n = max(1, int(round(span / float(SLOT_PITCH))) + 1)
     n = min(n, 8)
-    return [(int(SLOT_CX + SLOT_PITCH * (i - (n - 1) / 2.0)) + off[0],
+    cand = [(int(SLOT_CX + SLOT_PITCH * (i - (n - 1) / 2.0)) + off[0],
              SLOT_Y + off[1]) for i in range(n)]
+    # THEN KEEP ONLY THE POSITIONS THAT ACTUALLY HOLD A CARD. The band width is
+    # a good first estimate and a bad final answer: measured live, a five-slot
+    # round produced a dark run 896 px wide that implied six, and the sixth
+    # position was bare parchment. The bot then waited forever for a sixth sign
+    # that was never coming - "recorded 5 of 6 sign(s)" on a loop.
+    # A card is dark; the parchment behind the row is ~255.
+    keep = []
+    for (x, y) in cand:
+        c = frame[max(0, y - 50):y + 50, max(0, x - 45):x + 45]
+        if c.size == 0:
+            continue
+        if float(cv2.cvtColor(c, cv2.COLOR_BGR2HSV)[:, :, 2].mean()) < 215.0:
+            keep.append((x, y))
+    return keep or cand
 
 
 def slot_crop(frame, i, slots=None, off=(0, 0)):
@@ -445,6 +465,17 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
     see the module docstring. `commit=False` observes without spending hearts and
     leaves the round stranded on purpose.
     """
+    # Park the scroll first. The game is 839 CSS px tall in a 720 px viewport,
+    # so part of it is always off screen; if the tile strip is the part that is
+    # cut off, no amount of offset correction helps - the pixels are not there.
+    # Measured: a run reported "the tiles never became active" on a board whose
+    # tiles were perfectly active, just scrolled out of view.
+    try:
+        cap.scroll_game(0.0)
+        time.sleep(0.3)
+    except Exception:
+        pass
+
     f = cap.frame(gray=False)
     if board_present(f) is False:
         log.info("hand-seal board is not on screen - refusing to click a fixed "
@@ -542,14 +573,43 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
             return False
         choice = order[0]
         margin = (by_i[order[1]] / max(1e-6, by_i[choice])) if len(order) > 1 else 99.0
+
+        # THIN MARGIN: ask a second, independent metric. Two of the ten seals
+        # have near-identical glove silhouettes and separate by only ~1.1x on
+        # blue alone - and every wrong pick this session has come from exactly
+        # that band, while every pick above ~2.4x has been right. The dark-ink
+        # outline is a different feature of the same art, so where blue cannot
+        # choose, ink usually can.
+        if margin < BLUE_MARGIN and len(order) > 1 and want[si] is not None:
+            a, b = order[0], order[1]
+            si_ink = _shape(ink_mask(want[si]))
+            ea = dist(si_ink, _shape(ink_mask(tile_crop(tf, a, off))))
+            eb = dist(si_ink, _shape(ink_mask(tile_crop(tf, b, off))))
+            if eb < ea:
+                log.info("   blue was thin (%.2fx); ink prefers tile %d over %d "
+                         "(%.3f vs %.3f) - switching", margin, b, a, eb, ea)
+                choice = b
+            else:
+                log.info("   blue was thin (%.2fx); ink agrees on tile %d "
+                         "(%.3f vs %.3f)", margin, a, ea, eb)
         log.info("sign %d -> tile %d (d=%.3f, margin %.2fx)",
                  si, choice, by_i[choice], margin)
 
+        # RE-DERIVE THE OFFSET IMMEDIATELY BEFORE CLICKING, from a fresh frame.
+        # The panel moves between the decision and the action - the page scroll
+        # drifted 458 -> 301 -> 242 across one session, taking the panel with it -
+        # so an offset measured once per round is stale by the time the click
+        # goes out, and the click lands on the wrong tile or on nothing.
+        # Deciding and acting are separate moments; only the acting one counts.
         g = cap.frame(gray=False)
         if board_present(g) is False:
             log.info("board vanished mid-answer - stopping")
             return False
-        actor.click_pixel(TILES[choice][0] + off[0], TILES[choice][1] + off[1],
+        now = anchor_offset(g)
+        if now != off:
+            log.info("   panel moved %s -> %s since the read; clicking at the "
+                     "current position", off, now)
+        actor.click_pixel(TILES[choice][0] + now[0], TILES[choice][1] + now[1],
                           why=f"hand sign {si} = tile {choice}")
         time.sleep(0.6)
 
@@ -580,6 +640,34 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
     log.info("played %s - %s", picked,
              "both signs verified" if ok_all else "at least one sign was wrong")
     return ok_all
+
+
+def play(cap, actor, log, max_rounds=12, save_crops=False):
+    """Play the WHOLE mission - every round until the board is gone.
+
+    A round is not a mission. `Skill : N / 4` (sometimes N / 5) means the board
+    has to be beaten several times, and the sequence grows as it goes. Playing a
+    single round and then trying to close out is how a run ended with "close-out
+    timed out after 45s" on a mission that was still very much in progress.
+
+    Stops when the board disappears (mission over, won or lost) or when a round
+    cannot be played at all.
+    """
+    won = 0
+    for r in range(max_rounds):
+        f = cap.frame(gray=False)
+        if board_present(f) is not True:
+            log.info("the hand-seal board is gone after %d round(s)", r)
+            break
+        log.info("--- hand-seal round %d ---", r + 1)
+        ok = play_round(cap, actor, log, save_crops=save_crops)
+        if ok:
+            won += 1
+        elif ok is False and board_present(cap.frame(gray=False)) is not True:
+            break
+        time.sleep(2.5)
+    log.info("hand-seal mission: %d round(s) played cleanly", won)
+    return won
 
 
 def main():

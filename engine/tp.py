@@ -116,21 +116,36 @@ def green_check(gray, thr=0.80):
     return (m.center, c) if m.found else (None, c)
 
 
+def game_scroll(cap, frac=0.0):
+    """Delegates to Capture.scroll_game - see there for why this is needed."""
+    return cap.scroll_game(frac)
+
+
 def click_when(actor, cap, tpl, why, tries=4, settle=2.6):
-    """Match `tpl` and click it, retrying. False if never found."""
-    for _ in range(tries):
+    """Match `tpl` and click it, retrying. False if never found.
+
+    Retries alternate the page scroll, because a template can be genuinely
+    absent from the viewport rather than absent from the game - see
+    `game_scroll`.
+    """
+    for i in range(tries):
         g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
         m, c = find(g, tpl)
         if m.found:
             actor.click_pixel(*m.center, why=f"{why} ({c:.3f})")
             time.sleep(settle)
             return True
-        time.sleep(1.2)
+        # Not on screen. Before deciding it is not there at all, look in the
+        # part of the game the viewport is currently cutting off.
+        game_scroll(cap, 0.0 if i % 2 == 0 else 1.0)
+        time.sleep(0.6)
     return False
 
 
 def to_tp_list(actor, cap, log):
     """lobby -> Mission Room -> Special -> TP Training. False if it stalls."""
+    game_scroll(cap, 0.0)          # start from a known scroll, not whatever we inherited
+    time.sleep(0.4)
     if not click_when(actor, cap, _tpl("mission_room_entry"), "enter Mission Room"):
         log.info("could not find the Mission Room entrance in the village")
         return False
@@ -162,6 +177,108 @@ ROW_TEMPLATES = {
     "potion": ["tp_potion_row", "tp_potion2_row"],      # "Dangerous Potion",
                                                         # "Weird Potion"
 }
+
+
+def find_mission_rows(frame, x0=1650, x1=2550, y0=200, y1=1050,
+                      step=4, min_frac=0.35, min_h=20):
+    """Where the mission rows are on the current list page, by SHAPE not by name.
+
+    Returns the y centre of each row's title bar, top to bottom.
+
+    WHY NOT FIXED POSITIONS, AND WHY NOT NAMES
+    ------------------------------------------
+    Rows sit on a ~178 px pitch, but the PANEL MOVES - the same lesson the
+    hand-seal geometry taught (a reload shifted that panel 111 px). Measured on
+    two live captures of the same list, the first row's title bar was at y=452
+    in one and y=350 in the other, so any hardcoded y reads the gap between rows
+    instead.
+
+    And matching each mission by a name template does not scale: it needs a new
+    template per mission, it silently skips anything renamed or newly added, and
+    the family a name implies is not guaranteed to be the minigame you get. The
+    minigame is identified from the SCREEN once it opens (engine/minigame.py) -
+    so the list only has to answer "how many rows are there, and where".
+
+    A title bar is a WIDE BAND OF ONE SPECIFIC COLOUR - a muted brown, measured
+    hue 8..22, sat 45..110, val 100..160. Averages are not enough to find it:
+    mean saturation and value alone also fire on the panel header, on village
+    architecture, and on the mission room, because an average says nothing about
+    whether the colour is uniform across the row.
+
+    What separates is the FRACTION of the row that is bar-coloured:
+
+        real title bars     0.609 .. 0.786
+        panel header        0.000
+        mission room        0.001
+        lobby architecture  0.012 .. 0.107
+
+    so the gate sits at 0.35, about half way in log terms and 5.7x clear of the
+    worst false positive.
+    """
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    h, w = hsv.shape[:2]
+    x0, x1 = max(0, x0), min(w, x1)
+    hits = []
+    for y in range(max(0, y0), min(h, y1), step):
+        band = hsv[y:y + step, x0:x1]
+        if band.size == 0:
+            continue
+        hh, ss, vv = band[:, :, 0], band[:, :, 1], band[:, :, 2]
+        frac = float(((hh >= 8) & (hh <= 22) & (ss >= 45) & (ss <= 110)
+                      & (vv >= 100) & (vv <= 160)).mean())
+        if frac >= min_frac:
+            hits.append(y)
+    runs, cur = [], []
+    for y in hits:
+        if cur and y - cur[-1] > step * 2:
+            runs.append(cur)
+            cur = []
+        cur.append(y)
+    if cur:
+        runs.append(cur)
+    return [int((r[0] + r[-1]) / 2) for r in runs
+            if (r[-1] - r[0]) >= min_h]
+
+
+def start_row(actor, cap, log, y, x=2195, settle=2.6):
+    """Open the mission whose title bar is at `y`, and press its green check."""
+    actor.click_pixel(x, y, why=f"open the mission at y={y}")
+    time.sleep(settle)
+    g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+    pt, cc = green_check(g)
+    if not pt:
+        log.info("detail panel did not open, or its green check was not found "
+                 "(%.3f)", cc)
+        return False
+    actor.click_pixel(*pt, why=f"start mission ({cc:.3f})")
+    time.sleep(3.0)
+    return True
+
+
+def pick_any(actor, cap, log, skip=(), max_pages=3):
+    """Start ANY unplayed mission on the TP list. Returns its (page, y) or None.
+
+    Name-agnostic on purpose: what the mission actually is gets decided by
+    looking at the minigame once it opens.
+    """
+    nxt = _tpl("page_next", 0.85)
+    for page in range(max_pages):
+        f = cap.frame(gray=False)
+        rows = find_mission_rows(f)
+        log.info("TP list page %d: %d row(s) at y=%s", page + 1, len(rows), rows)
+        for y in rows:
+            if any(abs(y - sy) < 40 and page == sp for sp, sy in skip):
+                continue
+            if start_row(actor, cap, log, y):
+                return (page, y)
+            log.info("row at y=%d would not start; trying the next", y)
+        g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+        nm, nc = find(g, nxt)
+        if not nm.found:
+            return None
+        actor.click_pixel(*nm.center, why=f"TP list next page ({nc:.3f})")
+        time.sleep(2.2)
+    return None
 
 
 def pick_mission(actor, cap, log, which="kekkai", max_pages=3):
@@ -317,6 +434,63 @@ def close_out(actor, cap, log, timeout=45):
     return False
 
 
+def run_all(cap, actor, log, max_missions=6):
+    """Play EVERY TP mission on the list, whatever they turn out to be.
+
+    The mission is chosen by position, not by name, and what it IS gets decided
+    by looking at the minigame once it opens (engine/minigame.py). That is the
+    right way round: a name is a hint, not a guarantee - the family a title
+    implies is not necessarily the minigame you get, and matching names needs a
+    new template for every mission that is ever added or renamed.
+
+    Completed missions drop out of the day's list, so this simply keeps taking
+    the first startable row until nothing is left. A FAILED mission is NOT
+    consumed - it stays listed - so rows that fail are remembered and skipped
+    rather than retried forever.
+
+    Returns (played, banked).
+    """
+    played = banked = 0
+    tried = []
+    for _ in range(max_missions):
+        if not to_tp_list(actor, cap, log):
+            log.info("could not reach the TP list")
+            break
+        spot = pick_any(actor, cap, log, skip=tried)
+        if spot is None:
+            log.info("no more startable TP missions today")
+            break
+        tried.append(spot)
+        played += 1
+        log.info("started the mission at page %d y=%d - identifying it from the "
+                 "screen", spot[0] + 1, spot[1])
+        if run_one(cap, actor, log):
+            banked += 1
+            log.info("mission banked (%d of %d played)", banked, played)
+        else:
+            log.info("mission did not complete; it stays in the list and will "
+                     "not be retried this pass")
+            _recover_to_lobby(cap, actor, log)
+    log.info("TP pass finished: %d started, %d banked", played, banked)
+    return played, banked
+
+
+def _recover_to_lobby(cap, actor, log, timeout=120):
+    """Get back to the village after a mission that did not close out."""
+    try:
+        import resume
+        from bot import load_templates
+        import json as _json
+        cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
+        r = resume.Resumer(cap, actor, load_templates(cfg, log), log)
+        out, info = r.run(timeout=timeout)
+        log.info("recover: %s %s", out, info)
+        return out == resume.ARRIVED
+    except Exception as e:
+        log.info("recover failed: %s: %s", type(e).__name__, e)
+        return False
+
+
 def run_one(cap, actor, log, family=None, rounds=6):
     """Play a TP mission that is already started. True if it closed out.
 
@@ -350,6 +524,9 @@ def main():
                          "(then pick a mission yourself and rerun without this)")
     ap.add_argument("--play", action="store_true",
                     help="play a mission that is ALREADY started")
+    ap.add_argument("--all", action="store_true",
+                    help="play EVERY TP mission on the list, identifying each "
+                         "minigame from the screen rather than from its name")
     ap.add_argument("--auto", action="store_true",
                     help="ONE PRESS: lobby -> Special -> TP Training -> pick a "
                          "mission by name -> start -> play -> close out")
@@ -368,7 +545,10 @@ def main():
 
     rc = 0
     try:
-        if a.auto:
+        if a.all:
+            played, banked = run_all(cap, actor, log)
+            rc = 0 if banked else 1
+        elif a.auto:
             if not ctl.wait_if_paused():
                 log.info("stop requested")
                 return 1

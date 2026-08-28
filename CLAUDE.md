@@ -860,6 +860,71 @@ Two corrections to the section above, both measured live:
 Note the band spans the *outer edges* of the first and last card, so its width is
 `(n-1)*pitch + card_width`. Forgetting the card width over-counts by one.
 
+### FOCUS MODE — and why it is a CORRECTNESS feature, not decoration
+
+`engine/dock.py` can hide everything on the page except the game and pin it to
+the top of the viewport. It is armed by default in `app.py` and applied as soon
+as the game iframe appears (never before sign-in — hiding the login page would
+leave the operator staring at nothing).
+
+It is not just calm. **The page scroll drifts, and the game moves with it.**
+Measured across one session: scrollY 458 -> 420 -> 301 -> 242. The game is 839
+CSS px tall in a 720 px viewport, so 119 px is always hidden and the scroll
+decides which 119. The consequences were not subtle:
+
+* "could not find the Special tab" on a perfectly healthy Mission Room, because
+  the tab was 157 px above the viewport
+* the resume ladder halting on screens it knows, because their anchor was in the
+  hidden band
+* "the tiles never became active" on a board whose tiles were active and
+  on screen a moment later
+
+Focus mode hides the SIBLINGS of the game, so the layout reflows and the game
+lands at the top with `scrollY` 0 and staying 0. **It never touches the game
+element's size** — the final nudge is a `margin-top`, not a width or height,
+because resizing `ruffle-player` desyncs click -> stage mapping inside the SWF.
+
+Top-aligned, not centred: left alone the container centres the game and loses
+59 px off the TOP, which is where panel tabs and headers live. Aligning the top
+sacrifices the NPC rail at the bottom, which nothing here needs.
+
+`Capture.scroll_game(frac)` remains as the fallback for when focus mode is off,
+and the resume ladder alternates the scroll before declaring a frame
+unrecognised.
+
+### The HUD anchor template included the COUNTER — re-cut it
+
+`tp_seal_hud` was cut from a board reading "Skill : 1 / 4", digits included. The
+moment a mission read "2 / 5" it scored **0.791**, under its own 0.88 gate, and
+an entire mission was abandoned with "the hand-seal board is gone" while the
+board was plainly on screen.
+
+Re-cut to the invariant "Skill :" only, it scores **1.000 on 1/4, 2/5 and 3/4
+alike** against a 0.356 worst negative. `HUD_REF` moved to (1028, 255) with the
+crop.
+
+General lesson, and it applies to every template in this project: **an anchor
+must not contain the thing that varies.** A counter, a level, a name or a score
+baked into a crop turns a state detector into a detector of one particular
+value of that state.
+
+### A round is not a mission
+
+`Skill : N / 4` (sometimes N / 5) means the board must be beaten several times.
+Playing one round and then closing out produced "close-out timed out after 45s"
+on a mission still in progress. `seals.play` loops until the board is gone.
+
+### STILL OPEN: the slot row is both the prompt AND the input
+
+The row of slot cards shows the sequence during the look phase, and then shows
+what YOU have entered. Those are different meanings for the same pixels, and
+telling them apart is unresolved. It shows up as "recorded 5 of 6 sign(s)" on a
+loop: some of those slots hold signs the bot itself entered on a previous
+attempt, so waiting for the rest to be revealed waits forever.
+
+Resolving it needs a phase signal that does not come from the slots — the Start
+button's presence and the tiles' greyed/live state are the candidates.
+
 ### CONFIRMED: the hand-seal mission COMPLETES
 
 "Weird Potion" finished by the bot with the anchored geometry — including

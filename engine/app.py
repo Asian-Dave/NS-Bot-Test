@@ -131,6 +131,12 @@ class Runner:
         self.note = ""
         self.t0 = time.time()
         self.max_unknown = 20
+        # Focus mode is armed by default and applied as soon as the game is
+        # detected. It is not decoration: hiding the page chrome lets the game
+        # reflow to the top so scrollY is 0 and STAYS 0, which is what makes the
+        # bot's coordinates mean the same thing from one minute to the next.
+        self.focus_wanted = True
+        self.focus_on = False
         self.resumer = resume.Resumer(cap, actor, tpls, log, controls=controls)
         # Without this the dock deadlocks the bot: Pause parks a task inside
         # `Controls.wait_if_paused`, and the loop that reads the operator's next
@@ -150,6 +156,7 @@ class Runner:
                 "mode": self.mode, "state": self.state, "task": self.task,
                 "cycle": self.cycle, "uptime": self._uptime(),
                 "note": self.note, "tasks": TASKS, "log": self.log.lines[-10:],
+                "focus": self.focus_on,
             })
         except (OSError, CDPError) as e:
             raise Disconnected(str(e))
@@ -177,6 +184,12 @@ class Runner:
             self.mode = "stopped"
             _write_control("stop")
             self.log.info("operator: STOP (panel stays; press Run to resume)")
+        elif c == "focus":
+            self.focus_wanted = not self.focus_wanted
+            self.dock.focus(self.focus_wanted)
+            self.focus_on = self.focus_wanted
+            self.log.info("operator: focus mode %s",
+                          "ON" if self.focus_wanted else "off")
         elif c == "quit":
             self.quit = True
             _write_control("stop")
@@ -246,22 +259,12 @@ class Runner:
             import tp as tp_mod
             self.note = "TP run in flight - the panel pauses until it finishes"
             self.push()
-            if not tp_mod.to_tp_list(self.actor, self.cap, self.log):
-                self.note = "could not reach the TP list"
-                self.mode = "paused"
-                return
-            # Try every family we can actually PLAY, in turn. The TP list is a
-            # daily list that shrinks as missions are completed, so "not on this
-            # page" is a normal end-of-day answer, not an error.
-            for fam in getattr(tp_mod, "TRY_ORDER", ("scroll", "kekkai")):
-                if fam not in tp_mod.SUPPORTED:
-                    continue
-                if tp_mod.pick_mission(self.actor, self.cap, self.log, fam):
-                    ok = tp_mod.run_one(self.cap, self.actor, self.log)
-                    self.note = f"TP {fam}: {'completed' if ok else 'did not complete'}"
-                    self.log.info(self.note)
-                    return
-            self.note = "no TP mission left to play today"
+            # Play whatever is listed, identifying each minigame from the
+            # screen. Names are not used to choose: the family a title implies
+            # is not guaranteed to be the minigame you get, and a name-matched
+            # picker silently skips anything renamed or newly added.
+            played, banked = tp_mod.run_all(self.cap, self.actor, self.log)
+            self.note = f"TP pass: {played} started, {banked} banked"
             self.log.info(self.note)
             self.mode = "paused"
             return
@@ -309,6 +312,28 @@ class Runner:
         self.log.error("could not reconnect after 30 attempts")
         return False
 
+    def ensure_focus(self):
+        """Apply focus mode once the game is on the page.
+
+        Waits for the game rather than doing it on load: before sign-in there is
+        no game to focus on, and hiding the login page would leave the operator
+        staring at nothing.
+        """
+        if not self.focus_wanted or self.focus_on:
+            return
+        try:
+            if not self.dock.game_ready():
+                return
+            r = self.dock.focus(True)
+            if r == "focused":
+                self.focus_on = True
+                self.log.info("focus mode on - page chrome hidden, game pinned "
+                              "to the top (scroll is now deterministic)")
+        except (OSError, CDPError) as e:
+            raise Disconnected(str(e))
+        except Exception:
+            pass
+
     def ensure_dock(self):
         """Keep the panel on screen no matter what the page does.
 
@@ -330,6 +355,7 @@ class Runner:
         self.log.info("dock missing (navigation?) - re-injecting")
         try:
             self.dock.install(verify=False)
+            self.focus_on = False          # a fresh document is unfocused
             return True
         except Exception as e:
             self.log.error("could not re-inject the dock: %s", e)
@@ -341,6 +367,7 @@ class Runner:
         while not self.quit:
             try:
                 self.ensure_dock()
+                self.ensure_focus()
                 self.pump()
                 if self.mode == "running":
                     try:

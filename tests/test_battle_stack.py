@@ -259,10 +259,14 @@ def test_resume_ladder_panels():
         ("Mission Success", "ref/auto/panels/mission_success.png",
          "mission_success", True),
         ("lobby", "ref/auto/lobby_full.png", "lobby", False),
-        # The ladder covers login->lobby and result panels. A mission room or a
-        # battle is NOT its job, and it must say "unknown" and click nothing
-        # rather than guess - clicking blind is how you hit Delete next to Play.
-        ("mission room", "ref/auto/mission/room_05.png", "unknown", False),
+        # The Mission Room IS now the ladder's job. It used to be "unknown" on
+        # purpose, but that left the ladder with no exit from a screen it opens
+        # itself: none of the popup X templates matched the panel (best 0.784)
+        # and it halted after 20 unrecognised frames on a perfectly healthy
+        # screen. Closing the panel returns to the village, which is exactly
+        # what the ladder is for. The rung sits low, so anything on TOP of the
+        # Mission Room is still handled first.
+        ("mission room", "ref/auto/mission/room_05.png", "mission_room", True),
         ("combat", "ref/auto/mission/COMBAT.png", "unknown", False),
     ]
     for label, rel, expect, should_click in cases:

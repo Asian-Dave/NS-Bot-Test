@@ -207,6 +207,18 @@ DEFAULT_LADDER = [
     # from anything else. The card click uses an offset from char_slot_level, so
     # it is deliberately ordered AFTER play_btn — if Play is on screen we take it
     # and never compute an offset at all.
+    # The Mission Room / Special panel is a screen the ladder used to have no
+    # exit from: its own anchor is not the lobby, none of the popup X templates
+    # matched it (best 0.784), and the ladder halted after 20 unrecognised
+    # frames on a perfectly healthy screen. Its close X is the same control on
+    # both tabs, which is why close_room_x scores 1.000 on the Special tab too -
+    # that is a true positive, not a false one.
+    #
+    # It sits LOW in the ladder deliberately: it should only fire when nothing
+    # else does, so a popup or a result panel on top of the Mission Room is
+    # still handled first.
+    Step("mission_room", "close_room_x", "click",
+         note="Mission Room / Special panel; closing it returns to the village"),
     Step("play", "play_btn", "click",
          note="whitelisted by template; never by offset (Delete is adjacent)"),
     Step("select_char", "char_slot_level", "click", offset=(-40, -20),
@@ -246,6 +258,7 @@ class Resumer:
                                       cv2.COLOR_BGR2GRAY)
 
         t0 = time.time()
+        self._pass = getattr(self, "_pass", 0) + 1
         for step in self.ladder:
             tpl = self.templates.get(step.anchor)
             if tpl is None:
@@ -272,6 +285,17 @@ class Resumer:
 
         el = (time.time() - t0) * 1000
         self.unknown_streak += 1
+        # BEFORE CALLING A SCREEN UNRECOGNISED, LOOK AT THE REST OF IT. The game
+        # is 839 CSS px tall in a 720 px viewport, so 119 px is always hidden and
+        # which 119 depends on the page scroll. A screen the ladder knows
+        # perfectly well reads as "no anchor matched" when its anchor happens to
+        # be in the hidden band - measured live, the Mission Room at scrollY=458
+        # had its close control 157 px above the viewport. Alternating the scroll
+        # each pass means the next look sees the other half.
+        try:
+            self.capture.scroll_game(0.0 if self.unknown_streak % 2 else 1.0)
+        except Exception:
+            pass
         self.log.info("resume: no anchor matched (%.0fms, streak %d)",
                       el, self.unknown_streak)
         return WORKING, {"step": "unknown", "streak": self.unknown_streak}
