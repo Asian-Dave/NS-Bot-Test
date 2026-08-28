@@ -474,6 +474,34 @@ clicked **Play by template** (`play_btn` 0.979), never by offset, so `Delete` �
 which sits beside it — was never a candidate. That is exactly why the rule is
 "whitelist Play by template".
 
+### LEAD (not wired up): the game draws its own "Go!" direction arrow
+
+On the first map of "Desert Ronins" the game drew an orange **"Go!" badge with a
+right-pointing arrow** at (2542, 380). If that arrow is drawn on every traversal
+map and mirrors for leftward ones, it would replace the heading coin-flip
+outright — it is the game telling us which way to walk.
+
+**It is NOT wired up, because one sighting is not evidence.** Scored the cut
+arrowhead across every traversal frame held:
+
+| frame | conf |
+|---|---|
+| the map it was seen on | **1.000** |
+| six other traversal frames | 0.293 .. 0.331 |
+| lobby / mission room / combat | 0.279 .. 0.421 |
+
+So it is absent from every other traversal screen captured. It may be an
+entry-screen hint rather than a per-map indicator — or those six frames may be
+unrepresentative, since they came from the render-stalled mission where the
+character was never drawn either.
+
+The crop is kept as `tpl/_lead_go_arrow.png` (leading underscore, so
+`load_templates` skips it) purely so it does not have to be re-cut. **Before
+using it:** confirm it appears on several NORMAL traversal maps, and establish
+what a leftward map draws — a mirrored arrow, a badge on the other side, or
+nothing. Until then traversal keeps alternating, which costs one wasted run on a
+wrong first guess and is honest about not knowing.
+
 ## The single biggest lesson
 
 **Never judge a bar, or "no change", by eye. Measure it.**
