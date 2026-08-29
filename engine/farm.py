@@ -493,7 +493,7 @@ def in_mission(frame, templates):
 NOT_IN_MISSION = ("lobby_rail_fortune", "char_slot_level", "play_btn",
                   "logged_out", "grade_tab", "mission_room",
                   "page_next", "page_prev", "mission_locked",
-                  "list_back_arrow", "action_flag")
+                  "list_back_arrow", "action_flag", "level_up")
 
 
 def looks_like_mission_scene(frame, templates):

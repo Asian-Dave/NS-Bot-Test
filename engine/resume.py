@@ -97,7 +97,7 @@ class Step:
 
     def __init__(self, name, anchor, action, target=None, offset=(0, 0),
                  threshold=None, note="", target_scales=None,
-                 target_threshold=None, anchor_scales=None):
+                 target_threshold=None, anchor_scales=None, settle=None):
         self.name = name
         self.anchor = anchor
         # Sweep the ANCHOR across scales too, not just the target. The green
@@ -106,6 +106,10 @@ class Step:
         # Mission Success), so a rung anchored on it sees nothing at all unless
         # it looks at more than native size.
         self.anchor_scales = anchor_scales
+        # Extra wait AFTER clicking this rung, for screens with an animation to
+        # play out. The ladder's own inter-step settle is 1.0 s, which is not
+        # enough for the Level Up panel (~3 s).
+        self.settle = settle
         self.action = action
         self.target = target or anchor
         self.offset = offset
@@ -223,6 +227,23 @@ DEFAULT_LADDER = [
     # It sits LOW in the ladder deliberately: it should only fire when nothing
     # else does, so a popup or a result panel on top of the Mission Room is
     # still handled first.
+    # LEVEL UP. Its own rung rather than the generic confirm rung below, for
+    # two reasons measured on a live frame:
+    #
+    #   * its green check is drawn at SCALE 1.5 (0.973 at (2502, 946)), well
+    #     outside the generic rung's deliberately narrow 1.00..1.20 sweep, so
+    #     nothing caught it;
+    #   * the panel ANIMATES for about 3 s, and looking again too early judges a
+    #     half-played screen. The ladder's 1 s inter-step settle is not enough.
+    #
+    # The anchor is the words "Level Up!" only - NOT the level number beside
+    # them, which is exactly the thing that varies.
+    Step("level_up", "level_up", "click", target="mission_start",
+         anchor_scales=[0.9, 1.0, 1.1],
+         target_scales=[round(1.2 + i * 0.05, 2) for i in range(13)],
+         target_threshold=0.85, settle=3.2,
+         note="level-up panel; acknowledging it returns to the game"),
+
     # BACK OUT OF A MISSION LIST OR DETAIL PANEL FIRST.
     #
     # This must come BEFORE the generic confirm rung below, because a detail
@@ -381,6 +402,10 @@ class Resumer:
         x = match.center[0] + step.offset[0]
         y = match.center[1] + step.offset[1]
         self.actor.click_pixel(x, y, why=f"resume:{step.name}")
+        if step.settle:
+            # Let the screen finish before the next pass looks at it, or we
+            # judge a half-played animation and call it unrecognised.
+            time.sleep(step.settle)
         return WORKING, {"step": step.name, "clicked": (x, y), "conf": conf}
 
     # -- drive ---------------------------------------------------------------

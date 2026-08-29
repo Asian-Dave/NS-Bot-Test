@@ -2146,6 +2146,81 @@ def test_tp_recovery_relogs_before_giving_up():
         resume_mod.Resumer = real
 
 
+def test_level_up_panel_is_acknowledged():
+    """A Level Up panel must be acknowledged, not walked on.
+
+    Nothing knew this screen, so `looks_like_mission_scene` found no veto and
+    the runner "walked" on it - the log filled with traversal dead ends while a
+    Level Up panel sat on screen. The generic confirm rung could not save it
+    either: this check is drawn at SCALE 1.5, outside that rung's deliberately
+    narrow 1.00..1.20 sweep.
+
+    The panel also animates for ~3s, so the rung carries its own settle - the
+    ladder's 1s inter-step wait would judge a half-played screen.
+    """
+    print("\nlevel-up panel is acknowledged")
+    from perceive import find, Template
+    import bot as botmod, farm, resume as resume_mod
+    import json as _json
+    cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
+    tpls = botmod.load_templates(cfg, LOG)
+
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/panels/level_up.png"))
+    check(f is not None, "the level-up frame is committed")
+    if f is None:
+        return
+    g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+
+    # The anchor must not contain the LEVEL NUMBER, which is what varies.
+    c = find(g, tpl("level_up"))[1]
+    check(c >= 0.95, f"the Level Up! banner anchors the screen ({c:.3f})")
+    for rel in ("ref/auto/panels/mission_success.png", "ref/auto/panels/victory.png",
+                "ref/auto/lobby_full.png", "ref/auto/mission/COMBAT.png"):
+        pp = os.path.join(ROOT, rel)
+        if os.path.exists(pp):
+            cc = find(cv2.cvtColor(cv2.imread(pp), cv2.COLOR_BGR2GRAY),
+                      tpl("level_up"))[1]
+            check(cc < 0.88,
+                  f"and stays silent on {os.path.basename(rel)} ({cc:.3f})")
+
+    check(farm.looks_like_mission_scene(f, tpls) is False,
+          "it is NOT walkable scenery (this is what caused the dead-end loop)")
+
+    r = resume_mod.Resumer(type("C", (), {})(), None, tpls, LOG)
+    hit = None
+    for step in r.ladder:
+        t = tpls.get(step.anchor)
+        if t is None:
+            continue
+        if step.anchor_scales:
+            t = Template(t.name, t.path, t.threshold, step.anchor_scales)
+        if t.h > g.shape[0] or t.w > g.shape[1]:
+            continue
+        _, cf = find(g, t)
+        lim = step.threshold if step.threshold is not None else t.threshold
+        if cf >= lim:
+            hit = step
+            break
+    check(hit is not None and hit.name == "level_up",
+          f"the ladder recognises it ({hit and hit.name})")
+    if hit:
+        check(hit.settle and hit.settle >= 3.0,
+              f"and waits for the ~3s animation ({hit.settle}s)")
+        t2 = tpls.get(hit.target)
+        saved = (t2.scales, t2.threshold)
+        try:
+            t2.scales = hit.target_scales
+            t2.threshold = hit.target_threshold or t2.threshold
+            m2, c2 = find(g, t2)
+        finally:
+            t2.scales, t2.threshold = saved
+        check(m2.found, f"the green check is found ({c2:.3f})")
+        if m2.found:
+            check(abs(m2.center[0] - 2502) < 40 and abs(m2.center[1] - 946) < 40,
+                  f"at the real check position {m2.center}, drawn at scale ~1.5 "
+                  f"- outside the generic rung's 1.00..1.20 sweep")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2172,7 +2247,8 @@ def main():
                test_tp_recovery_relogs_before_giving_up,
                test_kekkai_panel_is_located_not_assumed,
                test_game_drift_is_tracked_and_corrected,
-               test_ladder_acknowledges_a_lone_green_check):
+               test_ladder_acknowledges_a_lone_green_check,
+               test_level_up_panel_is_acknowledged):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

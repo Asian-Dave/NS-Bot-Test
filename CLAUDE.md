@@ -1284,6 +1284,30 @@ Two corrections to the section above, both measured live:
 Note the band spans the *outer edges* of the first and last card, so its width is
 `(n-1)*pitch + card_width`. Forgetting the card width over-counts by one.
 
+### LEVEL UP — a screen nothing knew, and it got WALKED ON
+
+A level-up panel appeared and no anchor covered it, so
+`looks_like_mission_scene` found nothing to veto with and the runner "traversed"
+on top of it — the log filled with `dead end (run 19)` while a Level Up panel
+sat on screen. `level_up` is now in `NOT_IN_MISSION`.
+
+The generic confirm rung could not have caught it either: **this check is drawn
+at scale 1.5**, outside that rung's deliberately narrow 1.00..1.20 sweep. So it
+gets its own rung sweeping 1.20..1.80, which resolves to (2502, 946) at 0.973.
+
+**The panel ANIMATES for about 3 s.** The ladder's 1 s inter-step settle looks
+again mid-animation and judges a half-played screen, so `Step` now takes a
+per-rung `settle` and this one uses 3.2 s — rather than slowing every rung down.
+
+The anchor is the words **"Level Up!"** only, NOT the level number beside them.
+Same rule as `tp_seal_hud`: an anchor must not contain the thing that varies.
+Measured 1.000 here against a worst negative of 0.508.
+
+**The recurring shape, now four times over:** a negative definition
+("no anchor matched, therefore scenery") licenses a blind click, and every new
+UI surface it has never met becomes a new way to walk into furniture. Mission
+list, battle-between-turns, seal-broken dialog, and now level-up.
+
 ### A LONE GREEN CHECK IS A DIALOG — the ladder acknowledges it generically
 
 The kekkai's **"You break the seal!"** dialog stranded the bot: 20 unrecognised
