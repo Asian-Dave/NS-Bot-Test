@@ -238,27 +238,25 @@ class Runner:
             _write_control("pause")
             self.log.info("operator: PAUSE")
         elif c == "stop":
-            # STOP ENDS THE PROCESS, IMMEDIATELY, FROM WHEREVER WE ARE.
+            # STOP ABORTS THE TASK AT ONCE, AND KEEPS THE PANEL ALIVE.
             #
-            # A cooperative stop is not good enough here. `_apply` is reached
-            # from `pump`, which is called from the capture hook and the gate's
-            # poll loop - and BOTH of those wrap the call in `except Exception`,
-            # so an exception raised here to unwind the stack is swallowed. The
-            # flag-and-check alternative only takes effect at the next place
-            # something bothers to look, which mid-mission can be a whole battle
-            # away. Pressing Stop and watching the bot finish the fight is not
-            # what Stop means.
+            # The original complaint was that Stop was QUEUED - pressed
+            # mid-mission, it did nothing until the mission ended. That was real,
+            # but the cause was not the mechanism: operator commands simply were
+            # not being READ during long work, because `pump` ran only from the
+            # gate's poll loop and farm navigation never enters a gate. Now that
+            # `Capture.on_activity` pumps on every capture, the file-backed stop
+            # switch is seen within a capture or two and the task unwinds at its
+            # next gate.
             #
-            # This used to be avoided because "the dock vanished with the
-            # process". It no longer does: the panel is injected into the PAGE,
-            # so it outlives us, and its staleness banner now says, accurately,
-            # that no bot is attached and prints the command to relaunch. So the
-            # operator is left with a visible, honest panel rather than a live
-            # one that ignores them.
-            self.log.info("operator: STOP - terminating the bot process")
+            # So killing the process is no longer needed to be immediate - and
+            # killing it has a real cost: the panel is injected into the page, so
+            # it survives, but its buttons have no receiver. The operator is left
+            # with a dead panel and no way back except the terminal, which is
+            # exactly the "no bot attached" they kept hitting. Quit still exits.
+            self.log.info("operator: STOP (task aborted; press Run to resume)")
             _write_control("stop")
             self.mode = "stopped"
-            self._hard_exit()
         elif c == "skill":
             k = cmd.get("arg")
             if k in SKILL_SLOTS:
@@ -302,9 +300,10 @@ class Runner:
             self.log.info("operator: focus mode %s",
                           "ON" if self.focus_wanted else "off")
         elif c == "quit":
-            # Same immediacy as Stop, and the distinction stays meaningful:
-            #   Stop -> the bot dies, the PANEL STAYS (saying no bot is attached)
-            #   Quit -> the bot dies and the panel is removed as well
+            # Quit is the one that EXITS. Stop aborts the task and leaves the
+            # panel live so Run works again without a terminal.
+            #   Stop -> the task stops, the process and panel stay
+            #   Quit -> the panel is removed and the process exits
             self.log.info("operator: QUIT - removing the panel and exiting")
             _write_control("stop")
             self.mode = "stopped"

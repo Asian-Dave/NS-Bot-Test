@@ -1613,8 +1613,8 @@ def test_panel_stays_alive_during_a_mission():
           "the beat interval is well inside the panel's staleness window")
 
 
-def test_stop_kills_the_process_and_frees_the_lock():
-    """Stop must end the process at once, and must not strand the pid lock.
+def test_quit_exits_cleanly_and_frees_the_lock():
+    """Quit must end the process at once, and must not strand the pid lock.
 
     A cooperative stop is not enough: `_apply` is reached from `pump`, which is
     called from the capture hook and the gate's poll loop, and BOTH wrap the
@@ -1626,7 +1626,7 @@ def test_stop_kills_the_process_and_frees_the_lock():
     itself - forgetting that is exactly what produces "another bot window is
     already running" on the next launch.
     """
-    print("\nstop kills the process and frees the lock")
+    print("\nquit exits cleanly and frees the lock")
     import app as app_mod
 
     lock = os.path.join(ROOT, "run/app.lock")
@@ -1971,6 +1971,57 @@ def test_ladder_acknowledges_a_lone_green_check():
           "and combat matches nothing - the ladder must not click in a fight")
 
 
+def test_stop_aborts_the_task_but_keeps_the_panel():
+    """Stop must abort at once WITHOUT killing the process.
+
+    The original complaint was that Stop was queued - pressed mid-mission it did
+    nothing until the mission ended. The cause was not the mechanism: operator
+    commands were not being READ during long work, because pump ran only from
+    the gate's poll loop and farm navigation never enters a gate. With
+    Capture.on_activity pumping on every capture, the file-backed stop switch is
+    seen within a capture or two.
+
+    Killing the process to get immediacy had a real cost: the panel survives in
+    the page but its buttons have no receiver, so the operator is left with a
+    dead panel and no way back except the terminal - the recurring "no bot
+    attached". Quit still exits.
+    """
+    print("\nstop aborts the task but keeps the panel")
+    import app as app_mod
+
+    writes = []
+    real_write = app_mod._write_control
+    app_mod._write_control = lambda v: writes.append(v)
+    exits = []
+    real_exit = os._exit
+    os._exit = lambda code=0: exits.append(code)
+    try:
+        r = app_mod.Runner.__new__(app_mod.Runner)
+        r.log = LOG
+        r.mode = "running"
+        r.task = "farm_missions"
+        r._apply({"cmd": "stop", "arg": None})
+        check(writes == ["stop"], f"the stop switch is thrown ({writes})")
+        check(r.mode == "stopped", "the runner records that it is stopped")
+        check(exits == [], "and the PROCESS SURVIVES, so the panel stays live")
+
+        # Run must bring it straight back - no terminal needed.
+        writes.clear()
+        r._apply({"cmd": "run", "arg": None})
+        check(writes == ["run"], "Run re-arms the switch")
+        check(r.mode == "running", "and the bot is running again")
+
+        # Quit is still the one that exits.
+        r.cdp = type("C", (), {"close": lambda self: None})()
+        r.push = lambda: None
+        r.dock = type("D", (), {"remove": lambda self: None})()
+        r._apply({"cmd": "quit", "arg": None})
+        check(exits == [0], "Quit still terminates the process")
+    finally:
+        app_mod._write_control = real_write
+        os._exit = real_exit
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1989,8 +2040,9 @@ def main():
                test_map_is_cleared_before_leaving,
                test_closed_window_shuts_the_bot_down,
                test_panel_stays_alive_during_a_mission,
-               test_stop_kills_the_process_and_frees_the_lock,
+               test_quit_exits_cleanly_and_frees_the_lock,
                test_task_switch_interrupts_the_running_task,
+               test_stop_aborts_the_task_but_keeps_the_panel,
                test_relog_rescues_an_unreadable_state,
                test_kekkai_panel_is_located_not_assumed,
                test_game_drift_is_tracked_and_corrected,

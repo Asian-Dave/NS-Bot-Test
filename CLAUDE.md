@@ -299,7 +299,7 @@ The relog is a RELOAD AND NOTHING MORE. It never authenticates; the ladder
 clicks Play **by template** at character select, so `Delete` beside it is never
 a candidate.
 
-### Stop ENDS THE PROCESS, and it has to do so from wherever it is
+### Stop aborts the TASK; Quit exits the process
 
 A cooperative stop does not work here, and the reason is structural: `_apply`
 is reached from `pump`, which is called from the capture hook and the gate's
@@ -309,15 +309,17 @@ alternative only takes effect wherever something next bothers to look, which
 mid-mission can be a whole battle away. Pressing Stop and watching the bot
 finish the fight is not what Stop means.
 
-So Stop calls `os._exit` via `_hard_exit`. Measured: pressed during round 2 of
-a battle, the process was gone in **under 2 s**.
+**CORRECTION — the cause was not the mechanism, it was that nobody was READING
+the button.** `pump` ran only from the gate's poll loop, and farm navigation
+never enters a gate, so a Stop could sit undelivered for the whole of it. Once
+`Capture.on_activity` pumped on every capture, the file-backed stop switch is
+seen within a capture or two and the task unwinds at its next gate.
 
-This was previously avoided on the grounds that "the dock vanishes with the
-process". **It does not** — the panel is injected into the PAGE, so it outlives
-us; verified after a Stop that the element is still there and its banner reads
-"no bot attached", with the relaunch command. That is a visible, honest panel
-rather than a live one that ignores you, and it is what makes killing the
-process acceptable now when it was not before.
+Stop briefly called `os._exit` to get that immediacy. That was the wrong trade:
+the panel is injected into the PAGE so it survives the process, but its buttons
+then have no receiver — the operator is left with a dead panel reading "no bot
+attached" and no way back except the terminal. Which is exactly what they kept
+hitting. **Stop now aborts the task and keeps the process; Quit exits.**
 
 `os._exit` skips `finally`, so **`_hard_exit` must release the pid lock
 itself** — forgetting that is precisely what produces "another bot window is
@@ -326,8 +328,8 @@ holds OUR pid, never another process's.
 
 The two buttons now differ only in what they leave behind:
 
-    Stop -> the bot dies, the panel STAYS (and says no bot is attached)
-    Quit -> the bot dies and the panel is removed too
+    Stop -> the task stops; process and panel stay live, Run resumes
+    Quit -> the panel is removed and the process exits
 
 ### Closing the window must CLOSE THE BOT
 
