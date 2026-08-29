@@ -1788,6 +1788,60 @@ def test_relog_rescues_an_unreadable_state():
     check("Page.reload" in code, "it is a reload, nothing more")
 
 
+def test_kekkai_panel_is_located_not_assumed():
+    """The kekkai panel MOVES; its coordinates must be measured per frame.
+
+    Measured on a live frame, the whole puzzle sat ~116px higher than the
+    module constants:
+
+        rune Green    reference (860, 1076)   actual (876, 960)
+        kekkai centre reference (1259, 513)   actual (1261, 387)
+
+    The discs are only r~55, so every click landed clean outside its button.
+    The failure was SILENT and total: no slot filled, so nothing was ever
+    submitted, so the history stayed empty - and the solver then read row 0, an
+    UNPLAYED row, got a dim 0/0 it could not classify, and burned the mission.
+    The scroll showed ten identical unplayed rows.
+    """
+    print("\nkekkai panel is located, not assumed")
+    import kekkai_play as kp
+    import kekkai as kk
+
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/tp/kekkai_panel_moved.png"))
+    check(f is not None, "the moved-panel frame is committed")
+    if f is None:
+        return
+
+    runes = kp.find_rune_buttons(f)
+    check(runes is not None and len(runes) == len(kk.RUNES),
+          f"all six rune discs are found ({runes and len(runes)})")
+    if runes:
+        # They must be the RUNE row, not the history scroll's counter discs -
+        # 13 circles are present in that band on this frame.
+        xs = [p[0] for p in runes]
+        ys = [p[1] for p in runes]
+        check(max(ys) - min(ys) <= 25, "they lie in one row")
+        check(max(xs) < 1800,
+              f"and it is the rune bar, not the history counters (max x {max(xs)})")
+        check(abs(runes[0][1] - 960) < 25,
+              f"located at the ACTUAL y~960, not the reference 1076 "
+              f"({runes[0][1]})")
+        check(abs(runes[0][1] - kp.RUNE_XY["Green"][1]) > 80,
+              "which is far enough from the reference to have missed the button")
+
+    confirm = kp.find_confirm_point(f)
+    check(confirm is not None, f"the submit disc is found ({confirm})")
+    if confirm:
+        check(abs(confirm[1] - 387) < 30,
+              f"at the actual y~387, not the reference 513 ({confirm[1]})")
+
+    # locate_panel must hand back the LIVE positions, keyed by rune name.
+    xy, c2 = kp.locate_panel(f)
+    check(set(xy) == set(kk.RUNES), "every rune is keyed by name")
+    check(xy["Green"] != kp.RUNE_XY["Green"],
+          "and the reference layout was not silently used")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1808,7 +1862,8 @@ def main():
                test_panel_stays_alive_during_a_mission,
                test_stop_kills_the_process_and_frees_the_lock,
                test_task_switch_interrupts_the_running_task,
-               test_relog_rescues_an_unreadable_state):
+               test_relog_rescues_an_unreadable_state,
+               test_kekkai_panel_is_located_not_assumed):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

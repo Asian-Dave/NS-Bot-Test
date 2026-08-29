@@ -79,6 +79,133 @@ DIGIT_BOX = 34                     # half-width of a digit crop
 CONFIRM_XY = (1259, 513)           # kekkai centre; turns dark red when armed
 
 
+# --- THE PANEL MOVES, SO LOCATE IT ------------------------------------------
+#
+# The constants above are a REFERENCE LAYOUT, not the truth. Measured live, the
+# whole puzzle panel sat ~114-126 px higher than these values:
+#
+#     rune Green   reference (860, 1076)   actual (880, 964)   delta (+20, -112)
+#     rune White   reference (1639, 1076)  actual (1664, 962)  delta (+25, -114)
+#     kekkai centre reference (1259, 513)  actual (1261, 387)  delta ( +2, -126)
+#
+# The rune discs are only r~53, so a 114 px error puts every click clean outside
+# the button. The consequence was silent and total: no slot ever filled, so no
+# guess was ever submitted, so the history stayed empty - and the solver then
+# read row 0, which was an UNPLAYED row, got a dim 0/0 it could not classify,
+# and burned the mission. The scroll showed ten identical unplayed rows.
+#
+# This is the same lesson as the hand-seal board and the battle geometry:
+# ANCHOR-RELATIVE, NEVER ABSOLUTE. Here we can do better than an anchor
+# template - the features are geometric and can be found directly.
+
+def find_rune_buttons(frame_bgr, y0=820, y1=1220, x0=760, x1=2680):
+    """The six rune discs, left to right. [(x, y)] or None.
+
+    They are a row of equally sized circles, which Hough finds directly - no
+    template, and it adapts to wherever the panel has been drawn.
+    """
+    h, w = frame_bgr.shape[:2]
+    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
+    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    g = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    circles = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1, minDist=60,
+                               param1=100, param2=30, minRadius=28,
+                               maxRadius=60)
+    if circles is None:
+        return None
+    cs = [(int(c[0]) + x0, int(c[1]) + y0, int(c[2]))
+          for c in np.round(circles[0]).astype(int)]
+
+    # THE RUNE ROW HAS TO BE PICKED OUT, NOT ASSUMED TO BE EVERYTHING FOUND.
+    # Measured on a live frame: 13 circles in this band - the six rune discs
+    # (y~960, r~55), the history scroll's own counter discs (r~39) and a few
+    # strays. Requiring "exactly six" therefore just failed and fell back to the
+    # reference layout, which is the bug this function exists to fix.
+    #
+    # Group by y, then find a run of six with consistent spacing AND consistent
+    # radius: the rune buttons are a row of identical circles, which nothing
+    # else on this screen is.
+    want = len(kekkai.RUNES)
+    bands = []
+    for c in sorted(cs, key=lambda z: z[1]):
+        for b in bands:
+            if abs(b[0][1] - c[1]) <= 25:
+                b.append(c)
+                break
+        else:
+            bands.append([c])
+    for band in bands:
+        band.sort(key=lambda z: z[0])
+        for i in range(len(band) - want + 1):
+            run = band[i:i + want]
+            radii = [z[2] for z in run]
+            if max(radii) - min(radii) > 0.30 * max(radii):
+                continue                       # not identical buttons
+            gaps = [run[j + 1][0] - run[j][0] for j in range(want - 1)]
+            if min(gaps) <= 0:
+                continue
+            if (max(gaps) - min(gaps)) > 0.30 * max(gaps):
+                continue                       # not evenly spaced
+            return [(z[0], z[1]) for z in run]
+    return None
+
+
+def find_confirm_point(frame_bgr, y0=200, y1=900, x0=900, x1=1800):
+    """The kekkai centre - the disc that SUBMITS when clicked. (x, y) or None.
+
+    A large, round, dark blob inside the puzzle scroll. Measured on a live
+    frame: area 32695, bbox 207x201, centre (1261, 387).
+    """
+    h, w = frame_bgr.shape[:2]
+    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
+    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    g = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    m = cv2.morphologyEx((g < 90).astype(np.uint8) * 255,
+                         cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    n, _, st, ce = cv2.connectedComponentsWithStats(m)
+    best = None
+    for i in range(1, n):
+        a = st[i, cv2.CC_STAT_AREA]
+        bw, bh = st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
+        if a < 3000 or bh == 0:
+            continue
+        if not (0.7 <= bw / bh <= 1.4):        # a disc is round
+            continue
+        if best is None or a > best[0]:
+            best = (a, int(ce[i][0]) + x0, int(ce[i][1]) + y0)
+    return (best[1], best[2]) if best else None
+
+
+def locate_panel(frame_bgr, log=None):
+    """Live rune positions and submit point. Falls back to the reference layout.
+
+    Returns (rune_xy: dict, confirm_xy: tuple). Falling back is logged loudly,
+    because the reference layout is exactly what silently burned a mission.
+    """
+    runes = find_rune_buttons(frame_bgr)
+    confirm = find_confirm_point(frame_bgr)
+    if runes is None:
+        if log:
+            log.info("could not locate the rune row; falling back to the "
+                     "REFERENCE layout, which may be %d px out - watch for "
+                     "slots that never fill", 114)
+        rune_xy = dict(RUNE_XY)
+    else:
+        rune_xy = {name: pt for name, pt in zip(kekkai.RUNES, runes)}
+        if log:
+            log.info("kekkai runes located: %s", rune_xy["Green"])
+    if confirm is None:
+        if log:
+            log.info("could not locate the kekkai centre; using the reference "
+                     "point")
+        confirm = CONFIRM_XY
+    return rune_xy, confirm
+
+
 class _Log:
     def info(self, m, *a):
         print(("  " + m) % a if a else "  " + m, flush=True)
@@ -395,12 +522,17 @@ def load_exemplars():
     return out
 
 
-def enter_guess(actor, guess, settle=0.55):
-    """Click the runes in order. Returns True if all were clicked."""
+def enter_guess(actor, guess, settle=0.55, rune_xy=None):
+    """Click the runes in order. Returns True if all were clicked.
+
+    `rune_xy` should come from `locate_panel` - the panel MOVES, and the module
+    constants are only a reference layout.
+    """
+    xy = rune_xy or RUNE_XY
     for rune in guess:
-        if rune not in RUNE_XY:
+        if rune not in xy:
             return False
-        actor.click_pixel(*RUNE_XY[rune], why=f"rune {rune}")
+        actor.click_pixel(*xy[rune], why=f"rune {rune}")
         time.sleep(settle)
     return True
 
@@ -472,12 +604,27 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
         log.info("guess %d: %s   (pool A=%d B=%d)", n + 1, ",".join(guess),
                  len(pa), len(pb))
 
-        enter_guess(actor, guess)
+        # LOCATE THE PANEL EVERY GUESS. It is not where the constants say - it
+        # was measured 116 px higher - and the discs are only r~55, so stale
+        # coordinates miss the buttons entirely, fill no slots, and submit
+        # nothing. That failure is SILENT: the history simply stays empty.
+        rune_xy, confirm_xy = locate_panel(cap.frame(gray=False), log)
+        enter_guess(actor, guess, rune_xy=rune_xy)
         time.sleep(0.5)
-        actor.click_pixel(*CONFIRM_XY, why="confirm guess")
+        actor.click_pixel(*confirm_xy, why="confirm guess")
         time.sleep(settle)
 
         frame = cap.frame(gray=False)
+        # DID THE GUESS ACTUALLY REGISTER? If no row filled, the clicks did not
+        # land - and reading "the last filled row" would then read row 0, an
+        # UNPLAYED row, whose dim 0/0 is unclassifiable. That is exactly how a
+        # mission was burned: ten identical unplayed rows and a solver blaming
+        # its digit exemplars.
+        if count_filled(frame) <= len(hist_a):
+            log.info("guess %d did not register - no new row appeared. The rune "
+                     "clicks did not land (panel moved?); abandoning rather "
+                     "than filling the history with phantom rows", n + 1)
+            return None, n + 1
         gx2, ys2 = find_rows(frame)
         if gx2 is None:
             # The panel closes the instant a guess is right, so this is success -

@@ -1023,6 +1023,47 @@ digits out of a closed panel, scored 0.000, and reported failure on a puzzle it
 had just solved. Require >= 5 discs, and check for a closed panel BEFORE reading
 digits after a submit.
 
+### THE KEKKAI PANEL MOVES TOO — locate the runes, never assume them
+
+`RUNE_XY` and `CONFIRM_XY` are a REFERENCE LAYOUT, not the truth. Measured on a
+live frame, the whole puzzle sat ~116 px higher:
+
+| | reference | actual | delta |
+|---|---|---|---|
+| rune Green | (860, 1076) | (876, 960) | (+16, **-116**) |
+| rune White | (1639, 1076) | (1660, 960) | (+21, -116) |
+| kekkai centre | (1259, 513) | (1261, 387) | (+2, **-126**) |
+
+The rune discs are only **r ~55**, so a 116 px error puts every click clean
+outside its button — and the failure is **completely silent**: no slot fills, so
+nothing is ever submitted, so the history stays empty. The solver then read
+"the last filled row", which with zero filled rows is row 0 — an **UNPLAYED**
+row — whose dim `0 / 0` it could not classify. It reported a digit-exemplar
+problem and burned the mission. The scroll showed **ten identical unplayed
+rows**, which is the tell.
+
+`find_rune_buttons` locates them with Hough circles instead. **It must PICK OUT
+the row rather than take everything found:** 13 circles are present in that band
+— the six rune discs (r~55), the history scroll's own counter discs (r~39) and
+strays. Requiring "exactly six" simply failed and fell back to the reference
+layout, i.e. straight back into the bug. Group by y, then find a run of six with
+consistent spacing AND consistent radius; nothing else on that screen is a row
+of identical circles.
+
+`find_confirm_point` locates the submit disc as the large round dark blob in the
+scroll (measured area 32695, bbox 207x201).
+
+**And verify the guess REGISTERED.** After submitting, if no new row appeared,
+the clicks did not land — abandon rather than reading phantom rows. Reading an
+unplayed row is what disguised a geometry fault as a digit-recognition fault for
+a whole mission.
+
+Digit exemplars are still harvested by hand as new renderings appear (`0` now
+has 8 variants, `1` three, `2` one, and **3+ none at all**). A glare-cleanup
+filter was tried and measured WORSE — dropping border-touching blobs removed
+most of the digit too (match 0.501 -> 0.196), because the outline touches the
+border as well.
+
 ### TP mission COMPLETED end to end
 
 "The Kekkai in the Forest" finished by the bot: rewards banked (gold
