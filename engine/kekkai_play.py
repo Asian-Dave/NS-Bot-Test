@@ -597,16 +597,6 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
         time.sleep(settle)
 
         frame = cap.frame(gray=False)
-        # DID THE GUESS ACTUALLY REGISTER? If no row filled, the clicks did not
-        # land - and reading "the last filled row" would then read row 0, an
-        # UNPLAYED row, whose dim 0/0 is unclassifiable. That is exactly how a
-        # mission was burned: ten identical unplayed rows and a solver blaming
-        # its digit exemplars.
-        if count_filled(frame) <= len(hist_a):
-            log.info("guess %d did not register - no new row appeared. The rune "
-                     "clicks did not land (panel moved?); abandoning rather "
-                     "than filling the history with phantom rows", n + 1)
-            return None, n + 1
         gx2, ys2 = find_rows(frame)
         if gx2 is None:
             # The panel closes the instant a guess is right, so this is success -
@@ -628,6 +618,24 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
             log.info("panel closed after guess %d -> SOLVED: %s", n + 1,
                      ",".join(guess))
             return guess, n + 1
+        # DID THE GUESS ACTUALLY REGISTER? Only ask this with the panel STILL
+        # OPEN. A correct guess closes the panel instantly, and a closed panel
+        # has no filled rows - so asking first reported "did not register" for a
+        # puzzle that had just been SOLVED, and abandoned it. That is precisely
+        # the trap this file already documents for digit reading, walked into
+        # again one branch higher up.
+        #
+        # With the panel open, no new row means the rune clicks did not land.
+        # Reading "the last filled row" would then read row 0, an UNPLAYED row,
+        # whose dim 0/0 is unclassifiable - which is how a mission was burned
+        # with ten identical unplayed rows while the solver blamed its digit
+        # exemplars.
+        if count_filled(frame) <= len(hist_a):
+            log.info("guess %d did not register - no new row appeared. The rune "
+                     "clicks did not land (panel moved?); abandoning rather "
+                     "than filling the history with phantom rows", n + 1)
+            return None, n + 1
+
         # Read the row that was just filled, located by counting filled rows -
         # NOT by assuming it is row len(history).
         g_xy, o_xy = row_center(max(0, count_filled(frame) - 1), frame)
