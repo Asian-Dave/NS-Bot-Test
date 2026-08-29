@@ -1267,6 +1267,38 @@ Two corrections to the section above, both measured live:
 Note the band spans the *outer edges* of the first and last card, so its width is
 `(n-1)*pitch + card_width`. Forgetting the card width over-counts by one.
 
+### THE GAME DRIFTS OUT OF ALIGNMENT, AND EVERY ABSOLUTE GEOMETRY GOES WITH IT
+
+A one-shot align cannot hold. Focus mode top-aligns the game once, then the page
+scrolls or the layout reflows and **nothing puts it back**. Measured with the
+memory board on screen:
+
+    scrollY 60,  game iframe at y = -118 CSS  =  -236 CAPTURED px
+
+and the board's card rows measured **-237** from where `cards.ROWS` says they
+are. That is the same number: the board had not moved, THE GAME HAD.
+
+This is the single explanation behind a run of unrelated-looking failures:
+
+* the memory board reported "board gone before flipping card 0"
+* the kekkai rune clicks landed outside r~55 discs, filling no slots
+* "could not find the Special tab" on a healthy Mission Room
+* templates that fail at one moment and match at another
+
+Every minigame's geometry is absolute, so a displaced game breaks all of them at
+once, each in its own confusing way — and the error each one reports names its
+own subsystem, never the real cause. The kekkai's -116 and the board's -237 are
+not different bugs; they are the same drift measured at different times.
+
+`ensure_focus` now calls `align()` EVERY cycle. That cannot reintroduce the
+jumping that re-APPLYING focus caused, because `align` is a no-op when the game
+is already in place — it returns "aligned" and touches nothing. `__nsbotAlign`
+also resets `scrollX/scrollY` first, since `getBoundingClientRect` is
+viewport-relative and a scrolled page would otherwise be "corrected" by moving
+the margin instead.
+
+**Before blaming a minigame's own logic, check `scrollY` and the game rect.**
+
 ### FOCUS MODE — and why it is a CORRECTNESS feature, not decoration
 
 `engine/dock.py` can hide everything on the page except the game and pin it to

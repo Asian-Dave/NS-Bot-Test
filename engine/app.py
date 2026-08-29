@@ -791,13 +791,27 @@ class Runner:
         self.focus_on = bool(live)
 
         if self.focus_on:
-            if not self.focus_aligned:
-                # One re-align after the layout has settled. Converges and stops.
-                try:
-                    if self.dock.align() in ("realigned", "aligned"):
-                        self.focus_aligned = True
-                except Exception:
-                    pass
+            # RE-ALIGN EVERY CYCLE, not once.
+            #
+            # A one-shot align cannot hold: the page scrolls and the layout
+            # reflows later, and nothing put the game back. Measured while the
+            # card board was on screen - `scrollY` 60 and the game iframe at
+            # y = -118 CSS, i.e. **-236 captured px**, which is exactly the
+            # -237 by which the board's rows had moved. Every minigame's
+            # geometry is absolute, so the whole lot misses by that amount and
+            # each one fails in its own confusing way: the memory board "gone",
+            # the kekkai runes un-clickable, the Special tab "not found".
+            #
+            # This cannot cause the jumping that re-APPLYING focus used to,
+            # because `align` is a no-op when the game is already in place - it
+            # returns "aligned" and touches nothing.
+            try:
+                r = self.dock.align()
+                if r == "realigned":
+                    self.log.info("focus: the game had drifted; re-aligned")
+                self.focus_aligned = True
+            except Exception:
+                pass
             return
         try:
             if not self.dock.game_ready():

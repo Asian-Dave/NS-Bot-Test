@@ -229,6 +229,9 @@ _BOOTSTRAP = r"""
   window.__nsbotAlign = () => {
     const g = gameEl();
     if (!g || !window.__nsbotFocusOn) return "not-focused";
+    // The page can scroll out from under us even in focus mode; rect.y is
+    // viewport-relative, so put the scroll back first and then measure.
+    if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
     const r = g.getBoundingClientRect();
     if (Math.abs(r.y) <= 1) return "aligned";
     if (!g.hasAttribute("data-nsbot-mt")) {
