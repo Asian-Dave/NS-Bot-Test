@@ -1359,6 +1359,38 @@ so the expensive case would be the common one. The large sizes (1.18 Victory,
 1.84 Mission Success) already have their own rungs; a dialog's check measured
 1.10, so 1.00..1.20 in five steps is enough and 4x cheaper.
 
+### THERE IS NO TABLE OF WINDOW SIZES — one stage, two transform axes
+
+The client's own AIR manifest (`ref/swf_assets/AIR_application.xml`) settles
+this: `<resizable>true</resizable>`, `<maximizable>true</maximizable>`,
+`<fullScreen>true</fullScreen>` around a single `<width>960</width>` stage, with
+a comment noting the width/height tags were removed because fullscreen ignores
+them. Every extracted asset is authored at 960 width (960x550, 960x780,
+960x237, 960x32). So the game has ONE layout that is uniformly scaled — not a
+set of per-size layouts to learn.
+
+Measured on the live client, the two axes behave completely differently:
+
+| change | game rect (CSS) | captured canvas | nature |
+|---|---|---|---|
+| viewport 1720 / 1440 / 1920 / 1280 | 960x839 always, x = 380 / 240 / 480 / 160 | unchanged | pure **OFFSET** — it RE-CENTRES |
+| dpr 1 / 2 / 3 | 960x839 always | 960 / 1920 / 2880 | pure **SCALE** |
+
+So `Capture.fix` is scale AND offset. **Scale about the GAME's origin, then
+translate** — scaling about the frame origin instead smears the offset by the
+scale factor, which looks right until it is hundreds of px out.
+
+**Only dpr-2 sizes are offered in the panel.** The transform handles dpr 1 and 3
+correctly for COORDINATES, but templates are cut at dpr 2 and are not re-cut,
+and `matchTemplate` is not scale invariant - this file already measures
+text-heavy templates losing ~0.4 confidence at 8% scale error. Offering a dpr
+that clicks in the right place while recognising nothing would be worse than not
+offering it. Scale the templates at load and re-measure the margins first.
+
+Applying a window size RELOADS the game, so the panel arms on the first press
+and commits on a second within 6 s, and the runner clears the drift cache and
+re-arms alignment afterwards - stale hints aim every click at the old layout.
+
 ### One shared drift correction, rather than an anchor per minigame
 
 `Capture.game_offset()` measures how far the game canvas has moved from the

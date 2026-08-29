@@ -1880,12 +1880,16 @@ def test_game_drift_is_tracked_and_corrected():
             if "innerWidth" in expr:
                 return '{"w": 1720, "h": 720}'
             if "getBoundingClientRect" in expr:
-                return '{"x": %r, "y": %r}' % (self.x, self.y)
+                # width is required: the transform is scale AND offset now, and
+                # the game's canvas width is what gives the scale.
+                return '{"x": %r, "y": %r, "w": 960.0}' % (self.x, self.y)
             return ""
 
     cap = capture_mod.Capture(StubCDP())
     check(cap.game_offset(ttl=0) == (0, 0),
           "an aligned game needs no correction")
+    check(abs(cap.game_scale(ttl=0) - 1.0) < 0.01,
+          f"and is at reference scale ({cap.game_scale(ttl=0):.2f})")
     check(cap.fix(1434, 483) == (1434, 483),
           "so coordinates pass through untouched")
 
@@ -1911,6 +1915,9 @@ def test_game_drift_is_tracked_and_corrected():
             if "getBoundingClientRect" in expr:
                 return ""
             return StubCDP.evaluate(self, expr)
+
+    # scale is measured from the canvas width, so assert it too
+
     cap2 = capture_mod.Capture(Blind())
     check(cap2.game_offset(ttl=0) == (0, 0),
           "a missing measurement yields no correction, never a guess")

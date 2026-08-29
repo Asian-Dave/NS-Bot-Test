@@ -288,6 +288,10 @@ _BOOTSTRAP = r"""
       `<h4>View</h4><div style="margin-top:2px">` +
         btn("focus", "Focus mode") +
       `</div>` +
+      `<div class="row" style="margin-top:6px"><span class="d">window</span>` +
+        `<span id="v_viewport"></span></div>` +
+      `<div class="g" id="v_viewports" style="margin-top:3px"></div>` +
+      `<div class="d" id="v_vp_warn" style="margin-top:4px;display:none"></div>` +
       `<div style="margin-top:6px">` +
         btn("quit", "Quit (closes this panel)") +
       `</div>` +
@@ -315,6 +319,42 @@ _BOOTSTRAP = r"""
       b.dataset.cmd = "grade"; b.dataset.arg = g;
       b.textContent = g === "auto" ? "Auto" : g;
       V.v_grades.appendChild(b);
+    });
+  };
+
+  // Window sizes need CONFIRMING, because applying one reloads the game.
+  // First press arms, second press within 6 s commits - so a stray click cannot
+  // drop the session, and the operator is told what is about to happen.
+  let armedVp = null, armedAt = 0;
+  const fillViewports = (vps, current) => {
+    const key = (vps || []).map(v => v.key).join(",") + "|" + (current || "");
+    if (!V.v_viewports || V.v_viewports.dataset.key === key) return;
+    V.v_viewports.dataset.key = key;
+    V.v_viewports.innerHTML = "";
+    (vps || []).forEach(v => {
+      const b = document.createElement("button");
+      b.dataset.vp = v.key;
+      b.textContent = v.label;
+      if (v.key === current) b.classList.add("on");
+      b.addEventListener("click", ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        const w = document.getElementById("v_vp_warn");
+        const now = Date.now();
+        if (armedVp === v.key && now - armedAt < 6000) {
+          armedVp = null;
+          if (w) { w.style.display = "block";
+                   w.textContent = "applying " + v.label + " - reloading..."; }
+          send("viewport", v.key);
+          return;
+        }
+        armedVp = v.key; armedAt = now;
+        if (w) {
+          w.style.display = "block";
+          w.textContent = "press " + v.label + " again to confirm - this "
+                        + "RELOADS the game and returns to character select";
+        }
+      });
+      V.v_viewports.appendChild(b);
     });
   };
 
@@ -363,6 +403,8 @@ _BOOTSTRAP = r"""
     fillTasks(s.tasks);
     fillSlots(s.skill_slots);
     fillGrades(s.grades);
+    fillViewports(s.viewports, s.viewport);
+    setText("v_viewport", s.viewport_label || "");
     setText("v_grade", s.grade || "auto (best available)");
     setText("v_pin", s.pin || "highest unlocked");
     el.querySelectorAll('[data-cmd="grade"]').forEach(b =>

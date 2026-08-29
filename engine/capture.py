@@ -25,7 +25,7 @@ class Capture:
         # not enough, because the farm's own navigation never enters a gate and
         # the panel went stale for the whole of it.
         self.on_activity = None
-        self._off = (0, 0)
+        self._off = (0, 0, 1.0)
         self._off_at = 0.0
         self.dpr = float(cdp.evaluate("window.devicePixelRatio") or 1)
         vp = cdp.evaluate("JSON.stringify({w: innerWidth, h: innerHeight})")
@@ -81,13 +81,22 @@ class Capture:
     # reflow - so a displaced game degrades into slightly-off clicks rather than
     # a cascade of subsystems each blaming itself.
     REFERENCE_ORIGIN = (760, 0)          # captured px, where constants were cut
+    REFERENCE_CANVAS_W = 1920            # the game is 960 CSS wide at dpr 2
 
-    def game_offset(self, ttl=1.0):
-        """How far the game has moved from the reference layout, captured px.
+    def game_metrics(self, ttl=1.0):
+        """Where the game is and how big, in CAPTURED px. (ox, oy, scale).
 
-        Cached for `ttl` seconds: it is one CDP round trip and callers may ask
-        per click. Returns (0, 0) if the game cannot be located, because a
-        missing measurement must never move a click.
+        MEASURED, so the two axes are not guessed:
+
+          * changing the VIEWPORT does not resize the game at all - it stays
+            960x839 CSS and merely RE-CENTRES (x went 380 -> 240 -> 480 -> 160
+            for viewports 1720/1440/1920/1280). That is pure offset.
+          * changing the DPR keeps it 960x839 CSS but scales the captured pixels:
+            canvas width 960 / 1920 / 2880 at dpr 1 / 2 / 3. That is pure scale.
+
+        So there is no table of window sizes to learn - the client is one fixed
+        960-wide stage (its AIR manifest is `resizable`/`fullScreen` around
+        `<width>960</width>`), and every size is a uniform transform of it.
         """
         now = time.time()
         if now - self._off_at < ttl:
@@ -98,23 +107,44 @@ class Capture:
                 "(()=>{const f=document.querySelector('iframe[src*=emulator]')"
                 "||document.querySelector('iframe[src*=play]');"
                 "if(!f)return '';const r=f.getBoundingClientRect();"
-                "return JSON.stringify({x:r.x,y:r.y});})()")
+                "return JSON.stringify({x:r.x,y:r.y,w:r.width});})()")
             if not raw:
-                self._off = (0, 0)
+                self._off = (0, 0, 1.0)
                 return self._off
             import json as _json
             r = _json.loads(raw)
             ox = int(round(r["x"] * self.dpr)) - self.REFERENCE_ORIGIN[0]
             oy = int(round(r["y"] * self.dpr)) - self.REFERENCE_ORIGIN[1]
-            self._off = (ox, oy)
+            w = r["w"] * self.dpr
+            scale = (w / self.REFERENCE_CANVAS_W) if w > 0 else 1.0
+            self._off = (ox, oy, scale)
         except Exception:
-            self._off = (0, 0)
+            self._off = (0, 0, 1.0)
         return self._off
 
+    def game_scale(self, ttl=1.0):
+        """How much bigger/smaller the game is than the reference layout."""
+        return self.game_metrics(ttl)[2]
+
+    def game_offset(self, ttl=1.0):
+        """How far the game has moved from the reference layout, captured px.
+
+        Cached for `ttl` seconds: it is one CDP round trip and callers may ask
+        per click. Returns (0, 0) if the game cannot be located, because a
+        missing measurement must never move a click.
+        """
+        return self.game_metrics(ttl)[:2]
+
     def fix(self, x, y):
-        """Correct a coordinate that was measured at the reference layout."""
-        dx, dy = self.game_offset()
-        return (int(x) + dx, int(y) + dy)
+        """Map a reference-layout coordinate onto the live one.
+
+        Scale about the game's own ORIGIN, then translate - scaling about the
+        frame origin instead would smear the offset by the scale factor.
+        """
+        ox, oy, sc = self.game_metrics()
+        rx, ry = self.REFERENCE_ORIGIN
+        return (int(round((x - rx) * sc)) + rx + ox,
+                int(round((y - ry) * sc)) + ry + oy)
 
     def clip_for(self, x, y, w, h):
         """CAPTURED-pixel box -> the (clip, origin) pair `frame` needs.

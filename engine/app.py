@@ -74,6 +74,30 @@ SKILLS_PATH = "run/skills.json"
 FARM_PATH = "run/farm.json"
 GRADES = ["auto", "S", "A", "B", "C"]
 
+# Selectable window geometries.
+#
+# MEASURED, and the two axes behave completely differently:
+#   * viewport WIDTH/HEIGHT do not resize the game at all - it stays 960x839 CSS
+#     and merely RE-CENTRES (x went 380 -> 240 -> 480 -> 160 across
+#     1720/1440/1920/1280). `Capture.fix` absorbs that as pure offset.
+#   * DPR keeps it 960x839 CSS but scales the captured pixels - canvas width
+#     960 / 1920 / 2880 at dpr 1 / 2 / 3 - which scales EVERY measured constant.
+#
+# So there is no table of client window sizes to support: the game is one fixed
+# 960-wide stage (its AIR manifest is resizable/fullScreen around
+# <width>960</width>) and every size is a uniform transform of it.
+#
+# dpr 2 is the reference every template was cut at. The others are offered
+# because they work through the transform, but templates are NOT re-cut for
+# them, so matching is weaker off-reference - which is why the panel warns.
+VIEWPORTS = [
+    {"key": "1720x720@2", "label": "1720x720", "w": 1720, "h": 720, "dpr": 2},
+    {"key": "1440x720@2", "label": "1440x720", "w": 1440, "h": 720, "dpr": 2},
+    {"key": "1920x900@2", "label": "1920x900", "w": 1920, "h": 900, "dpr": 2},
+    {"key": "2200x980@2", "label": "2200x980", "w": 2200, "h": 980, "dpr": 2},
+]
+VIEWPORT_PATH = "run/viewport.json"
+
 TASKS = [
     {"key": "resume_to_lobby", "label": "Resume to lobby"},
     {"key": "tp_training",     "label": "TP training"},
@@ -110,7 +134,12 @@ def attach(port, log, tpls=None, install_dock=True):
     t = find_page_target(port=port, url_contains="ninjasaga", timeout=40)
     c = CDP(t["webSocketDebuggerUrl"])
     c.call("Page.enable")
-    browser.pin_viewport(c, *VIEWPORT)
+    # Honour the operator's chosen window, so a restart does not silently snap
+    # back to the reference size after they picked another.
+    _vp = next((v for v in VIEWPORTS
+                if v["key"] == _read_json(VIEWPORT_PATH, {}).get("key")), None)
+    browser.pin_viewport(c, _vp["w"], _vp["h"], _vp["dpr"]) if _vp else \
+        browser.pin_viewport(c, *VIEWPORT)
     cap = Capture(c)
     actor = Actor(c, cap, log, dry_run=False)
     dk = dock_mod.Dock(c, log)
@@ -128,6 +157,8 @@ class Runner:
         self.cdp, self.cap, self.actor = cdp, cap, actor
         self.tpls, self.cfg, self.log = tpls, cfg, log
         self._last_beat = 0.0
+        self.viewport = _read_json(VIEWPORT_PATH, {}).get(
+            "key", VIEWPORTS[0]["key"])
         # Every capture is both evidence the bot is alive AND our chance to read
         # the operator's buttons - see `on_capture`.
         self.cap.on_activity = self.on_capture
@@ -217,6 +248,10 @@ class Runner:
                 "focus": self.focus_on,
                 "skills": self.skills, "skill_slots": SKILL_SLOTS,
                 "grades": GRADES, "grade": self.grade,
+                "viewports": VIEWPORTS, "viewport": self.viewport,
+                "viewport_label": next(
+                    (v["label"] for v in VIEWPORTS if v["key"] == self.viewport),
+                    self.viewport or ""),
                 "pin": (f"page {self.pin_page} row {self.pin_row}"
                         if self.pin_page and self.pin_row else None),
             })
@@ -336,6 +371,29 @@ class Runner:
                                   self.task, was)
                 else:
                     self.log.info("operator: task -> %s", self.task)
+        elif c == "viewport":
+            vp = next((v for v in VIEWPORTS if v["key"] == cmd.get("arg")), None)
+            if vp is None:
+                return
+            # The dock asks for confirmation before sending this, because
+            # applying it reloads the game and drops us to character select.
+            self.log.info("operator: window -> %s (reloading)", vp["label"])
+            self.viewport = vp["key"]
+            _write_json(VIEWPORT_PATH, {"key": vp["key"]})
+            self.mode = "stopped"
+            _write_control("stop")
+            try:
+                browser.pin_viewport(self.cdp, vp["w"], vp["h"], vp["dpr"])
+                time.sleep(0.6)
+                self.relog()
+                # Geometry hints and the drift cache are all keyed to the old
+                # layout; keeping them would aim every click at the old place.
+                self.cap._off_at = 0.0
+                self.focus_aligned = False
+            except (OSError, CDPError) as e:
+                raise Disconnected(str(e))
+            except Exception as e:
+                self.log.error("could not apply the window size: %s", e)
         elif c == "relog":
             self.log.info("operator: RELOG")
             self.relog()
