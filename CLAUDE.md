@@ -256,6 +256,49 @@ against a 12 s window, across pagination and combat.
 Re-install `cap.on_activity` after a reconnect — the Capture object is new, and
 forgetting leaves the panel permanently stale from that point.
 
+### Switching task must INTERRUPT the running one, and relog if it is stuck
+
+Two faults made the Task buttons feel dead, and together they pushed the
+operator into using Stop — which now kills the process, so the panel detached.
+
+**1. The operator's buttons were not being READ during long work.** `pump` ran
+only from the gate's poll loop, and farm navigation — paging the mission list,
+opening a mission — never enters a gate. So a press could sit undelivered for
+the whole of it. Measured: the command was sent and **no `task` event ever
+reached the log**. `Capture.on_activity` now pumps on every capture, which is
+the one hook every code path passes through; draining is cheap (a `select` on a
+socket with nothing on it), and the heartbeat inside `pump` keeps its own
+throttle. Re-entrancy is guarded, because `_apply` can itself capture.
+
+**2. Setting the task did not stop the task already running.** A mission takes
+minutes and the cycle loop runs it to completion, so the new choice only took
+effect a whole mission later. The switch now throws the file-backed stop switch
+every task already honours at its gates, the old task unwinds cleanly, and the
+loop re-arms it — **in a `finally`**, because if `step` raises on the way out,
+a thrown switch would wedge the bot in a stop no button explains.
+
+**And a task that needs the LOBBY cannot start from inside a mission at all.**
+The ladder deliberately cannot name a battle or traversal screen, so switching
+to TP training mid-farm just accumulated unrecognised frames until the bot
+paused. After `relog_after_unknown` (8) unreadable frames it now RELOADS:
+character select is a screen the ladder knows, and it walks back to the lobby
+from there. Verified live, the whole chain:
+
+    task -> tp_training (interrupting farm_missions)
+    switched to tp_training
+    state unreadable for 8 frames - relogging (1/2)
+    resume: select_char -> play (0.979 BY TEMPLATE)
+    resume: lobby (1.000) -> Mission Room (1.000) -> Special tab (1.000)
+
+It is deliberately not the first response — a relog throws away an in-flight
+mission — and it is capped at `max_relogs` (2) per streak so a screen that
+survives a reload cannot loop forever. The budget resets whenever the ladder
+recognises something, so it is available for the next, different problem.
+
+The relog is a RELOAD AND NOTHING MORE. It never authenticates; the ladder
+clicks Play **by template** at character select, so `Delete` beside it is never
+a candidate.
+
 ### Stop ENDS THE PROCESS, and it has to do so from wherever it is
 
 A cooperative stop does not work here, and the reason is structural: `_apply`

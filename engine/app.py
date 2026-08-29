@@ -128,8 +128,9 @@ class Runner:
         self.cdp, self.cap, self.actor = cdp, cap, actor
         self.tpls, self.cfg, self.log = tpls, cfg, log
         self._last_beat = 0.0
-        # Every capture is evidence the bot is alive - see `beat`.
-        self.cap.on_activity = self.beat
+        # Every capture is both evidence the bot is alive AND our chance to read
+        # the operator's buttons - see `on_capture`.
+        self.cap.on_activity = self.on_capture
         self.controls, self.dock = controls, dock
         self.port = port
         self.mode = "paused"           # running | paused | stopped
@@ -141,6 +142,14 @@ class Runner:
         self.note = ""
         self.t0 = time.time()
         self.max_unknown = 20
+        # Unrecognised frames before trying a reload, and how many reloads to
+        # allow before pausing for a human. Well below max_unknown, so the relog
+        # gets its chance first, but not so low that a brief hiccup costs a
+        # mission.
+        m = cfg.get("mission", {})
+        self.relog_after = int(m.get("relog_after_unknown", 8))
+        self.max_relogs = int(m.get("max_relogs", 2))
+        self._relogs = 0
         # Focus mode is armed by default and applied as soon as the game is
         # detected. It is not decoration: hiding the page chrome lets the game
         # reflow to the top so scrollY is 0 and STAYS 0, which is what makes the
@@ -306,16 +315,31 @@ class Runner:
             self._hard_exit()
         elif c == "task":
             if any(t["key"] == cmd.get("arg") for t in TASKS):
-                self.task = cmd["arg"]
-                self.log.info("operator: task -> %s", self.task)
+                was, self.task = self.task, cmd["arg"]
+                # SWITCHING TASK MUST INTERRUPT THE ONE IN FLIGHT.
+                #
+                # Setting the field alone was useless in practice: a mission
+                # takes minutes and the cycle loop runs it to completion, so
+                # pressing "TP training" mid-farm looked like nothing happened
+                # at all - and the only way out was Stop, which now kills the
+                # process, leaving the panel detached. That is the "tasks
+                # shooting each other's foot" the operator hit.
+                #
+                # The abort uses the mechanism that already exists: the
+                # file-backed stop switch every task honours at its own gates.
+                # The task unwinds cleanly wherever it is, then the loop puts
+                # the switch back to "run" and the NEW task starts. Nothing is
+                # killed and the panel survives.
+                if self.mode == "running" and was != self.task:
+                    self._switching = True
+                    _write_control("stop")
+                    self.log.info("operator: task -> %s (interrupting %s)",
+                                  self.task, was)
+                else:
+                    self.log.info("operator: task -> %s", self.task)
         elif c == "relog":
-            # Reload only. NEVER authenticate: CLAUDE.md is explicit that a
-            # logged-out session may mean a password change or a ban, and that
-            # it must surface to the human rather than be auto-recovered.
-            self.log.info("operator: RELOG (reload only - never authenticates)")
-            self.cdp.call("Page.reload")
-            time.sleep(4.0)
-            browser.pin_viewport(self.cdp, *VIEWPORT)
+            self.log.info("operator: RELOG")
+            self.relog()
 
     HEARTBEAT_EVERY = 3.0        # seconds; see the note below
 
@@ -358,6 +382,54 @@ class Runner:
         # one-assignment heartbeat, and throttle it: the gate polls ~10x a
         # second and this is a CDP round trip.
         self.beat()
+
+    def relog(self):
+        """Reload the page to get back to a screen the ladder can read.
+
+        RELOAD ONLY - this NEVER authenticates. CLAUDE.md is explicit that a
+        logged-out session may mean a password change or a ban and must surface
+        to the human. The resume ladder handles what comes back, clicking Play
+        BY TEMPLATE at character select so `Delete`, which sits beside it, is
+        never a candidate.
+
+        It abandons whatever mission was in flight, which is the point: it is
+        the only way out of a screen the ladder cannot name.
+        """
+        self.cdp.call("Page.reload")
+        time.sleep(4.0)
+        browser.pin_viewport(self.cdp, *VIEWPORT)
+        try:
+            from geometry import BattleGeometry
+            BattleGeometry.forget()      # the layout may have moved
+        except Exception:
+            pass
+
+    def on_capture(self):
+        """Called on every screen capture. Reads buttons; keeps the panel alive.
+
+        THE OPERATOR'S BUTTONS HAVE TO BE READ FROM HERE, not just from gates.
+        Farm navigation - paging the mission list, opening a mission - never
+        enters a gate, so nothing drained the command queue for the whole of it.
+        Pressing "TP training" mid-farm therefore did nothing observable, and
+        the only apparent escape was Stop, which kills the process and leaves
+        the panel detached. Measured: the command was sent and no `task` event
+        ever reached the log.
+
+        Draining is cheap - `select` on a socket with nothing on it - so it runs
+        on every capture. The heartbeat inside `pump` has its own throttle.
+
+        Re-entrancy is guarded: `_apply` can itself capture (a relog, a render),
+        and pumping from inside a pump would recurse.
+        """
+        if getattr(self, "_in_pump", False):
+            return
+        self._in_pump = True
+        try:
+            self.pump(poll=0.0)
+        except Exception:
+            pass
+        finally:
+            self._in_pump = False
 
     def beat(self):
         """Throttled 'still alive' ping for the panel.
@@ -454,14 +526,44 @@ class Runner:
             else:
                 self.unknown = 0
             self.note = f"resume: {out} ({self.state})"
+            # TRY A RELOG BEFORE GIVING UP.
+            #
+            # The ladder deliberately cannot name a battle or a traversal
+            # screen, so a task that needs the LOBBY can never start from inside
+            # a mission - switching to TP training mid-farm just accumulated
+            # unrecognised frames until the bot paused. A reload lands on
+            # character select, which the ladder does know, and it walks itself
+            # back to the lobby from there.
+            #
+            # It is deliberately NOT the first response: a relog throws away an
+            # in-flight mission, so it only fires once the state has been
+            # unreadable for a while, and at most `max_relogs` times per streak
+            # so a screen that survives a reload cannot loop forever.
+            if (self.unknown >= self.relog_after
+                    and self._relogs < self.max_relogs):
+                self._relogs += 1
+                self.note = (f"state unreadable for {self.unknown} frames - "
+                             f"relogging to get back to the lobby "
+                             f"({self._relogs}/{self.max_relogs})")
+                self.log.info("%s", self.note)
+                self.unknown = 0
+                try:
+                    self.relog()
+                except (OSError, CDPError) as e:
+                    raise Disconnected(str(e))
+                return
             if self.unknown >= self.max_unknown:
                 self.note = (f"{self.unknown} unrecognised frames in a row - "
                              f"pausing rather than spinning. Look at the screen.")
                 self.log.error("%s", self.note)
                 self.mode = "paused"
                 self.unknown = 0
+                self._relogs = 0
             return
         self.unknown = 0
+        # The ladder got somewhere it recognises, so the relog budget is spent
+        # on a DIFFERENT problem next time rather than staying exhausted.
+        self._relogs = 0
         self.note = ""
 
         if self.task == "resume_to_lobby":
@@ -598,8 +700,9 @@ class Runner:
                 pass
             self.cdp, self.cap, self.actor, self.dock = c, cap, actor, dk
             # The Capture object is NEW after a reconnect, so the activity hook
-            # has to be re-installed or the panel goes stale from here on.
-            self.cap.on_activity = self.beat
+            # has to be re-installed or the panel goes stale from here on and
+            # the operator's buttons stop being read.
+            self.cap.on_activity = self.on_capture
             self.resumer = resume.Resumer(cap, actor, self.tpls, self.log,
                                           controls=self.controls)
             self.log.info("reconnected; the panel is back")
@@ -762,7 +865,17 @@ class Runner:
                 self.pump()
                 if self.mode == "running":
                     try:
-                        self.step()
+                        try:
+                            self.step()
+                        finally:
+                            # RE-ARM IN `finally`. The stop switch was thrown to
+                            # interrupt the previous task; if `step` raises on
+                            # the way out, leaving it thrown would wedge the bot
+                            # in a permanent stop that no button explains.
+                            if getattr(self, "_switching", False):
+                                self._switching = False
+                                _write_control("run")
+                                self.log.info("switched to %s", self.task)
                     except Disconnected:
                         raise
                     except (OSError, CDPError) as e:

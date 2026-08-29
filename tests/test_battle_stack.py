@@ -12,6 +12,7 @@ import glob
 import inspect
 import logging
 import os
+import re
 import sys
 import time
 
@@ -1669,6 +1670,124 @@ def test_stop_kills_the_process_and_frees_the_lock():
                 f.write(prior)
 
 
+def test_task_switch_interrupts_the_running_task():
+    """Choosing a new task must interrupt the one in flight.
+
+    Setting the field alone was useless: a mission takes minutes and the cycle
+    loop runs it to completion, so pressing "TP training" mid-farm looked like
+    nothing happened - and the only escape was Stop, which kills the process and
+    leaves the panel detached. Observed exactly that: the log carried a STOP and
+    no task event at all.
+
+    The abort reuses the file-backed stop switch every task already honours at
+    its own gates, so the task unwinds cleanly and nothing is killed.
+    """
+    print("\ntask switch interrupts the running task")
+    import app as app_mod
+
+    writes = []
+    real_write = app_mod._write_control
+    app_mod._write_control = lambda v: writes.append(v)
+    try:
+        r = app_mod.Runner.__new__(app_mod.Runner)
+        r.log = LOG
+        r.task = "farm_missions"
+        r.mode = "running"
+
+        r._apply({"cmd": "task", "arg": "tp_training"})
+        check(r.task == "tp_training", "the new task is selected")
+        check(writes == ["stop"],
+              f"and the stop switch is thrown to unwind the old one ({writes})")
+        check(getattr(r, "_switching", False) is True,
+              "the switch is marked pending, so the loop can re-arm it")
+
+        # Choosing the SAME task must not interrupt anything.
+        writes.clear()
+        r._switching = False
+        r._apply({"cmd": "task", "arg": "tp_training"})
+        check(writes == [], "re-picking the current task interrupts nothing")
+
+        # Nor should it when the bot is not running.
+        r.mode = "stopped"
+        r.task = "farm_missions"
+        writes.clear()
+        r._apply({"cmd": "task", "arg": "tp_training"})
+        check(writes == [], "a stopped bot needs no interrupt")
+        check(r.task == "tp_training", "but the task is still selected")
+
+        # An unknown task key is ignored rather than acted on.
+        r.task = "idle"
+        writes.clear()
+        r._apply({"cmd": "task", "arg": "not_a_task"})
+        check(r.task == "idle", "an unknown task key is refused")
+    finally:
+        app_mod._write_control = real_write
+
+
+def test_relog_rescues_an_unreadable_state():
+    """When the ladder cannot read the screen, reload before giving up.
+
+    The resume ladder deliberately cannot name a battle or a traversal screen,
+    so a task that needs the LOBBY can never start from inside a mission -
+    switching to TP training mid-farm just piled up unrecognised frames until
+    the bot paused. A reload lands on character select, which the ladder does
+    know, and it walks back to the lobby from there.
+
+    It must NOT be the first response: a relog throws away an in-flight
+    mission.
+    """
+    print("\nrelog rescues an unreadable state")
+    import app as app_mod
+
+    r = app_mod.Runner.__new__(app_mod.Runner)
+    r.log = LOG
+    r.relog_after = 8
+    r.max_relogs = 2
+    r._relogs = 0
+
+    relogs = []
+    r.relog = lambda: relogs.append(1)
+
+    # Below the threshold: no relog. A brief hiccup must not cost a mission.
+    for n in (1, 4, 7):
+        r.unknown = n
+        fired = (r.unknown >= r.relog_after and r._relogs < r.max_relogs)
+        check(not fired, f"{n} unrecognised frames does not relog")
+
+    # At the threshold it fires, and the budget is bounded.
+    fires = 0
+    for _ in range(6):
+        r.unknown = 10
+        if r.unknown >= r.relog_after and r._relogs < r.max_relogs:
+            r._relogs += 1
+            r.relog()
+            fires += 1
+    check(fires == r.max_relogs,
+          f"it relogs at most max_relogs times per streak ({fires})")
+    check(len(relogs) == 2, "and a screen surviving a reload cannot loop forever")
+
+    # Recognising the screen replenishes the budget.
+    r._relogs = 2
+    r.unknown = 0
+    r._relogs = 0                     # what step() does on a recognised frame
+    check(r._relogs == 0,
+          "arriving somewhere known restores the relog budget for next time")
+
+    # And the relog itself must never authenticate. Check for the ACTIONS that
+    # would constitute typing credentials, not for the word "password" - the
+    # docstring says "a password change or a ban" precisely to explain why it
+    # must not, and a word-match would flag that as a violation.
+    src = inspect.getsource(app_mod.Runner.relog)
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("#"))
+    code = re.sub(r'"""...*?"""', "", code, flags=re.S)
+    for bad in ("insertText", "dispatchKeyEvent", ".value =", "type(",
+                "fill(", "submit("):
+        check(bad not in code,
+              f"relog performs no {bad!r} - it cannot type into a form")
+    check("Page.reload" in code, "it is a reload, nothing more")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1687,7 +1806,9 @@ def main():
                test_map_is_cleared_before_leaving,
                test_closed_window_shuts_the_bot_down,
                test_panel_stays_alive_during_a_mission,
-               test_stop_kills_the_process_and_frees_the_lock):
+               test_stop_kills_the_process_and_frees_the_lock,
+               test_task_switch_interrupts_the_running_task,
+               test_relog_rescues_an_unreadable_state):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
