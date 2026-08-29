@@ -1500,6 +1500,67 @@ def test_map_is_cleared_before_leaving():
     check(again != foe, "a spot that produced no fight is not proposed again")
 
 
+def test_closed_window_shuts_the_bot_down():
+    """Closing the browser must end the process, not wedge it holding the lock.
+
+    A closed window and a navigated page look IDENTICAL at the socket - both
+    just kill the connection - but need opposite responses: reconnect to a
+    navigation, exit on a closed window. Without telling them apart, `attach`
+    was retried 30 times at up to ~32s each while HOLDING THE PID LOCK, so the
+    operator closed the window, tried to relaunch, and was told "another bot
+    window is already running". One such process was found still alive, and
+    wedged, SEVEN HOURS later.
+
+    The CDP HTTP endpoint separates them, because it dies with the browser.
+    """
+    print("\nclosing the window shuts the bot down")
+    import app as app_mod
+
+    r = app_mod.Runner.__new__(app_mod.Runner)
+    r.log = LOG
+    r.port = 9222
+    r.quit = False
+    r.tpls = {}
+
+    # Browser gone: reconnect must give up and ask the process to exit, rather
+    # than grinding through 30 attach attempts.
+    attaches = []
+    r.browser_alive = lambda timeout=2.0: False
+    orig_attach = app_mod.attach
+    app_mod.attach = lambda *a, **k: attaches.append(1) or (_ for _ in ()).throw(
+        RuntimeError("should not be called"))
+    try:
+        t0 = time.time()
+        ok = r.reconnect()
+        took = time.time() - t0
+    finally:
+        app_mod.attach = orig_attach
+    check(ok is False, "reconnect reports failure when the browser is gone")
+    check(r.quit is True, "and it asks the loop to exit")
+    check(not attaches, "without ever paying for an attach")
+    check(took < 20, f"and it gives up quickly ({took:.1f}s, was up to ~16 min)")
+
+    # Browser still there: a navigation must still reconnect normally.
+    r2 = app_mod.Runner.__new__(app_mod.Runner)
+    r2.log = LOG; r2.port = 9222; r2.quit = False; r2.tpls = {}
+    r2.controls = None
+    r2.cdp = type("C", (), {"close": lambda self: None})()
+    r2.browser_alive = lambda timeout=2.0: True
+    calls = []
+    def fake_attach(port, log, tpls, **k):
+        calls.append(1)
+        stub = type("S", (), {"close": lambda self: None})()
+        return stub, stub, stub, stub
+    app_mod.attach = fake_attach
+    try:
+        ok2 = r2.reconnect()
+    finally:
+        app_mod.attach = orig_attach
+    check(ok2 is True, "a live browser still reconnects")
+    check(r2.quit is False, "and does NOT shut the bot down")
+    check(len(calls) == 1, "attaching once")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1515,7 +1576,8 @@ def main():
                test_restriction_short_circuits_the_rotation,
                test_battle_between_turns_is_not_scenery,
                test_character_finder_rejects_scenery,
-               test_map_is_cleared_before_leaving):
+               test_map_is_cleared_before_leaving,
+               test_closed_window_shuts_the_bot_down):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

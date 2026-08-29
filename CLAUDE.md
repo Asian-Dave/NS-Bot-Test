@@ -230,6 +230,33 @@ first, and each failed silently:
   the operator's next button press is the one now parked. That hung live.
   `Controls.on_wait` is pumped every poll, so Run and Stop stay live mid-mission.
 
+### Closing the window must CLOSE THE BOT
+
+A closed window and a navigated page look identical at the socket — both simply
+kill the connection — but they need opposite responses: reconnect to a
+navigation, exit on a closed window. Without separating them, `reconnect` ran 30
+`attach` attempts at up to ~32 s each **while holding the pid lock**, so closing
+the window and relaunching produced *"another bot window is already running"*.
+Measured: one such process was still alive, and wedged, **seven hours** later.
+
+`Runner.browser_alive()` separates them with one local HTTP request to the CDP
+endpoint, which dies with the browser process. Two places use it:
+
+* `reconnect` — three consecutive failures means the window is gone: set `quit`
+  and return, never paying for an attach. Measured 4 s instead of up to 16 min.
+* the main loop — polled every few ticks, because **the window can be closed
+  while the bot is idle** and then nothing raises at all: no call is in flight,
+  so no socket error ever surfaces and the process just sits there holding the
+  lock.
+
+The trailing `push()` after the loop is wrapped, since it cannot succeed when
+the browser is what died, and the caller's `finally` is what releases the lock.
+
+Note the lock itself was never wrong: it checks `os.kill(pid, 0)` and so ignores
+a stale pid. Deleting `run/app.lock` to "fix" a refusal is the wrong move — it
+defeats the guard and lets duplicate instances click the same game (six were
+found running at once). Kill the process instead.
+
 ## Safety rules (non-negotiable)
 
 * **Never enter credentials.** Not from the user, not from storage, not "for testing".

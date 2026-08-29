@@ -457,6 +457,22 @@ class Runner:
             self.log.error("%s", self.note)
             self.mode = "paused"
 
+    def browser_alive(self, timeout=2.0):
+        """Is the BROWSER still there? (not: is our page still there)
+
+        A closed window and a navigated page look identical at the socket - both
+        just kill the connection - but they need opposite responses: reconnect
+        to a navigation, exit on a closed window. The CDP HTTP endpoint tells
+        them apart, because it dies with the browser process.
+        """
+        import urllib.request
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/json/version", timeout=timeout)
+            return True
+        except Exception:
+            return False
+
     def reconnect(self):
         """Rebuild the connection after the socket dies.
 
@@ -467,7 +483,24 @@ class Runner:
         which is exactly the thing the dock is supposed to save you from.
         """
         self.log.info("connection lost - reconnecting")
+        gone = 0
         for attempt in range(30):
+            # CHECK THE BROWSER BEFORE PAYING FOR AN ATTACH. `attach` blocks up
+            # to 30 s per try waiting for a page target, so a closed window used
+            # to cost 30 x 32 s of pointless retrying while HOLDING THE PID LOCK
+            # - the operator closes the window, tries to relaunch, and is told
+            # "another bot window is already running". Measured: one such
+            # process was still alive, and wedged, SEVEN HOURS later.
+            if not self.browser_alive():
+                gone += 1
+                if gone >= 3:
+                    self.log.info("the browser window is gone - shutting down "
+                                  "so the next launch is not blocked")
+                    self.quit = True
+                    return False
+                time.sleep(2.0)
+                continue
+            gone = 0
             try:
                 c, cap, actor, dk = attach(self.port, self.log, self.tpls)
             except Exception as e:
@@ -624,8 +657,20 @@ class Runner:
     def loop(self, tick=1.0):
         self.log.info("ready - press Run in the panel")
         self.push()
+        idle_checks = 0
         while not self.quit:
             try:
+                # THE WINDOW CAN BE CLOSED WHILE WE ARE IDLE, and then nothing
+                # raises: no call is in flight, so no socket error surfaces and
+                # the process sits there holding the pid lock. Poll the browser
+                # itself now and then - it is one local HTTP request.
+                idle_checks += 1
+                if idle_checks % 5 == 0 and not self.browser_alive():
+                    self.log.info("the browser window was closed - exiting "
+                                  "(the next launch would otherwise be refused "
+                                  "with 'another bot window is already running')")
+                    self.quit = True
+                    break
                 self.ensure_dock()
                 self.ensure_focus()
                 self.pump()
@@ -649,7 +694,13 @@ class Runner:
                 continue
             if self.mode != "running":
                 time.sleep(tick)
-        self.push()
+        # Best-effort final render: if we are here because the browser died,
+        # this cannot work and must not raise out of loop() - the caller's
+        # `finally` is what releases the pid lock.
+        try:
+            self.push()
+        except Exception:
+            pass
         self.log.info("quit")
 
 
