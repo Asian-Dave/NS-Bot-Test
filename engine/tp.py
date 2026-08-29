@@ -434,7 +434,7 @@ def close_out(actor, cap, log, timeout=45):
     return False
 
 
-def run_all(cap, actor, log, max_missions=6):
+def run_all(cap, actor, log, max_missions=6, relog=None):
     """Play EVERY TP mission on the list, whatever they turn out to be.
 
     The mission is chosen by position, not by name, and what it IS gets decided
@@ -470,22 +470,46 @@ def run_all(cap, actor, log, max_missions=6):
         else:
             log.info("mission did not complete; it stays in the list and will "
                      "not be retried this pass")
-            _recover_to_lobby(cap, actor, log)
+            _recover_to_lobby(cap, actor, log, relog=relog)
     log.info("TP pass finished: %d started, %d banked", played, banked)
     return played, banked
 
 
-def _recover_to_lobby(cap, actor, log, timeout=120):
-    """Get back to the village after a mission that did not close out."""
-    try:
-        import resume
-        from bot import load_templates
-        import json as _json
+def _recover_to_lobby(cap, actor, log, timeout=120, relog=None):
+    """Get back to the village after a mission that did not close out.
+
+    RELOG IF THE LADDER CANNOT READ THE SCREEN. The ladder deliberately does not
+    classify a battle, a traversal map or a half-played minigame, so ending a TP
+    mission on one of those leaves it with nothing to climb - it exhausted its
+    20 unrecognised frames and halted, and the whole TP pass stopped with the
+    mission still playable on screen ("Seals: 1 / 2").
+
+    A reload lands on character select, which the ladder does know, and it walks
+    back to the lobby from there. `relog` is the caller's reload callable; with
+    none supplied the behaviour is unchanged.
+    """
+    import resume
+    from bot import load_templates
+    import json as _json
+
+    def _climb():
         cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
         r = resume.Resumer(cap, actor, load_templates(cfg, log), log)
         out, info = r.run(timeout=timeout)
         log.info("recover: %s %s", out, info)
-        return out == resume.ARRIVED
+        return out
+
+    try:
+        out = _climb()
+        if out == resume.ARRIVED:
+            return True
+        if relog is None:
+            return False
+        # One reload, then one more climb. Bounded deliberately: a screen that
+        # survives a reload is a human's problem, not something to loop on.
+        log.info("recover: the ladder cannot read this screen - relogging once")
+        relog()
+        return _climb() == resume.ARRIVED
     except Exception as e:
         log.info("recover failed: %s: %s", type(e).__name__, e)
         return False

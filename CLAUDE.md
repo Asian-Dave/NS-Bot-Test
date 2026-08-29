@@ -1454,6 +1454,38 @@ and the match margins were unaffected. That is the anchor doing its job.
 **A failed TP mission is NOT consumed** — it stays in the day's list and can be
 retried.
 
+### The TP pass halts on screens the ladder cannot read — relog there too
+
+A TP mission that does not close out calls `_recover_to_lobby`, which climbs the
+resume ladder. But the ladder deliberately does not classify a battle, a
+traversal map or a half-played minigame, so ending on one leaves it nothing to
+climb: it burns its 20 unrecognised frames, halts, and the whole pass stops
+**with the mission still playable on screen** — observed at `Seals: 1 / 2`.
+
+The relog rung in `Runner.step` does NOT cover this, because the halt comes from
+the Resumer's own `run()` inside the task. `_recover_to_lobby` takes a `relog`
+callable and, on a halt, reloads ONCE and climbs again. Bounded deliberately: a
+screen that survives a reload is a human's problem, not something to loop on.
+
+**General shape of this bug: a recovery path that exists in two places, only one
+of which was taught the new trick.** Same as the character finder below.
+
+### TWO FINDERS FOR ONE IDEA — the seal hunt could not steer
+
+`kekkai_play` had its own `find_character`, still keyed to a RED robe, while
+mission traversal had been fixed to find a purple-robed character by saturation.
+It returned None on every real frame, so `heading_from_spawn` fell back to
+"right" and ran the character back through the edge it had just entered by —
+the seal hunt "getting stuck wherever movement was necessary".
+
+The finder now lives in `perceive.find_character` and both runners delegate. The
+test asserts the two runners **AGREE** rather than that each works, because
+agreement is what actually failed.
+
+Measured on the live frame it stranded on (`ref/auto/tp/kekkai_seal2_hunt.png`,
+"Seals: 1 / 2", no seal on screen): character (2231, 605), right of centre,
+heading **left**. The old finder returned None there.
+
 ### The resume ladder needs a CUTSCENE rung
 
 A failed mission ends on "Aww... you better take some rest..." over a

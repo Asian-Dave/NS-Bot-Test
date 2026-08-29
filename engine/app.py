@@ -578,7 +578,8 @@ class Runner:
             # screen. Names are not used to choose: the family a title implies
             # is not guaranteed to be the minigame you get, and a name-matched
             # picker silently skips anything renamed or newly added.
-            played, banked = tp_mod.run_all(self.cap, self.actor, self.log)
+            played, banked = tp_mod.run_all(self.cap, self.actor,
+                                            self.log, relog=self.relog)
             self.note = f"TP pass: {played} started, {banked} banked"
             self.log.info(self.note)
             self.mode = "paused"

@@ -2087,6 +2087,65 @@ def test_one_character_finder_shared_by_both_runners():
           "the finder lives in perceive, so there is only one of it")
 
 
+def test_tp_recovery_relogs_before_giving_up():
+    """A TP pass must not stop with the mission still playable on screen.
+
+    The ladder deliberately cannot classify a battle, a traversal map or a
+    half-played minigame, so ending a TP mission on one leaves it nothing to
+    climb: it burned its 20 unrecognised frames and halted, and the pass stopped
+    with "Seals: 1 / 2" still on screen. The relog rung added to `step` did not
+    help, because this halt comes from the Resumer's OWN run() inside the task.
+    """
+    print("\nTP recovery relogs before giving up")
+    import tp as tp_mod
+    import resume as resume_mod
+
+    calls = {"climbs": 0, "relogs": 0}
+
+    class StubResumer:
+        def __init__(self, *a, **k):
+            pass
+        def run(self, timeout=120):
+            calls["climbs"] += 1
+            # First climb fails; after a relog the second succeeds.
+            if calls["relogs"]:
+                return resume_mod.ARRIVED, {}
+            return resume_mod.HALT, {"reason": "unrecognised screen"}
+
+    real = resume_mod.Resumer
+    resume_mod.Resumer = StubResumer
+    try:
+        ok = tp_mod._recover_to_lobby(
+            None, None, LOG, relog=lambda: calls.__setitem__("relogs",
+                                                             calls["relogs"] + 1))
+        check(ok is True, "recovery succeeds once it has relogged")
+        check(calls["relogs"] == 1, "it relogs exactly once")
+        check(calls["climbs"] == 2, "climbing before and after, and no more")
+
+        # Without a relog callable the behaviour is unchanged - no silent change
+        # for any other caller.
+        calls.update(climbs=0, relogs=0)
+        ok2 = tp_mod._recover_to_lobby(None, None, LOG)
+        check(ok2 is False, "with no relog available it still reports failure")
+        check(calls["climbs"] == 1, "and does not climb twice for nothing")
+
+        # A screen that survives the reload must NOT loop.
+        calls.update(climbs=0, relogs=0)
+        class NeverArrives(StubResumer):
+            def run(self, timeout=120):
+                calls["climbs"] += 1
+                return resume_mod.HALT, {"reason": "unrecognised screen"}
+        resume_mod.Resumer = NeverArrives
+        ok3 = tp_mod._recover_to_lobby(
+            None, None, LOG, relog=lambda: calls.__setitem__("relogs",
+                                                             calls["relogs"] + 1))
+        check(ok3 is False, "an unreadable screen still ends in failure")
+        check(calls["relogs"] == 1 and calls["climbs"] == 2,
+              "after ONE relog and TWO climbs - it cannot loop")
+    finally:
+        resume_mod.Resumer = real
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2110,6 +2169,7 @@ def main():
                test_task_switch_interrupts_the_running_task,
                test_stop_aborts_the_task_but_keeps_the_panel,
                test_relog_rescues_an_unreadable_state,
+               test_tp_recovery_relogs_before_giving_up,
                test_kekkai_panel_is_located_not_assumed,
                test_game_drift_is_tracked_and_corrected,
                test_ladder_acknowledges_a_lone_green_check):
