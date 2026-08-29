@@ -1561,6 +1561,51 @@ def test_closed_window_shuts_the_bot_down():
     check(len(calls) == 1, "attaching once")
 
 
+def test_panel_stays_alive_during_a_mission():
+    """The panel must not declare the bot dead while it is working.
+
+    The panel decides it has been abandoned from the age of its last update, and
+    `push` only runs BETWEEN cycles - but a mission blocks for minutes. Worse,
+    `on_wait` used to fire only while PAUSED, so during an active mission
+    nothing touched the panel at all and it showed "no bot attached - the panel
+    is frozen" for most of every mission.
+
+    The gate's poll loop now pumps on every poll, and pump sends a throttled
+    one-assignment heartbeat.
+    """
+    print("\npanel stays alive during a mission")
+    import act as act_mod
+
+    # 1. Controls pumps on_wait even when NOT paused - that is the fix.
+    pumped = []
+    ctl = act_mod.Controls(path="/nonexistent/bot.control", log=None,
+                           on_wait=lambda: pumped.append(1))
+    check(ctl.wait_if_paused() is True, "an unpaused bot carries straight on")
+    check(len(pumped) == 1,
+          "and the operator pump still ran (was: only while paused)")
+
+    # 2. The heartbeat is throttled - the gate polls ~10x a second and each
+    #    beat is a CDP round trip.
+    import app as app_mod
+    beats = []
+    r = app_mod.Runner.__new__(app_mod.Runner)
+    r.log = LOG
+    r.dock = type("D", (), {
+        "commands": lambda self, poll=0.0: [],
+        "heartbeat": lambda self: beats.append(1),
+    })()
+    r._last_beat = 0.0
+    for _ in range(20):
+        r.pump(poll=0.0)
+    check(len(beats) == 1,
+          f"20 rapid pumps send ONE heartbeat, not 20 (sent {len(beats)})")
+    r._last_beat = 0.0            # pretend the interval elapsed
+    r.pump(poll=0.0)
+    check(len(beats) == 2, "and it beats again once the interval passes")
+    check(app_mod.Runner.HEARTBEAT_EVERY < 12.0,
+          "the beat interval is well inside the panel's staleness window")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1577,7 +1622,8 @@ def main():
                test_battle_between_turns_is_not_scenery,
                test_character_finder_rejects_scenery,
                test_map_is_cleared_before_leaving,
-               test_closed_window_shuts_the_bot_down):
+               test_closed_window_shuts_the_bot_down,
+               test_panel_stays_alive_during_a_mission):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

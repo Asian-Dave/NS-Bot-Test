@@ -135,6 +135,18 @@ class Controls:
             if s == "stop":
                 return False
             if s != "pause":
+                # PUMP EVEN WHEN NOT PAUSED. This is called from the gate's poll
+                # loop, which is where the bot spends a whole mission, so it is
+                # the only regular opportunity to service operator input and to
+                # tell the panel we are still alive. Pumping only while PAUSED
+                # meant the panel went untouched for minutes during a mission and
+                # its own staleness watchdog declared "no bot attached - the
+                # panel is frozen" while the bot was working perfectly.
+                if self.on_wait is not None:
+                    try:
+                        self.on_wait()
+                    except Exception:
+                        pass
                 return True
             if self.log and not said:
                 self.log.info("paused - waiting (%s)", self.path)

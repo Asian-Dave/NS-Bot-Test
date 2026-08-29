@@ -127,6 +127,9 @@ class Runner:
                  port=9222):
         self.cdp, self.cap, self.actor = cdp, cap, actor
         self.tpls, self.cfg, self.log = tpls, cfg, log
+        self._last_beat = 0.0
+        # Every capture is evidence the bot is alive - see `beat`.
+        self.cap.on_activity = self.beat
         self.controls, self.dock = controls, dock
         self.port = port
         self.mode = "paused"           # running | paused | stopped
@@ -293,9 +296,41 @@ class Runner:
             time.sleep(4.0)
             browser.pin_viewport(self.cdp, *VIEWPORT)
 
+    HEARTBEAT_EVERY = 3.0        # seconds; see the note below
+
     def pump(self, poll=0.25):
         for cmd in self.dock.commands(poll=poll):
             self._apply(cmd)
+        # KEEP THE PANEL'S "ALIVE" CLOCK TICKING DURING LONG WORK. `pump` is
+        # called from the gate's poll loop, so it runs throughout a mission,
+        # whereas `push` only runs between cycles - and a mission blocks for
+        # minutes. Without this the panel's own watchdog showed "no bot attached
+        # - the panel is frozen" for most of every mission, while the bot was
+        # working perfectly. A full render is a large payload, so send only the
+        # one-assignment heartbeat, and throttle it: the gate polls ~10x a
+        # second and this is a CDP round trip.
+        self.beat()
+
+    def beat(self):
+        """Throttled 'still alive' ping for the panel.
+
+        Wired to `Capture.on_activity`, so it fires from EVERY code path that
+        looks at the screen - the resume ladder, farm navigation, gates,
+        missions, minigames. Hooking the gate alone was not enough: the farm's
+        own list navigation never enters a gate, so the panel sat stale through
+        all of it and showed "no bot attached".
+
+        Throttled because captures run many times a second and each beat is a
+        CDP round trip.
+        """
+        now = time.time()
+        if now - getattr(self, "_last_beat", 0.0) < self.HEARTBEAT_EVERY:
+            return
+        self._last_beat = now
+        try:
+            self.dock.heartbeat()
+        except Exception:
+            pass
 
     # -- work --------------------------------------------------------------
     def step(self):
@@ -514,6 +549,9 @@ class Runner:
             except Exception:
                 pass
             self.cdp, self.cap, self.actor, self.dock = c, cap, actor, dk
+            # The Capture object is NEW after a reconnect, so the activity hook
+            # has to be re-installed or the panel goes stale from here on.
+            self.cap.on_activity = self.beat
             self.resumer = resume.Resumer(cap, actor, self.tpls, self.log,
                                           controls=self.controls)
             self.log.info("reconnected; the panel is back")

@@ -230,6 +230,32 @@ first, and each failed silently:
   the operator's next button press is the one now parked. That hung live.
   `Controls.on_wait` is pumped every poll, so Run and Stop stay live mid-mission.
 
+### The panel's "no bot attached" banner needs a HEARTBEAT, hung off CAPTURE
+
+The panel decides it has been abandoned from the age of its last update, and a
+full `render` only happens BETWEEN cycles — while a mission blocks for minutes.
+So the banner claimed "no bot attached — the panel is frozen" for most of every
+mission, with the bot working perfectly. A false alarm on a status light is
+worse than no status light: it trains the operator to ignore it.
+
+Two things were needed, and the FIRST FIX WAS NOT ENOUGH:
+
+1. `Controls.wait_if_paused` now pumps `on_wait` even when NOT paused. It is
+   called from the gate's poll loop, so it is the regular chance to service
+   operator input; pumping only while paused meant a running mission never did.
+2. **But the farm's own list navigation never enters a gate**, so the panel
+   still went stale for the whole of pagination. The hook that actually covers
+   everything is `Capture.on_activity`, called from `frame()` — *every* part of
+   this bot looks at the screen constantly: the resume ladder, farm navigation,
+   gates, missions, minigames.
+
+`Runner.beat()` is throttled to 3 s because captures run many times a second and
+each beat is a CDP round trip. Measured after the fix: worst staleness **3.2 s**
+against a 12 s window, across pagination and combat.
+
+Re-install `cap.on_activity` after a reconnect — the Capture object is new, and
+forgetting leaves the panel permanently stale from that point.
+
 ### Closing the window must CLOSE THE BOT
 
 A closed window and a navigated page look identical at the socket — both simply

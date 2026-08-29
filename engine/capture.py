@@ -16,6 +16,13 @@ import numpy as np
 class Capture:
     def __init__(self, cdp):
         self.cdp = cdp
+        # Optional "the bot is doing something" callback. EVERY part of the bot
+        # captures frames - the resume ladder, farm navigation, gates, missions,
+        # minigames - so this is the one hook that covers all of them. The panel
+        # uses it to know it has not been abandoned; hooking the gate alone was
+        # not enough, because the farm's own navigation never enters a gate and
+        # the panel went stale for the whole of it.
+        self.on_activity = None
         self.dpr = float(cdp.evaluate("window.devicePixelRatio") or 1)
         vp = cdp.evaluate("JSON.stringify({w: innerWidth, h: innerHeight})")
         import json
@@ -39,6 +46,11 @@ class Capture:
                  scale 1 and 2400x1808 at scale 2. Use `clip_for` and leave this
                  alone.
         """
+        if self.on_activity is not None:
+            try:
+                self.on_activity()
+            except Exception:
+                pass
         png = self.cdp.screenshot(clip=clip,
                                   scale=(1.0 if scale is None else scale))
         buf = np.frombuffer(png, dtype=np.uint8)

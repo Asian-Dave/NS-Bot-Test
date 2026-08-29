@@ -406,7 +406,7 @@ _BOOTSTRAP = r"""
     const el = document.getElementById(ID);
     if (!el) return;
     const stale = !window.__nsbotLastRender ||
-                  (Date.now() - window.__nsbotLastRender) > 6000;
+                  (Date.now() - window.__nsbotLastRender) > 12000;
     el.classList.toggle("stale", stale);
     const w = document.getElementById("v_stale");
     if (w) w.style.display = stale ? "block" : "none";
@@ -523,6 +523,16 @@ class Dock:
         return self.cdp.evaluate(
             f"(window.__nsbotFocus ? window.__nsbotFocus({str(bool(on)).lower()})"
             f" : 'no-panel')")
+
+    def heartbeat(self):
+        """Tell the panel the bot is still alive, without a full render.
+
+        The panel decides it has been abandoned from the age of its last update.
+        A render is a large payload; this is one assignment, so it is cheap
+        enough to send from the gate's poll loop during a long mission.
+        """
+        return self.cdp.evaluate(
+            "(window.__nsbotLastRender = Date.now(), 'ok')")
 
     def align(self):
         """Re-assert top alignment once the layout has settled."""
