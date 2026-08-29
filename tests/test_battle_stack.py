@@ -1342,7 +1342,11 @@ def test_restriction_short_circuits_the_rotation():
     r.closing_action = None
     r.target_policy = "first"
     import combat as combat_mod
-    r.rotation = battle_mod.SkillRotation(order, combat_mod.CooldownTracker(), LOG)
+    # fallback="AT" matches the real config, where battle.fallback defaults to
+    # Attack. Without it there is no attack in the rotation at all, and the test
+    # would be asserting against a setup the bot never runs.
+    r.rotation = battle_mod.SkillRotation(order, combat_mod.CooldownTracker(),
+                                          LOG, fallback="AT")
     r._choose_target = lambda *a, **k: None
 
     # Nothing resolves except the restricted action - the stun case.
@@ -1355,18 +1359,22 @@ def test_restriction_short_circuits_the_rotation():
     ok = r._take_action(None, StubGeo(), rounds=1)
     check(ok is True, "the turn is still spent (Dodge resolves)")
     check("DO" in tried, "it reaches the restricted action")
-    skills = [t for t in tried if t != "DO"]
+    skills = [t for t in tried if t not in ("DO", "AT")]
     check(len(skills) == 2,
-          f"it stops after 2 failed actions, not {len(order)} (tried {skills})")
-    check(len(tried) < len(order) + 1,
-          "the whole rotation is NOT probed on a restricted turn")
+          f"it stops after 2 failed skills, not {len(order)} (tried {skills})")
+    check("AT" in tried,
+          "but it STILL tries the fallback attack before concluding a "
+          "restriction - skills on cooldown are not a stun")
+    check(tried.index("AT") < tried.index("DO"),
+          "and attacks BEFORE dodging, so a cooldown turn deals damage")
 
     # A turn where the FIRST action works must be untouched by this.
     r2 = battle_mod.BattleRunner.__new__(battle_mod.BattleRunner)
     r2.cfg = cfg; r2.log = LOG; r2.actor = StubActor()
     r2.restricted_action = "DO"; r2.RESTRICTED_AFTER = 2
     r2.closing_action = None; r2.target_policy = "first"
-    r2.rotation = battle_mod.SkillRotation(order, combat_mod.CooldownTracker(), LOG)
+    r2.rotation = battle_mod.SkillRotation(order, combat_mod.CooldownTracker(),
+                                           LOG, fallback="AT")
     r2._choose_target = lambda *a, **k: None
     seen = []
     r2._wait_resolved = lambda slot: (seen.append(slot), True)[1]
@@ -2221,6 +2229,71 @@ def test_level_up_panel_is_acknowledged():
                   f"- outside the generic rung's 1.00..1.20 sweep")
 
 
+def test_cooldowns_fall_back_to_attack_not_dodge():
+    """Skills on cooldown must fall through to ATTACK, never straight to Dodge.
+
+    `candidates()` appends the fallback LAST, so the stun short-circuit's early
+    `break` jumped clean past Attack to Dodge. With skills merely on cooldown
+    that is the wrong action entirely - the bot spent its turn dodging while
+    Attack was available and would have dealt damage. Observed as "skills being
+    spammed on cooldown but never the auto attack".
+
+    The two cases are distinguishable: a cooldown disables only the skill, a
+    stun disables everything except Dodge. So try Attack and let the game say.
+    """
+    print("\ncooldowns fall back to attack, not dodge")
+    import battle as battle_mod
+    import combat as combat_mod
+
+    order = ["S1", "S3", "S4", "S5"]
+    cfg = {"battle": {"rotation": order, "restricted_action": "DO",
+                      "click_target": False}}
+
+    class StubGeo:
+        def slot(self, s): return (100, 100)
+        def cmd(self, s): return (200, 200)
+        def target(self, t): return (300, 300)
+
+    def runner(resolver):
+        r = battle_mod.BattleRunner.__new__(battle_mod.BattleRunner)
+        r.cfg = cfg; r.log = LOG
+        r.actor = type("A", (), {"click_pixel": lambda self, x, y, why="": None})()
+        r.restricted_action = "DO"; r.RESTRICTED_AFTER = 2
+        r.closing_action = None; r.target_policy = "first"
+        r.rotation = battle_mod.SkillRotation(
+            order, combat_mod.CooldownTracker(), LOG, fallback="AT")
+        r._choose_target = lambda *a, **k: None
+        r._wait_resolved = resolver
+        return r
+
+    # CASE 1 - skills on cooldown, Attack works. This is the reported bug.
+    tried = []
+    def cooldowns(slot):
+        tried.append(slot)
+        return slot == "AT"
+    r = runner(cooldowns)
+    ok = r._take_action(None, StubGeo(), rounds=1)
+    check(ok is True, "the turn resolves")
+    check("AT" in tried, f"Attack is tried ({tried})")
+    check("DO" not in tried,
+          "and Dodge is never reached - the turn deals damage instead")
+    skills = [t for t in tried if t not in ("AT", "DO")]
+    check(len(skills) == 2, f"only 2 skills were probed, not 4 ({skills})")
+
+    # CASE 2 - a real stun: even Attack fails, so Dodge is correct.
+    tried2 = []
+    def stunned(slot):
+        tried2.append(slot)
+        return slot == "DO"
+    r2 = runner(stunned)
+    ok2 = r2._take_action(None, StubGeo(), rounds=1)
+    check(ok2 is True, "a stunned turn still resolves")
+    check("AT" in tried2 and "DO" in tried2,
+          f"Attack is tried first, then Dodge ({tried2})")
+    check(tried2.index("AT") < tried2.index("DO"),
+          "in that order - Dodge only once Attack has also failed")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2234,6 +2307,7 @@ def main():
                test_focus_survives_a_reload,
                test_character_finder_drives_heading,
                test_restriction_short_circuits_the_rotation,
+               test_cooldowns_fall_back_to_attack_not_dodge,
                test_battle_between_turns_is_not_scenery,
                test_character_finder_rejects_scenery,
                test_one_character_finder_shared_by_both_runners,

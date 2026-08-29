@@ -674,6 +674,30 @@ Measured live, same stuck mission, before and after:
 | alternating heading, fixed GROUND_Y | 13 | 5 | 0 |
 | character-derived heading and row | **2** | **0** | **1** |
 
+### COOLDOWN IS NOT RESTRICTION — always try Attack before Dodge
+
+`SkillRotation.candidates()` appends the fallback (`AT`) **LAST**, so the stun
+short-circuit's early `break` jumped clean past Attack straight to Dodge. With
+skills merely on COOLDOWN that is the wrong action entirely: the bot spent its
+turn dodging while Attack was available and would have dealt damage. Reported
+as "skills being spammed on cooldown but never the auto attack".
+
+**The two cases are distinguishable, and the game distinguishes them for us:**
+
+    a COOLDOWN disables only that skill      -> Attack still resolves
+    a STUN disables everything except Dodge  -> Attack fails too
+
+So stop probing skills after `restricted_after` misses, but NEVER skip the
+fallback: try Attack, and fall to `restricted_action` only when that fails as
+well. Dodging is then a measured conclusion rather than a guess.
+
+**A test that passed for the wrong reason.** The original restriction test built
+its rotation with no fallback at all, so `AT` was never in its candidate list -
+it had been asserting against a configuration the bot never runs
+(`battle.fallback` defaults to `"AT"`). It only passed because the old `break`
+never needed to reach the fallback. Both tests now assert the ORDER: Attack
+strictly before Dodge.
+
 ### A stunned turn must not probe the whole rotation
 
 Stun greys out every action except Dodge, and clicking a disabled button does

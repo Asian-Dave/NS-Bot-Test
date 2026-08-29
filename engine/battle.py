@@ -365,12 +365,26 @@ class BattleRunner:
         # ends; if it was not, the next turn tries the rotation again from the
         # top, so nothing is permanently given up.
         misses = 0
+        fallback = getattr(self.rotation, "fallback", None)
+        skipped = False
         for slot in self.rotation.candidates():
-            if misses >= self.RESTRICTED_AFTER and self.restricted_action:
-                self.log.info("battle: %d actions did not resolve - treating "
-                              "this as a restriction and skipping the rest of "
-                              "the rotation", misses)
-                break
+            if (misses >= self.RESTRICTED_AFTER and self.restricted_action
+                    and slot != fallback):
+                # Stop probing SKILLS - but never skip the fallback attack.
+                #
+                # `candidates()` appends the fallback LAST, so an early `break`
+                # here jumped straight past Attack to Dodge. With skills merely
+                # on COOLDOWN that is the wrong action entirely: the bot spent
+                # its turn dodging while Attack was available and would have
+                # dealt damage.
+                #
+                # Cooldown and restriction are distinguishable, and this is how:
+                # a cooldown disables only the skill itself, whereas a stun
+                # disables everything EXCEPT Dodge. So try Attack; if that
+                # resolves it was cooldowns, and if it fails too the restriction
+                # is real and the Dodge below is right.
+                skipped = True
+                continue
             point = geo.slot(slot) if slot.startswith("S") else geo.cmd(slot)
             self.actor.click_pixel(*point, why=f"action {slot} (round {rounds})")
 
@@ -386,6 +400,10 @@ class BattleRunner:
                 return True
             self.rotation.failed(slot)
             misses += 1
+            if misses == self.RESTRICTED_AFTER and not skipped:
+                self.log.info("battle: %d actions did not resolve - skipping "
+                              "the rest of the rotation, but still trying %s",
+                              misses, fallback or "the fallback")
 
         # NOTHING RESOLVED. The usual cause is not a bad click: the player is
         # STUNNED or otherwise restricted, and every action except Dodge is
