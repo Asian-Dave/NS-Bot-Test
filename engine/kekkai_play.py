@@ -180,20 +180,23 @@ def find_confirm_point(frame_bgr, y0=200, y1=900, x0=900, x1=1800):
     return (best[1], best[2]) if best else None
 
 
-def locate_panel(frame_bgr, log=None):
+def locate_panel(frame_bgr, log=None, cap=None):
     """Live rune positions and submit point. Falls back to the reference layout.
 
     Returns (rune_xy: dict, confirm_xy: tuple). Falling back is logged loudly,
-    because the reference layout is exactly what silently burned a mission.
+    because the reference layout is exactly what silently burned a mission -
+    and when we do fall back, `cap.fix` at least corrects it for however far the
+    whole GAME has drifted, which was the real cause that day.
     """
     runes = find_rune_buttons(frame_bgr)
     confirm = find_confirm_point(frame_bgr)
+    fix = cap.fix if cap is not None else (lambda x, y: (x, y))
     if runes is None:
         if log:
             log.info("could not locate the rune row; falling back to the "
-                     "REFERENCE layout, which may be %d px out - watch for "
-                     "slots that never fill", 114)
-        rune_xy = dict(RUNE_XY)
+                     "REFERENCE layout corrected for game drift %s",
+                     cap.game_offset() if cap is not None else "(unknown)")
+        rune_xy = {k: fix(*v) for k, v in RUNE_XY.items()}
     else:
         rune_xy = {name: pt for name, pt in zip(kekkai.RUNES, runes)}
         if log:
@@ -201,8 +204,8 @@ def locate_panel(frame_bgr, log=None):
     if confirm is None:
         if log:
             log.info("could not locate the kekkai centre; using the reference "
-                     "point")
-        confirm = CONFIRM_XY
+                     "point corrected for game drift")
+        confirm = fix(*CONFIRM_XY)
     return rune_xy, confirm
 
 
@@ -608,7 +611,7 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
         # was measured 116 px higher - and the discs are only r~55, so stale
         # coordinates miss the buttons entirely, fill no slots, and submit
         # nothing. That failure is SILENT: the history simply stays empty.
-        rune_xy, confirm_xy = locate_panel(cap.frame(gray=False), log)
+        rune_xy, confirm_xy = locate_panel(cap.frame(gray=False), log, cap)
         enter_guess(actor, guess, rune_xy=rune_xy)
         time.sleep(0.5)
         actor.click_pixel(*confirm_xy, why="confirm guess")

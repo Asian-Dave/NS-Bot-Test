@@ -1267,6 +1267,26 @@ Two corrections to the section above, both measured live:
 Note the band spans the *outer edges* of the first and last card, so its width is
 `(n-1)*pitch + card_width`. Forgetting the card width over-counts by one.
 
+### One shared drift correction, rather than an anchor per minigame
+
+`Capture.game_offset()` measures how far the game canvas has moved from the
+layout every constant was cut at (`REFERENCE_ORIGIN = (760, 0)` captured px),
+and `Capture.fix(x, y)` corrects a coordinate by it. It is cached for a second,
+because it is a CDP round trip and callers may ask per click.
+
+Use it wherever a HARDCODED coordinate is consumed — never on a point derived
+from a template match or a live detector, which are already in current-frame
+coordinates and would be corrected twice.
+
+Wired into `cards.board_box` / `cards.cell_xy` and the `kekkai_play.locate_panel`
+fallback. `ensure_focus` re-aligns every cycle so the correction is normally
+(0, 0); this is the safety net for when alignment cannot hold, so a displaced
+game degrades into slightly-off clicks instead of a cascade of subsystems each
+blaming itself.
+
+**A missing measurement returns (0, 0), never a guess** — an unlocatable game
+must not be able to move a click.
+
 ### THE GAME DRIFTS OUT OF ALIGNMENT, AND EVERY ABSOLUTE GEOMETRY GOES WITH IT
 
 A one-shot align cannot hold. Focus mode top-aligns the game once, then the page

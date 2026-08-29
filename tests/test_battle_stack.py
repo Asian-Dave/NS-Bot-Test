@@ -1842,6 +1842,66 @@ def test_kekkai_panel_is_located_not_assumed():
           "and the reference layout was not silently used")
 
 
+def test_game_drift_is_tracked_and_corrected():
+    """Absolute geometry must be corrected for however far the GAME has moved.
+
+    Every absolute coordinate here was measured with the canvas at one place.
+    When the game moves they all miss together, and each subsystem then reports
+    a fault in ITSELF rather than the real cause: the memory board went "board
+    gone", the kekkai runes became un-clickable, the Special tab "could not be
+    found". Measured during one episode: scrollY 60 and the iframe at y = -118
+    CSS = -236 captured px, matching the -237 by which the card grid had
+    apparently moved.
+    """
+    print("\ngame drift is tracked and corrected")
+    import capture as capture_mod
+    import cards as cards_mod
+
+    class StubCDP:
+        def __init__(self, x=380.0, y=0.0):
+            self.x, self.y = x, y
+        def evaluate(self, expr):
+            if "devicePixelRatio" in expr:
+                return 2
+            if "innerWidth" in expr:
+                return '{"w": 1720, "h": 720}'
+            if "getBoundingClientRect" in expr:
+                return '{"x": %r, "y": %r}' % (self.x, self.y)
+            return ""
+
+    cap = capture_mod.Capture(StubCDP())
+    check(cap.game_offset(ttl=0) == (0, 0),
+          "an aligned game needs no correction")
+    check(cap.fix(1434, 483) == (1434, 483),
+          "so coordinates pass through untouched")
+
+    # The measured failure: iframe at y = -118 CSS, dpr 2 -> -236 captured px.
+    cap.cdp.y = -118.0
+    off = cap.game_offset(ttl=0)
+    check(off == (0, -236), f"a drifted game is measured as {off}")
+    fx, fy = cap.fix(1434, 483)
+    check((fx, fy) == (1434, 247),
+          f"and a card cell is corrected to {(fx, fy)} - close to the 248 "
+          f"actually measured on screen")
+
+    # The board box moves with it, which is what stops "board gone".
+    bx, by, bw, bh = cards_mod.board_box(cap)
+    check((bx, by) == (cards_mod.BOARD_BOX[0], cards_mod.BOARD_BOX[1] - 236),
+          "the board box is corrected too")
+    check((bw, bh) == (cards_mod.BOARD_BOX[2], cards_mod.BOARD_BOX[3]),
+          "and its size is unchanged - only the origin moves")
+
+    # A game that cannot be found must NEVER move a click.
+    class Blind(StubCDP):
+        def evaluate(self, expr):
+            if "getBoundingClientRect" in expr:
+                return ""
+            return StubCDP.evaluate(self, expr)
+    cap2 = capture_mod.Capture(Blind())
+    check(cap2.game_offset(ttl=0) == (0, 0),
+          "a missing measurement yields no correction, never a guess")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1863,7 +1923,8 @@ def main():
                test_stop_kills_the_process_and_frees_the_lock,
                test_task_switch_interrupts_the_running_task,
                test_relog_rescues_an_unreadable_state,
-               test_kekkai_panel_is_located_not_assumed):
+               test_kekkai_panel_is_located_not_assumed,
+               test_game_drift_is_tracked_and_corrected):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

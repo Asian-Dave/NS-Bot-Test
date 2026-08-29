@@ -9,6 +9,8 @@ and CSS click coordinates are 1:1. On a Retina host it is 2, and captured pixels
 are twice the click coordinates. `self.dpr` records which world we are in so
 callers never have to guess.
 """
+import time
+
 import cv2
 import numpy as np
 
@@ -23,6 +25,8 @@ class Capture:
         # not enough, because the farm's own navigation never enters a gate and
         # the panel went stale for the whole of it.
         self.on_activity = None
+        self._off = (0, 0)
+        self._off_at = 0.0
         self.dpr = float(cdp.evaluate("window.devicePixelRatio") or 1)
         vp = cdp.evaluate("JSON.stringify({w: innerWidth, h: innerHeight})")
         import json
@@ -61,6 +65,56 @@ class Capture:
             x, y, w, h = region
             img = img[y:y + h, x:x + w]
         return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if gray else img
+
+    # ---- where the game actually is -------------------------------------
+    #
+    # EVERY absolute coordinate in this project was measured with the game
+    # canvas at one place. When the game moves, they all miss at once - and each
+    # subsystem then reports a fault in ITSELF, never the real cause: the memory
+    # board went "board gone", the kekkai runes became un-clickable, the Special
+    # tab "could not be found". Measured during one such episode: scrollY 60 and
+    # the iframe at y = -118 CSS = -236 captured px, matching the -237 by which
+    # the card grid had apparently moved.
+    #
+    # `Runner.ensure_focus` re-aligns every cycle so this SHOULD stay (0, 0).
+    # This is the safety net for when it cannot - focus mode off, an unexpected
+    # reflow - so a displaced game degrades into slightly-off clicks rather than
+    # a cascade of subsystems each blaming itself.
+    REFERENCE_ORIGIN = (760, 0)          # captured px, where constants were cut
+
+    def game_offset(self, ttl=1.0):
+        """How far the game has moved from the reference layout, captured px.
+
+        Cached for `ttl` seconds: it is one CDP round trip and callers may ask
+        per click. Returns (0, 0) if the game cannot be located, because a
+        missing measurement must never move a click.
+        """
+        now = time.time()
+        if now - self._off_at < ttl:
+            return self._off
+        self._off_at = now
+        try:
+            raw = self.cdp.evaluate(
+                "(()=>{const f=document.querySelector('iframe[src*=emulator]')"
+                "||document.querySelector('iframe[src*=play]');"
+                "if(!f)return '';const r=f.getBoundingClientRect();"
+                "return JSON.stringify({x:r.x,y:r.y});})()")
+            if not raw:
+                self._off = (0, 0)
+                return self._off
+            import json as _json
+            r = _json.loads(raw)
+            ox = int(round(r["x"] * self.dpr)) - self.REFERENCE_ORIGIN[0]
+            oy = int(round(r["y"] * self.dpr)) - self.REFERENCE_ORIGIN[1]
+            self._off = (ox, oy)
+        except Exception:
+            self._off = (0, 0)
+        return self._off
+
+    def fix(self, x, y):
+        """Correct a coordinate that was measured at the reference layout."""
+        dx, dy = self.game_offset()
+        return (int(x) + dx, int(y) + dy)
 
     def clip_for(self, x, y, w, h):
         """CAPTURED-pixel box -> the (clip, origin) pair `frame` needs.

@@ -155,9 +155,37 @@ def crop(frame, i, origin=(0, 0)):
                  max(0, x - CARD_W // 2):x + CARD_W // 2]
 
 
-def board_frame(cap):
-    """One board read: (image, origin). Cheap - clipped server-side."""
+def cell_xy(i, cap=None):
+    """Where cell `i` is, corrected for however far the GAME has drifted.
+
+    COLS/ROWS were measured with the canvas at its reference position. When the
+    game moves, every one of them misses together - and the symptom is not
+    "clicks are slightly off", it is `board_present` going False and this module
+    reporting "board gone". Measured during one such episode: the game sat 236
+    captured px high and the card rows measured 237 px from these constants.
+
+    `Runner.ensure_focus` re-aligns every cycle so the correction is normally
+    zero; passing `cap` makes this survive the times it is not.
+    """
+    x, y = COLS[i % len(COLS)], ROWS[i // len(COLS)]
+    return cap.fix(x, y) if cap is not None else (x, y)
+
+
+def board_box(cap=None):
+    """BOARD_BOX, corrected for game drift."""
     x, y, w, h = BOARD_BOX
+    if cap is not None:
+        x, y = cap.fix(x, y)
+    return (x, y, w, h)
+
+
+def board_frame(cap):
+    """One board read: (image, origin). Cheap - clipped server-side.
+
+    The box is corrected for game drift, so a displaced canvas produces a
+    slightly-offset read rather than "board gone".
+    """
+    x, y, w, h = board_box(cap)
     clip, origin = cap.clip_for(x, y, w, h)
     return cap.frame(gray=False, clip=clip), origin
 
