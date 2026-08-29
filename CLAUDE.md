@@ -1533,6 +1533,40 @@ screen that survives a reload is a human's problem, not something to loop on.
 **General shape of this bug: a recovery path that exists in two places, only one
 of which was taught the new trick.** Same as the character finder below.
 
+### THE CHARACTER BAND HAS A TOP AS WELL AS A BOTTOM — rooftops qualify
+
+Traversal clicked `(800, 292)` — up among the buildings, not on the path — so
+the run did nothing and logged a dead end. The finder had returned
+`character at (2400, 292)`, identical every pass, which is the static-object
+signature. A character stands on GROUND; village architecture is saturated and
+tall, so it passed every other filter.
+
+    real characters (every committed frame)   y 487 .. 805
+    live mis-picks                            y 237, 292
+
+`CHAR_BAND` floor is 400, between them with ~90 px of margin either side. A
+character that genuinely stands higher now yields None, which falls back to
+alternation — the safe failure.
+
+**ONE CALLER WITH DIFFERENT ARGUMENTS IS THE SAME BUG AS TWO IMPLEMENTATIONS.**
+Fixing the band exposed the divergence again in a new form: the runners shared
+the algorithm, but `kekkai_play` still passed its own y band `(200, 1150)` and x
+range `(800, 2650)`. On a village frame mission traversal correctly returned
+None while the Kekkai runner returned a ROOFTOP at (2604, 542) — and the x range
+mattered too, because it changes which blobs merge at the ROI edge. The wrapper
+now overrides NOTHING, and the test asserts that by reading its source, so the
+arguments cannot drift apart again.
+
+**And `find_figures` needed its OWN band.** It was sharing `CHAR_BAND`, and its
+mask is built from the ROI's own background MEDIAN — so narrowing the band did
+not merely crop the search, it changed the background estimate and an enemy at
+y=460 stopped passing at all. A change to the character finder silently broke
+enemy detection. They answer different questions:
+
+    CHAR_BAND (400, 950)   where OUR character can STAND
+    FIG_BAND  (200, 950)   where ANY figure can be - enemies sit further back
+                           and higher by perspective (one measured at y=460)
+
 ### TWO FINDERS FOR ONE IDEA — the seal hunt could not steer
 
 `kekkai_play` had its own `find_character`, still keyed to a RED robe, while

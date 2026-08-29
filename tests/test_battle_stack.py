@@ -2090,6 +2090,45 @@ def test_one_character_finder_shared_by_both_runners():
         check(kp.heading_from_spawn(stuck) == "left",
               "so it heads LEFT to look for seal 2, not back into the edge")
 
+    # THE Y BAND MATTERS AT BOTH ENDS. A character stands on ground; the scenery
+    # above it is saturated too. Live, the finder picked y=237 and y=292 - up in
+    # the rooftops - and traversal then clicked (800, 292) instead of the path.
+    real_ys = []
+    for rel in ("ref/auto/mission/traverse_char_left.png",
+                "ref/auto/mission/traverse_char_right.png",
+                "ref/auto/mission/traverse_shrub_decoy.png",
+                "ref/auto/tp/kekkai_seal2_hunt.png"):
+        im = cv2.imread(os.path.join(ROOT, rel))
+        if im is None:
+            continue
+        r = kp.find_character(im)
+        check(r is not None, f"still finds the character on {os.path.basename(rel)}")
+        if r:
+            real_ys.append(r[1])
+    if real_ys:
+        check(min(real_ys) >= 400,
+              f"every real character is below the band floor (min y {min(real_ys)})")
+        check(min(real_ys) > 292 + 80,
+              f"with clear margin over the rooftop mis-picks at y 237/292")
+
+    # A village frame must yield NOTHING - it is full of saturated architecture.
+    village = cv2.imread(os.path.join(ROOT, "ref/auto/lobby/village_lv66.png"))
+    if village is not None:
+        check(kp.find_character(village) is None,
+              "no character is invented in the village")
+        check(mission_mod.MissionRunner.find_character(village) is None,
+              "by either runner")
+
+    # ONE CALLER WITH DIFFERENT ARGUMENTS IS THE SAME BUG AS TWO
+    # IMPLEMENTATIONS. The kekkai runner used to pass its own y band
+    # (200, 1150) and x range (800, 2650); both changed the answer - the band
+    # returned a rooftop, and the x range changed which blobs merge at the edge.
+    import inspect as _i
+    src = _i.getsource(kp.find_character)
+    for bad in ("y0=", "y1=", "x0=", "x1="):
+        check(bad not in src.split('"""')[-1],
+              f"the kekkai wrapper overrides no {bad.strip('=')} argument")
+
     # The shared implementation must be the one in perceive, not a copy.
     check(inspect.getsourcefile(perceive.find_character).endswith("perceive.py"),
           "the finder lives in perceive, so there is only one of it")

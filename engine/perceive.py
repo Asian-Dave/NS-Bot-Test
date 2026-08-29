@@ -126,7 +126,7 @@ def find(frame_gray, tpl: Template):
                  center, scale, size), conf
 
 
-def find_character(frame_bgr, x0=760, x1=2680, y0=200, y1=950,
+def find_character(frame_bgr, x0=760, x1=2680, y0=400, y1=950,
                    sat=150, min_area=600, max_area=12000, min_h=95,
                    max_aspect=0.95):
     """Our own character, by SATURATION rather than hue. (x, y) or None.
@@ -143,6 +143,15 @@ def find_character(frame_bgr, x0=760, x1=2680, y0=200, y1=950,
         character (purple)    area 1245, bbox  62x107
         character (other map) area 1291, bbox  62x106
         character (third map) area 1585, bbox  79x123
+
+    THE Y BAND MATTERS AT BOTH ENDS. A character stands on GROUND, and the
+    scenery above it is saturated too. Measured across every committed frame,
+    real characters sit at y 487..805, while live mis-picks came in at y 237 and
+    292 - up in the rooftops, where traversal then clicked (800, 292) instead of
+    on the path. The default 400 floor sits between them with ~90 px of margin
+    either side. Callers should NOT override it with a wider band: the Kekkai
+    runner passed (200, 1150) and got a rooftop back on a frame where mission
+    traversal correctly returned None.
 
     TALLEST WINS, NOT LARGEST: a saturated shrub measured 48x77 / area 2534 and
     beat the real character's 79x123 / area 1585 on area alone. Heights are

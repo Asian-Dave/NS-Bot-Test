@@ -593,7 +593,13 @@ class MissionRunner:
     # A gate at 150 leaves exactly ONE blob on a frame with the character, and
     # ZERO on six frames where the game failed to draw it and on the lobby.
     CHAR_SAT = 150
-    CHAR_BAND = (200, 950)          # y: below the HUD, above the NPC rail
+    # y band the character can actually stand in. The TOP matters as much as the
+    # bottom: a character stands on GROUND, and scenery above it is saturated
+    # too. Measured across every committed frame, real characters sit at
+    # y 487..805, while live mis-picks came in at y 237 and 292 - up in the
+    # rooftops, where traversal then clicked (800, 292) instead of on the path.
+    # 400 sits between them with ~90 px of margin on each side.
+    CHAR_BAND = (400, 950)
     # Measured character heights: 106, 107, 123 across three maps. The tallest
     # saturated scenery that has fooled this is a 77px shrub, so 95 sits in the
     # gap with room on both sides.
@@ -620,6 +626,14 @@ class MissionRunner:
     #     enemy       frac(distance > 60) = 0.150
     #     our char    frac(distance > 60) = 0.570
     FIG_DIST = 60
+    # FIGURES GET THEIR OWN BAND, and it is wider than CHAR_BAND on purpose.
+    # These answer different questions: CHAR_BAND is where OUR character can
+    # STAND (measured 487..805), whereas an enemy sits further back and higher
+    # by perspective - one measured at y=460. Sharing the band also coupled them
+    # in a way that is easy to miss: the mask here is built from the ROI's own
+    # background MEDIAN, so narrowing the band silently changed which blobs pass
+    # and lost that enemy entirely.
+    FIG_BAND = (200, 950)
     FIG_MIN_H, FIG_MAX_H = 90, 400
     FIG_MIN_AREA = 3000
     FIG_MAX_ASPECT = 2.5        # blobs merge with their shadow, so this is loose
@@ -634,7 +648,7 @@ class MissionRunner:
         did something.
         """
         h, w = frame_bgr.shape[:2]
-        y0, y1 = cls.CHAR_BAND
+        y0, y1 = cls.FIG_BAND
         x0, x1 = cls.CANVAS_X0, cls.CANVAS_X1
         x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
         y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))

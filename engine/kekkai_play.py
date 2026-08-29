@@ -262,7 +262,7 @@ def find_kekkai(frame, x0=800, x1=2650, y0=200, y1=1150,
     return best[1] if best else None
 
 
-def find_character(frame, x0=800, x1=2650, y0=200, y1=1150):
+def find_character(frame):
     """Our own character. (x, y) or None.
 
     DELEGATES to the shared saturation finder. This used to be its own red-robe
@@ -272,7 +272,13 @@ def find_character(frame, x0=800, x1=2650, y0=200, y1=1150):
     traversal had already been fixed; this had not, and the two finders drifting
     apart is exactly how that survived.
     """
-    return perceive.find_character(frame, x0=x0, x1=x1, y0=y0, y1=y1)
+    # NOTHING is overridden - band and canvas both come from the shared default.
+    # Overriding is how this diverged twice: a y band of (200, 1150) returned a
+    # ROOFTOP where mission traversal correctly said None, and an x range of
+    # (800, 2650) vs (760, 2680) changed which blobs merge at the edge and so
+    # changed the answer again. One caller with different arguments is the same
+    # bug as two implementations.
+    return perceive.find_character(frame)
 
 def count_nodes(frame, centre, box=(260, 160), min_area=700, max_area=6000):
     """How many pale nodes the seal has — i.e. THE CODE LENGTH.
