@@ -1267,6 +1267,33 @@ Two corrections to the section above, both measured live:
 Note the band spans the *outer edges* of the first and last card, so its width is
 `(n-1)*pitch + card_width`. Forgetting the card width over-counts by one.
 
+### A LONE GREEN CHECK IS A DIALOG — the ladder acknowledges it generically
+
+The kekkai's **"You break the seal!"** dialog stranded the bot: 20 unrecognised
+frames and then a halt, with the check plainly on screen. It matched at
+**0.975** — but at **scale 1.1**, and the ladder swept scales only for a rung's
+TARGET, never for its ANCHOR. `Step(anchor_scales=...)` fixes that.
+
+Rather than cut a template per dialog, accept the glyph itself: it is the same
+check every confirm dialog uses. Two things make that safe:
+
+* It sits LATE in the ladder. Everything with its own meaning — Mission Success
+  (banks the reward), a Victory panel — is handled above and keeps its own rung.
+* **A mission detail panel's control is the same glyph, and clicking it STARTS
+  A MISSION.** So a `mission_list` rung (anchored on `list_back_arrow`, which
+  fires on both the list and the detail panel) backs out FIRST. By the time the
+  generic rung is reached, a green check can only be a dialog.
+
+Verified on eight frames: seal dialog -> `confirm_dialog`; detail, list and
+all-locked list -> `mission_list`; Mission Success and Victory -> their own
+rungs; lobby -> arrival; **combat -> nothing at all**.
+
+**Keep the anchor sweep NARROW.** A 21-scale sweep of a full frame costs ~1.5 s
+and this rung is reached on exactly the frames the ladder cannot otherwise name,
+so the expensive case would be the common one. The large sizes (1.18 Victory,
+1.84 Mission Success) already have their own rungs; a dialog's check measured
+1.10, so 1.00..1.20 in five steps is enough and 4x cheaper.
+
 ### One shared drift correction, rather than an anchor per minigame
 
 `Capture.game_offset()` measures how far the game canvas has moved from the

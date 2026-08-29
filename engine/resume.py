@@ -97,9 +97,15 @@ class Step:
 
     def __init__(self, name, anchor, action, target=None, offset=(0, 0),
                  threshold=None, note="", target_scales=None,
-                 target_threshold=None):
+                 target_threshold=None, anchor_scales=None):
         self.name = name
         self.anchor = anchor
+        # Sweep the ANCHOR across scales too, not just the target. The green
+        # check is drawn at several sizes (1.00 on a mission detail panel, 1.10
+        # on the "You break the seal!" dialog, 1.18 on a Victory panel, 1.84 on
+        # Mission Success), so a rung anchored on it sees nothing at all unless
+        # it looks at more than native size.
+        self.anchor_scales = anchor_scales
         self.action = action
         self.target = target or anchor
         self.offset = offset
@@ -217,6 +223,42 @@ DEFAULT_LADDER = [
     # It sits LOW in the ladder deliberately: it should only fire when nothing
     # else does, so a popup or a result panel on top of the Mission Room is
     # still handled first.
+    # BACK OUT OF A MISSION LIST OR DETAIL PANEL FIRST.
+    #
+    # This must come BEFORE the generic confirm rung below, because a detail
+    # panel's control IS a green check - and clicking it there does not
+    # acknowledge anything, it STARTS A MISSION. `list_back_arrow` fires on both
+    # the list and the detail panel (0.960..1.000, against 0.417..0.467
+    # everywhere else), so backing out here means the rung below can only ever
+    # meet a real dialog.
+    Step("mission_list", "list_back_arrow", "click",
+         note="a mission list or detail panel; back out rather than starting "
+              "something"),
+
+    # A LONE GREEN CHECK IS A DIALOG WAITING TO BE ACKNOWLEDGED.
+    #
+    # Measured live: the kekkai's "You break the seal!" dialog left the bot
+    # stuck for 20 unrecognised frames and then halted, with the check plainly
+    # on screen - matching at 0.975, but at SCALE 1.1, which nothing was looking
+    # for. Rather than cut a template per dialog, accept the check itself: it is
+    # the same glyph every confirm dialog uses.
+    #
+    # It sits this late deliberately. Everything with its own meaning - Mission
+    # Success, a Victory panel, a mission list - has already been handled above,
+    # so by here a green check can only be a dialog whose single control it is.
+    # The sweep is deliberately NARROW. A 21-scale sweep of a full frame costs
+    # ~1.5 s, and this rung is reached on exactly the frames the ladder cannot
+    # otherwise name - so the expensive case would be the common one. The wide
+    # sizes of this glyph (1.18 on a Victory panel, 1.84 on Mission Success)
+    # already have their own rungs above; a dialog's check measured 1.10, so
+    # covering 1.00..1.20 is enough and is 4x cheaper.
+    Step("confirm_dialog", "mission_start", "click",
+         anchor_scales=[1.00, 1.05, 1.10, 1.15, 1.20],
+         threshold=0.85,
+         target_scales=[1.00, 1.05, 1.10, 1.15, 1.20],
+         target_threshold=0.85,
+         note="a dialog whose only control is the green check - acknowledge it"),
+
     Step("mission_room", "close_room_x", "click",
          note="Mission Room / Special panel; closing it returns to the village"),
     Step("play", "play_btn", "click",
@@ -263,6 +305,9 @@ class Resumer:
             tpl = self.templates.get(step.anchor)
             if tpl is None:
                 continue
+            if step.anchor_scales:
+                from perceive import Template as _T
+                tpl = _T(tpl.name, tpl.path, tpl.threshold, step.anchor_scales)
             m, conf = find(frame_gray, tpl)
             limit = step.threshold if step.threshold is not None else tpl.threshold
             if conf < limit:

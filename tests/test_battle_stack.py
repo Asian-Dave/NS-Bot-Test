@@ -1526,20 +1526,26 @@ def test_closed_window_shuts_the_bot_down():
     # Browser gone: reconnect must give up and ask the process to exit, rather
     # than grinding through 30 attach attempts.
     attaches = []
-    r.browser_alive = lambda timeout=2.0: False
+    probes = []
+    def probe(timeout=2.0):
+        probes.append(1)
+        return False
+    r.browser_alive = probe
     orig_attach = app_mod.attach
     app_mod.attach = lambda *a, **k: attaches.append(1) or (_ for _ in ()).throw(
         RuntimeError("should not be called"))
     try:
-        t0 = time.time()
         ok = r.reconnect()
-        took = time.time() - t0
     finally:
         app_mod.attach = orig_attach
     check(ok is False, "reconnect reports failure when the browser is gone")
     check(r.quit is True, "and it asks the loop to exit")
     check(not attaches, "without ever paying for an attach")
-    check(took < 20, f"and it gives up quickly ({took:.1f}s, was up to ~16 min)")
+    # Assert on WORK DONE, not wall-clock. A timing bound measures the machine,
+    # not the code: under load this same check once read 964s for a path that
+    # does three probes and two 2s sleeps, and failed a change that was correct.
+    check(len(probes) <= 3,
+          f"it gives up after {len(probes)} probes, not 30 attach attempts")
 
     # Browser still there: a navigation must still reconnect normally.
     r2 = app_mod.Runner.__new__(app_mod.Runner)
@@ -1902,6 +1908,69 @@ def test_game_drift_is_tracked_and_corrected():
           "a missing measurement yields no correction, never a guess")
 
 
+def test_ladder_acknowledges_a_lone_green_check():
+    """A dialog whose only control is the green check must be acknowledged.
+
+    The kekkai's "You break the seal!" dialog left the bot stuck for 20
+    unrecognised frames and then halted, with the check plainly on screen. It
+    matched at 0.975 - but at SCALE 1.1, and nothing swept the ANCHOR across
+    scales, only targets. That one glyph is drawn at 1.00 on a mission detail
+    panel, 1.10 here, 1.18 on a Victory panel and 1.84 on Mission Success.
+
+    Accepting the check generically is safe ONLY because everything with its own
+    meaning is handled earlier in the ladder - and because a mission detail
+    panel, whose control is the same glyph but which STARTS A MISSION, is backed
+    out of first.
+    """
+    print("\nladder acknowledges a lone green check")
+    from perceive import find, Template
+    import bot as botmod, resume as resume_mod
+    import json as _json
+    cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
+    tpls = botmod.load_templates(cfg, LOG)
+    r = resume_mod.Resumer(type("C", (), {})(), None, tpls, LOG)
+
+    def first_rung(rel):
+        im = cv2.imread(os.path.join(ROOT, rel))
+        if im is None:
+            return None
+        g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+        for step in r.ladder:
+            t = tpls.get(step.anchor)
+            if t is None:
+                continue
+            if step.anchor_scales:
+                t = Template(t.name, t.path, t.threshold, step.anchor_scales)
+            if t.h > g.shape[0] or t.w > g.shape[1]:
+                continue
+            _, c = find(g, t)
+            lim = step.threshold if step.threshold is not None else t.threshold
+            if c >= lim:
+                return step.name
+        return "none"
+
+    check(first_rung("ref/auto/tp/seal_broken_dialog.png") == "confirm_dialog",
+          "the seal-broken dialog is acknowledged, not halted on")
+
+    # THE SAFETY CASE: the same glyph on a detail panel starts a mission, so the
+    # ladder must back out instead.
+    for rel, what in (("ref/auto/mission/detail_00.png", "detail panel"),
+                      ("ref/auto/mission/list_00.png", "mission list"),
+                      ("ref/auto/mission/list_all_locked.png", "all-locked list")):
+        check(first_rung(rel) == "mission_list",
+              f"a {what} is backed out of, NOT confirmed")
+
+    # Panels that mean something specific keep their own rungs.
+    check(first_rung("ref/auto/panels/mission_success.png") == "mission_success",
+          "Mission Success still uses its own rung (it banks the reward)")
+    check(first_rung("ref/auto/panels/victory.png") == "result_panel",
+          "a Victory panel still uses its own rung")
+    check(first_rung("ref/auto/lobby_full.png") == "lobby",
+          "the lobby is still an arrival")
+    check(first_rung("ref/auto/mission/COMBAT.png") == "none",
+          "and combat matches nothing - the ladder must not click in a fight")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1924,7 +1993,8 @@ def main():
                test_task_switch_interrupts_the_running_task,
                test_relog_rescues_an_unreadable_state,
                test_kekkai_panel_is_located_not_assumed,
-               test_game_drift_is_tracked_and_corrected):
+               test_game_drift_is_tracked_and_corrected,
+               test_ladder_acknowledges_a_lone_green_check):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
