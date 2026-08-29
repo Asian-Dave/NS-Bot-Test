@@ -1055,13 +1055,28 @@ of identical circles.
 `find_confirm_point` locates the submit disc as the large round dark blob in the
 scroll (measured area 32695, bbox 207x201).
 
-**And verify the guess REGISTERED.** After submitting, if no new row appeared,
-the clicks did not land — abandon rather than reading phantom rows. Reading an
-unplayed row is what disguised a geometry fault as a digit-recognition fault for
-a whole mission.
+**And verify the guess REGISTERED — but only with the PANEL STILL OPEN.** After
+submitting, if no new row appeared, the clicks did not land — abandon rather than
+reading phantom rows. Reading an unplayed row is what disguised a geometry fault
+as a digit-recognition fault for a whole mission.
+
+**ORDER MATTERS HERE, AND GETTING IT WRONG THROWS AWAY WINS.** A correct guess
+closes the panel instantly, and a closed panel has no filled rows — so asking
+"did it register?" BEFORE the closed-panel check reports "the clicks did not
+land" for a puzzle that was just SOLVED. Measured live, on the very sequence
+this file already records:
+
+    Green,Red,Blue     -> 0 green, 1 gold
+    Red,Black,Yellow   -> 2 green, 0 gold
+    Red,Black,White    -> panel closed  ->  "did not register", abandoned
+
+`(Red,Black,White)` is the answer that produces "You break the seal!". The
+solver had narrowed 216 candidates down to it correctly and then threw the win
+away. This is the SAME trap documented just below for digit reading — check for
+a closed panel FIRST — walked into again by a later edit one branch higher.
 
 Digit exemplars are still harvested by hand as new renderings appear (`0` now
-has 8 variants, `1` three, `2` one, and **3+ none at all**). A glare-cleanup
+has 9 variants, `1` three, `2` two — outline AND solid — and **3+ none at all**). A glare-cleanup
 filter was tried and measured WORSE — dropping border-touching blobs removed
 most of the digit too (match 0.501 -> 0.196), because the outline touches the
 border as well.
