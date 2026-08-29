@@ -229,14 +229,27 @@ class Runner:
             _write_control("pause")
             self.log.info("operator: PAUSE")
         elif c == "stop":
-            # STOPS THE BOT, NOT THE PANEL. Stop used to end the process, and the
-            # dock vanished with it - the injection lives in the CDP session that
-            # created it, so when the process goes, so does the panel. Pressing
-            # Stop and losing your control panel is not what Stop means. Use Quit
-            # to actually exit.
-            self.mode = "stopped"
+            # STOP ENDS THE PROCESS, IMMEDIATELY, FROM WHEREVER WE ARE.
+            #
+            # A cooperative stop is not good enough here. `_apply` is reached
+            # from `pump`, which is called from the capture hook and the gate's
+            # poll loop - and BOTH of those wrap the call in `except Exception`,
+            # so an exception raised here to unwind the stack is swallowed. The
+            # flag-and-check alternative only takes effect at the next place
+            # something bothers to look, which mid-mission can be a whole battle
+            # away. Pressing Stop and watching the bot finish the fight is not
+            # what Stop means.
+            #
+            # This used to be avoided because "the dock vanished with the
+            # process". It no longer does: the panel is injected into the PAGE,
+            # so it outlives us, and its staleness banner now says, accurately,
+            # that no bot is attached and prints the command to relaunch. So the
+            # operator is left with a visible, honest panel rather than a live
+            # one that ignores them.
+            self.log.info("operator: STOP - terminating the bot process")
             _write_control("stop")
-            self.log.info("operator: STOP (panel stays; press Run to resume)")
+            self.mode = "stopped"
+            self._hard_exit()
         elif c == "skill":
             k = cmd.get("arg")
             if k in SKILL_SLOTS:
@@ -280,9 +293,17 @@ class Runner:
             self.log.info("operator: focus mode %s",
                           "ON" if self.focus_wanted else "off")
         elif c == "quit":
-            self.quit = True
+            # Same immediacy as Stop, and the distinction stays meaningful:
+            #   Stop -> the bot dies, the PANEL STAYS (saying no bot is attached)
+            #   Quit -> the bot dies and the panel is removed as well
+            self.log.info("operator: QUIT - removing the panel and exiting")
             _write_control("stop")
-            self.log.info("operator: QUIT - closing the panel and exiting")
+            self.mode = "stopped"
+            try:
+                self.dock.remove()
+            except Exception:
+                pass
+            self._hard_exit()
         elif c == "task":
             if any(t["key"] == cmd.get("arg") for t in TASKS):
                 self.task = cmd["arg"]
@@ -297,6 +318,33 @@ class Runner:
             browser.pin_viewport(self.cdp, *VIEWPORT)
 
     HEARTBEAT_EVERY = 3.0        # seconds; see the note below
+
+    def _hard_exit(self, code=0):
+        """Leave now, but leave things tidy.
+
+        `os._exit` skips `finally`, so the pid lock has to be released HERE -
+        forgetting it is what produces "another bot window is already running"
+        on the next launch. Everything is best-effort: a stop must not be able
+        to fail.
+        """
+        try:
+            self.push()              # let the panel show 'stopped' first
+        except Exception:
+            pass
+        try:
+            self.cdp.close()
+        except Exception:
+            pass
+        try:
+            lock = os.path.join(ROOT, "run/app.lock")
+            with open(lock) as f:
+                mine = f.read().strip() == str(os.getpid())
+            if mine:
+                os.unlink(lock)
+        except Exception:
+            pass
+        print("  stopped by the operator", flush=True)
+        os._exit(code)
 
     def pump(self, poll=0.25):
         for cmd in self.dock.commands(poll=poll):

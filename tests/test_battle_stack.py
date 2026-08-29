@@ -1606,6 +1606,69 @@ def test_panel_stays_alive_during_a_mission():
           "the beat interval is well inside the panel's staleness window")
 
 
+def test_stop_kills_the_process_and_frees_the_lock():
+    """Stop must end the process at once, and must not strand the pid lock.
+
+    A cooperative stop is not enough: `_apply` is reached from `pump`, which is
+    called from the capture hook and the gate's poll loop, and BOTH wrap the
+    call in `except Exception` - so raising to unwind the stack is swallowed.
+    A flag would only be noticed at the next place something looks, which
+    mid-mission can be a whole battle away.
+
+    `os._exit` skips `finally`, so the lock must be released by `_hard_exit`
+    itself - forgetting that is exactly what produces "another bot window is
+    already running" on the next launch.
+    """
+    print("\nstop kills the process and frees the lock")
+    import app as app_mod
+
+    lock = os.path.join(ROOT, "run/app.lock")
+    prior = None
+    if os.path.exists(lock):
+        with open(lock) as f:
+            prior = f.read()
+    try:
+        with open(lock, "w") as f:
+            f.write(str(os.getpid()))
+
+        exits = []
+        real_exit = os._exit
+        os._exit = lambda code=0: exits.append(code)
+        r = app_mod.Runner.__new__(app_mod.Runner)
+        r.log = LOG
+        r.mode = "running"
+        r.cdp = type("C", (), {"close": lambda self: None})()
+        r.push = lambda: None
+        try:
+            r._hard_exit()
+        finally:
+            os._exit = real_exit
+
+        check(exits == [0], f"the process is exited immediately ({exits})")
+        check(not os.path.exists(lock),
+              "and OUR pid lock is released, so the next launch is not refused")
+
+        # A lock owned by SOMEBODY ELSE must never be deleted.
+        with open(lock, "w") as f:
+            f.write("999999")
+        exits2 = []
+        os._exit = lambda code=0: exits2.append(code)
+        try:
+            r._hard_exit()
+        finally:
+            os._exit = real_exit
+        check(os.path.exists(lock),
+              "another process's lock is left alone")
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+        if prior is not None:
+            with open(lock, "w") as f:
+                f.write(prior)
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -1623,7 +1686,8 @@ def main():
                test_character_finder_rejects_scenery,
                test_map_is_cleared_before_leaving,
                test_closed_window_shuts_the_bot_down,
-               test_panel_stays_alive_during_a_mission):
+               test_panel_stays_alive_during_a_mission,
+               test_stop_kills_the_process_and_frees_the_lock):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

@@ -256,6 +256,36 @@ against a 12 s window, across pagination and combat.
 Re-install `cap.on_activity` after a reconnect — the Capture object is new, and
 forgetting leaves the panel permanently stale from that point.
 
+### Stop ENDS THE PROCESS, and it has to do so from wherever it is
+
+A cooperative stop does not work here, and the reason is structural: `_apply`
+is reached from `pump`, which is called from the capture hook and the gate's
+poll loop — and **both wrap the call in `except Exception`**, so an exception
+raised to unwind the stack is silently swallowed. The flag-and-check
+alternative only takes effect wherever something next bothers to look, which
+mid-mission can be a whole battle away. Pressing Stop and watching the bot
+finish the fight is not what Stop means.
+
+So Stop calls `os._exit` via `_hard_exit`. Measured: pressed during round 2 of
+a battle, the process was gone in **under 2 s**.
+
+This was previously avoided on the grounds that "the dock vanishes with the
+process". **It does not** — the panel is injected into the PAGE, so it outlives
+us; verified after a Stop that the element is still there and its banner reads
+"no bot attached", with the relaunch command. That is a visible, honest panel
+rather than a live one that ignores you, and it is what makes killing the
+process acceptable now when it was not before.
+
+`os._exit` skips `finally`, so **`_hard_exit` must release the pid lock
+itself** — forgetting that is precisely what produces "another bot window is
+already running" on the next launch. It deletes the lock only when the file
+holds OUR pid, never another process's.
+
+The two buttons now differ only in what they leave behind:
+
+    Stop -> the bot dies, the panel STAYS (and says no bot is attached)
+    Quit -> the bot dies and the panel is removed too
+
 ### Closing the window must CLOSE THE BOT
 
 A closed window and a navigated page look identical at the socket — both simply
