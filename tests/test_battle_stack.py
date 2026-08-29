@@ -2022,6 +2022,71 @@ def test_stop_aborts_the_task_but_keeps_the_panel():
         os._exit = real_exit
 
 
+def test_one_character_finder_shared_by_both_runners():
+    """Mission traversal and the Kekkai hunt must use the SAME finder.
+
+    They had two. Mission traversal was fixed to find a purple-robed character
+    by saturation; `kekkai_play` kept its own red-robe search, which returns
+    None for this character - so `heading_from_spawn` fell back to "right" and
+    ran it straight back through the edge it had just entered by, over and over.
+    That is the seal hunt "getting stuck where movement was necessary".
+
+    Two implementations of one idea is how that survived a fix, so the test
+    asserts they agree rather than that each works.
+    """
+    print("\none character finder, shared by both runners")
+    import kekkai_play as kp
+    import mission as mission_mod
+    import perceive
+
+    frames = ["ref/auto/mission/traverse_char_right.png",
+              "ref/auto/mission/traverse_char_left.png",
+              "ref/auto/mission/traverse_shrub_decoy.png"]
+    for rel in frames:
+        f = cv2.imread(os.path.join(ROOT, rel))
+        if f is None:
+            continue
+        a = kp.find_character(f)
+        b = mission_mod.MissionRunner.find_character(f)
+        name = os.path.basename(rel)
+        check(a is not None, f"the kekkai runner finds the character on {name}")
+        check(b is not None, f"mission traversal finds it too on {name}")
+        if a and b:
+            check(abs(a[0] - b[0]) < 40 and abs(a[1] - b[1]) < 40,
+                  f"and they agree on {name} ({a} vs {b})")
+
+    # The heading must come from the character, not from the "right" default.
+    right_edge = cv2.imread(os.path.join(
+        ROOT, "ref/auto/mission/traverse_char_right.png"))
+    left_edge = cv2.imread(os.path.join(
+        ROOT, "ref/auto/mission/traverse_char_left.png"))
+    if right_edge is not None:
+        check(kp.heading_from_spawn(right_edge) == "left",
+              "a character at the RIGHT edge heads left, away from where it "
+              "came in")
+    if left_edge is not None:
+        check(kp.heading_from_spawn(left_edge) == "right",
+              "and one at the left edge heads right")
+
+    # The live frame the seal hunt got stuck on: "Seals: 1 / 2", character
+    # standing right of centre with no seal on screen. The old finder returned
+    # None here, so the heading defaulted to "right" - back through the edge it
+    # had just come in by.
+    stuck = cv2.imread(os.path.join(ROOT, "ref/auto/tp/kekkai_seal2_hunt.png"))
+    if stuck is not None:
+        p = kp.find_character(stuck)
+        check(p is not None, f"the stuck seal-hunt frame locates the character ({p})")
+        if p:
+            check(p[0] > (kp.CANVAS_X0 + kp.CANVAS_X1) // 2,
+                  "which is right of centre")
+        check(kp.heading_from_spawn(stuck) == "left",
+              "so it heads LEFT to look for seal 2, not back into the edge")
+
+    # The shared implementation must be the one in perceive, not a copy.
+    check(inspect.getsourcefile(perceive.find_character).endswith("perceive.py"),
+          "the finder lives in perceive, so there is only one of it")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2037,6 +2102,7 @@ def main():
                test_restriction_short_circuits_the_rotation,
                test_battle_between_turns_is_not_scenery,
                test_character_finder_rejects_scenery,
+               test_one_character_finder_shared_by_both_runners,
                test_map_is_cleared_before_leaving,
                test_closed_window_shuts_the_bot_down,
                test_panel_stays_alive_during_a_mission,

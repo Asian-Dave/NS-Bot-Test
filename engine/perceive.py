@@ -126,6 +126,53 @@ def find(frame_gray, tpl: Template):
                  center, scale, size), conf
 
 
+def find_character(frame_bgr, x0=760, x1=2680, y0=200, y1=950,
+                   sat=150, min_area=600, max_area=12000, min_h=95,
+                   max_aspect=0.95):
+    """Our own character, by SATURATION rather than hue. (x, y) or None.
+
+    Hue is the wrong invariant - gear changes. At Lv 65 this character wears
+    purple, and a red-robe search returns None, which is how the Kekkai seal
+    hunt lost its heading: `heading_from_spawn` then defaulted to "right" and
+    ran the character back through the edge it had just entered by, repeatedly.
+
+    What does not change is that a player sprite is far more saturated than the
+    painted scenery, and is small and TALL. Measured with the map band isolated:
+
+        desert sand           saturation median 111, p90 126
+        character (purple)    area 1245, bbox  62x107
+        character (other map) area 1291, bbox  62x106
+        character (third map) area 1585, bbox  79x123
+
+    TALLEST WINS, NOT LARGEST: a saturated shrub measured 48x77 / area 2534 and
+    beat the real character's 79x123 / area 1585 on area alone. Heights are
+    106, 107 and 123 against the shrub's 77, so `min_h` 95 sits in the gap.
+
+    This is shared by mission traversal and the Kekkai runner deliberately -
+    they had two different finders and only one of them was fixed.
+    """
+    h, w = frame_bgr.shape[:2]
+    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
+    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    hsv = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+    m = (((hsv[:, :, 1] > sat) & (hsv[:, :, 2] > 60)).astype(np.uint8) * 255)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    n, _, st, ce = cv2.connectedComponentsWithStats(m)
+    best = None
+    for i in range(1, n):
+        a = st[i, cv2.CC_STAT_AREA]
+        bw, bh = st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
+        if not (min_area <= a <= max_area) or bh < min_h:
+            continue
+        if bw / max(1, bh) > max_aspect:
+            continue
+        if best is None or bh > best[0]:
+            best = (bh, int(ce[i][0]) + x0, int(ce[i][1]) + y0)
+    return (best[1], best[2]) if best else None
+
+
 def mask_stats(frame_bgr, lo, hi):
     """Count and locate pixels inside an inclusive BGR range.
 

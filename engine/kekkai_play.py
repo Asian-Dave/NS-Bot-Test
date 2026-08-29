@@ -55,6 +55,7 @@ from act import Actor
 from capture import Capture
 from cdp import CDP, find_page_target
 import kekkai
+import perceive
 
 # --- measured geometry, captured px ----------------------------------------
 RUNE_XY = {
@@ -261,39 +262,17 @@ def find_kekkai(frame, x0=800, x1=2650, y0=200, y1=1150,
     return best[1] if best else None
 
 
-def find_character(frame, x0=800, x1=2650, y0=200, y1=1150,
-                   min_area=1500, max_area=9000, max_aspect=0.80, min_fill=0.22):
-    """Locate our own character by its red robe. Returns (x, y) or None.
+def find_character(frame, x0=800, x1=2650, y0=200, y1=1150):
+    """Our own character. (x, y) or None.
 
-    This is the exact blob that fooled the kekkai detector, so its signature is
-    already measured: area 4040, bbox 65x170, fill 0.366, aspect 0.38. It is the
-    inverse of a kekkai - small, TALL and fairly solid, where a kekkai is large,
-    wide and sparse. Reusing the same segmentation for both means one colour pass
-    tells us where we are AND where the seal is.
+    DELEGATES to the shared saturation finder. This used to be its own red-robe
+    search, which returned None for a purple-robed character - so
+    `heading_from_spawn` fell back to "right" and ran the character straight
+    back through the edge it had just come in by, over and over. Mission
+    traversal had already been fixed; this had not, and the two finders drifting
+    apart is exactly how that survived.
     """
-    fh, fw = frame.shape[:2]
-    x0, x1 = max(0, min(x0, fw)), max(0, min(x1, fw))
-    y0, y1 = max(0, min(y0, fh)), max(0, min(y1, fh))
-    if x1 - x0 < 8 or y1 - y0 < 8:
-        return None
-    roi = frame[y0:y1, x0:x1]
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    m = ((((hsv[:, :, 0] < 10) | (hsv[:, :, 0] > 170))
-          & (hsv[:, :, 1] > 110) & (hsv[:, :, 2] > 70)).astype(np.uint8) * 255)
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8))
-    n, _, st, ce = cv2.connectedComponentsWithStats(m)
-    best = None
-    for i in range(1, n):
-        a = st[i, cv2.CC_STAT_AREA]
-        if not (min_area <= a <= max_area):
-            continue
-        w, h = st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
-        if w * h == 0 or w / max(1, h) > max_aspect or a / (w * h) < min_fill:
-            continue
-        if best is None or a > best[0]:
-            best = (a, (x0 + int(ce[i][0]), y0 + int(ce[i][1])))
-    return best[1] if best else None
-
+    return perceive.find_character(frame, x0=x0, x1=x1, y0=y0, y1=y1)
 
 def count_nodes(frame, centre, box=(260, 160), min_area=700, max_area=6000):
     """How many pale nodes the seal has — i.e. THE CODE LENGTH.
