@@ -2428,6 +2428,68 @@ def test_no_viewport_lets_the_panel_cover_the_game():
           f"({2 * (game_w / 2 + panel_w):.0f})")
 
 
+def test_panel_recovers_its_content_after_a_reload():
+    """A reload leaves the panel a bare skeleton; it must be re-rendered.
+
+    When the page reloads, the BROWSER re-runs the injected bootstrap on the new
+    document by itself, and that first render carries NO STATE - so the task
+    buttons and every value are blank. Python is not involved and never learns
+    it happened. During a long mission only the heartbeat runs, so the panel sat
+    empty-but-alive for the rest of the task: an empty Task bar, and focus mode
+    off, which is exactly what the operator reported.
+
+    The heartbeat now reports "empty", which triggers a full render and a
+    refocus without waiting for the task to end.
+    """
+    print("\npanel recovers its content after a reload")
+    import app as app_mod
+
+    calls = {"push": 0, "refocus": 0, "beats": 0}
+
+    class StubDock:
+        def __init__(self, verdict): self.verdict = verdict
+        def commands(self, poll=0.0): return []
+        def heartbeat(self):
+            calls["beats"] += 1
+            return self.verdict
+
+    def runner(verdict):
+        r = app_mod.Runner.__new__(app_mod.Runner)
+        r.log = LOG
+        r.dock = StubDock(verdict)
+        r._last_beat = 0.0
+        r.push = lambda: calls.__setitem__("push", calls["push"] + 1)
+        r._refocus_after_reload = lambda: calls.__setitem__(
+            "refocus", calls["refocus"] + 1)
+        return r
+
+    # Healthy panel: heartbeat only, no re-render.
+    runner("ok").beat()
+    check(calls["beats"] == 1, "the heartbeat is sent")
+    check(calls["push"] == 0, "a healthy panel is NOT re-rendered every beat")
+    check(calls["refocus"] == 0, "and focus is not touched")
+
+    # Emptied by a reload: render and refocus, without waiting for the task.
+    calls.update(push=0, refocus=0)
+    runner("empty").beat()
+    check(calls["push"] == 1, "an emptied panel triggers a full re-render")
+    check(calls["refocus"] == 1, "and focus mode is restored")
+
+    # Refocus must respect the operator turning focus off.
+    r = app_mod.Runner.__new__(app_mod.Runner)
+    r.log = LOG
+    r.focus_wanted = False
+    applied = []
+    r.dock = type("D", (), {
+        "focus_state": lambda self: False,
+        "game_ready": lambda self: True,
+        "focus": lambda self, on=True: applied.append(on) or "focused",
+    })()
+    app_mod.Runner._refocus_after_reload(r)
+    check(not applied,
+          "focus is NOT forced back on when the operator turned it off")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2448,6 +2510,7 @@ def main():
                test_map_is_cleared_before_leaving,
                test_closed_window_shuts_the_bot_down,
                test_panel_stays_alive_during_a_mission,
+               test_panel_recovers_its_content_after_a_reload,
                test_quit_exits_cleanly_and_frees_the_lock,
                test_lock_verifies_identity_not_just_liveness,
                test_no_viewport_lets_the_panel_cover_the_game,

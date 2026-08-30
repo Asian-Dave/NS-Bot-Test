@@ -230,6 +230,30 @@ first, and each failed silently:
   the operator's next button press is the one now parked. That hung live.
   `Controls.on_wait` is pumped every poll, so Run and Stop stay live mid-mission.
 
+### A RELOAD LEAVES THE PANEL A SKELETON — the heartbeat must notice
+
+When the page reloads, the BROWSER re-runs the injected bootstrap on the new
+document by itself, and that first render carries **no state**: the Task buttons
+and every value come up blank. Python is not involved in that re-injection and
+never learns it happened. During a long task only `beat()` runs — which updates
+the liveness clock but not the content — so the panel sat **empty but alive**
+(no staleness banner) for the rest of the mission, and focus mode stayed off
+because `ensure_focus` only runs BETWEEN cycles.
+
+Both reported symptoms — "the task bar is broken again" and "not in focus mode
+after relog" — were this one cause.
+
+So the heartbeat reports whether the panel still has CONTENT, not merely that we
+are alive: `"empty"` triggers a full render and a refocus immediately, rather
+than at the end of a task that may be minutes away. `relog()` does both
+explicitly too, so that path does not wait on the next beat.
+
+**Do not answer this by re-rendering every beat.** A full render is a large
+payload and the beat runs several times a second; the whole point of the
+heartbeat is that it is one assignment. The test pins that a HEALTHY panel is
+never re-rendered by the beat, and that focus is not forced back on when the
+operator deliberately turned it off.
+
 ### The panel's "no bot attached" banner needs a HEARTBEAT, hung off CAPTURE
 
 The panel decides it has been abandoned from the age of its last update, and a

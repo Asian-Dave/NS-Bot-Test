@@ -468,6 +468,14 @@ class Runner:
         self.cdp.call("Page.reload")
         time.sleep(4.0)
         browser.pin_viewport(self.cdp, *VIEWPORT)
+        # The reload re-injected the panel with no state and dropped focus.
+        # Restore both here rather than leaving it to the next cycle, which a
+        # running task may not reach for minutes.
+        try:
+            self.push()
+            self._refocus_after_reload()
+        except Exception:
+            pass
         try:
             from geometry import BattleGeometry
             BattleGeometry.forget()      # the layout may have moved
@@ -518,7 +526,33 @@ class Runner:
             return
         self._last_beat = now
         try:
-            self.dock.heartbeat()
+            if self.dock.heartbeat() == "empty":
+                # The page reloaded and re-injected the panel with no state, so
+                # it is showing a bare skeleton - no task buttons, no values.
+                # Re-render NOW rather than at the end of the task, which during
+                # a mission can be minutes away.
+                self.log.info("panel re-injected empty (reload?) - re-rendering")
+                self.push()
+                # A reload also drops focus mode, and `ensure_focus` only runs
+                # between cycles - so restore it here too or the game stays
+                # unfocused for the rest of the task.
+                self._refocus_after_reload()
+        except Exception:
+            pass
+
+    def _refocus_after_reload(self):
+        """Re-apply focus after the page reloaded under a running task."""
+        if not self.focus_wanted:
+            return
+        try:
+            if self.dock.focus_state():
+                return
+            if not self.dock.game_ready():
+                return
+            if self.dock.focus(True) in ("focused", "already"):
+                self.focus_on = True
+                self.focus_aligned = False
+                self.log.info("focus mode restored after the reload")
         except Exception:
             pass
 

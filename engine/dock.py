@@ -573,7 +573,9 @@ class Dock:
     def render(self, state):
         payload = json.dumps(state)
         return self.cdp.evaluate(
-            f"(window.__nsbotRender ? window.__nsbotRender({payload}) : 'no-panel')")
+            f"(window.__nsbotState = {payload},"
+            f" window.__nsbotRender ? window.__nsbotRender({payload}) "
+            f": 'no-panel')")
 
     def focus(self, on=True):
         """Hide the rest of the page so only the game (and this panel) shows."""
@@ -582,14 +584,20 @@ class Dock:
             f" : 'no-panel')")
 
     def heartbeat(self):
-        """Tell the panel the bot is still alive, without a full render.
+        """Mark the panel alive, and report whether it still has its CONTENT.
 
-        The panel decides it has been abandoned from the age of its last update.
-        A render is a large payload; this is one assignment, so it is cheap
-        enough to send from the gate's poll loop during a long mission.
+        Returns "ok" normally, or "empty" if the panel is showing a bare
+        skeleton - which happens whenever the page reloads: the browser re-runs
+        the injected bootstrap on the new document by itself, and that first
+        render has NO STATE, so the task buttons and every value are blank.
+        Python is not involved in that re-injection and so never learns it
+        happened; during a long mission only the heartbeat runs, so the panel
+        sat empty-but-alive for the rest of the task.
         """
         return self.cdp.evaluate(
-            "(window.__nsbotLastRender = Date.now(), 'ok')")
+            "(window.__nsbotLastRender = Date.now(),"
+            " (window.__nsbotState && Object.keys(window.__nsbotState).length)"
+            "  ? 'ok' : 'empty')")
 
     def align(self):
         """Re-assert top alignment once the layout has settled."""
