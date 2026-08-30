@@ -418,9 +418,7 @@ class Runner:
             pass
         try:
             lock = os.path.join(ROOT, "run/app.lock")
-            with open(lock) as f:
-                mine = f.read().strip() == str(os.getpid())
-            if mine:
+            if _lock_holder(lock) == os.getpid():
                 os.unlink(lock)
         except Exception:
             pass
@@ -1001,6 +999,70 @@ def _write_skills(order):
     _write_json(SKILLS_PATH, order)
 
 
+def _proc_cmd(pid):
+    """The command line of `pid`, or "" if it cannot be read."""
+    try:
+        import subprocess
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=3)
+        return (out.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _lock_holder(path, marker="app.py"):
+    """The pid of a LIVE instance of this program, or None.
+
+    Verifies identity, not just liveness - see the note at the call site. A lock
+    naming a recycled pid, or one whose process is no longer this program, is
+    treated as stale and removed, so a launch is never refused by a stranger.
+    """
+    try:
+        with open(path) as f:
+            raw = f.read().strip()
+    except OSError:
+        return None
+    try:
+        rec = json.loads(raw)
+        pid, saved = int(rec.get("pid", 0)), rec.get("cmd", "")
+    except Exception:
+        # An older, bare-pid lock. Accept it, but hold it to the same test.
+        try:
+            pid, saved = int(raw or 0), ""
+        except ValueError:
+            pid, saved = 0, ""
+    if not pid:
+        return None
+    try:
+        os.kill(pid, 0)                       # raises unless it is alive
+    except (ProcessLookupError, PermissionError, OSError):
+        _drop_lock(path)
+        return None
+    cmd = _proc_cmd(pid)
+    # IDENTITY FIRST. If the lock recorded the holder's command line, the live
+    # process must still have exactly that - which is what distinguishes "our
+    # instance is running" from "the OS handed that number to something else".
+    # The marker is only the fallback for a legacy lock that recorded no
+    # command, and it is deliberately not applied when identity already matched:
+    # a legitimate launch may not have "app.py" in its command line at all.
+    if saved:
+        if cmd and cmd == saved:
+            return pid
+        _drop_lock(path)
+        return None
+    if cmd and marker not in cmd:
+        _drop_lock(path)
+        return None
+    return pid
+
+
+def _drop_lock(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def _write_control(value):
     p = os.path.join(ROOT, "run/bot.control")
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -1024,22 +1086,26 @@ def main():
     # together, each pushing its own state into the shared panel every second and
     # each CLICKING THE GAME. From the outside that looks like the panel toggling
     # at random and the bot fighting itself - which is exactly what it was.
+    #
+    # A BARE PID IS NOT ENOUGH: PIDS GET REUSED. `os.kill(pid, 0)` only proves
+    # SOMETHING is alive, not that it is us. Observed live - the lock held a pid
+    # from a long-dead instance, the OS had recycled that number for an
+    # unrelated process, and the launch was refused with "another bot window is
+    # already running" while no bot was running at all. The operator's only
+    # recourse was to delete the lock, which is exactly the habit that let eight
+    # instances stack up in the first place.
+    #
+    # So the lock records WHO, and a claimant must match: same pid AND a command
+    # line that still looks like this program.
     lock = os.path.join(ROOT, "run/app.lock")
     os.makedirs(os.path.dirname(lock), exist_ok=True)
-    try:
-        with open(lock) as f:
-            other = int((f.read() or "0").strip() or 0)
-        os.kill(other, 0)                     # raises unless it is alive
-    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
-        other = None
-    except Exception:
-        other = None
+    other = _lock_holder(lock)
     if other and other != os.getpid():
         print(f"  another bot window is already running (pid {other}). "
               f"Close it first, or: kill {other}", flush=True)
         return 3
     with open(lock, "w") as f:
-        f.write(str(os.getpid()))
+        json.dump({"pid": os.getpid(), "cmd": _proc_cmd(os.getpid())}, f)
 
     cfg = json.load(open(a.config))
     url = cfg.get("target", {}).get("game_url", "")
@@ -1079,9 +1145,8 @@ def main():
     finally:
         c.close()
         try:
-            with open(lock) as f:
-                if f.read().strip() == str(os.getpid()):
-                    os.unlink(lock)
+            if _lock_holder(lock) == os.getpid():
+                os.unlink(lock)
         except Exception:
             pass
     return 0

@@ -331,6 +331,31 @@ The two buttons now differ only in what they leave behind:
     Stop -> the task stops; process and panel stay live, Run resumes
     Quit -> the panel is removed and the process exits
 
+### A BARE PID IS NOT A LOCK — pids get reused
+
+`os.kill(pid, 0)` only proves SOMETHING is alive, not that it is us. Observed:
+the lock held a pid from a long-dead instance, the OS had recycled that number
+for an unrelated process, and a launch was refused with *"another bot window is
+already running"* **while no bot was running at all**. The operator's only
+recourse was to delete `run/app.lock` — which is exactly the habit that let
+eight instances stack up in the first place. A guard that pushes you toward the
+thing it exists to prevent is worse than no guard.
+
+The lock now records WHO: `{"pid": ..., "cmd": ...}`, and a claimant must match
+on IDENTITY (the live command line still equals the saved one). A lock failing
+that is stale and is removed on sight, so a launch is never blocked by a
+stranger.
+
+**Identity is the primary test, not a name marker.** The first attempt required
+`"app.py"` in the holder's command line, and that DROPPED A LEGITIMATELY HELD
+LOCK whose command did not contain the marker — a false negative that would let
+two instances run. The marker survives only as the fallback for a legacy
+bare-pid lock that recorded no command.
+
+Five cases, all verified: recycled pid -> stale; dead pid -> stale; genuine
+holder -> respected; same pid running a different program -> stale; legacy
+bare-pid naming a stranger -> refused.
+
 ### Closing the window must CLOSE THE BOT
 
 A closed window and a navigated page look identical at the socket — both simply

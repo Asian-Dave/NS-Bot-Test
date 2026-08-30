@@ -1636,6 +1636,7 @@ def test_quit_exits_cleanly_and_frees_the_lock():
     """
     print("\nquit exits cleanly and frees the lock")
     import app as app_mod
+    import json as _json
 
     lock = os.path.join(ROOT, "run/app.lock")
     prior = None
@@ -1663,17 +1664,24 @@ def test_quit_exits_cleanly_and_frees_the_lock():
         check(not os.path.exists(lock),
               "and OUR pid lock is released, so the next launch is not refused")
 
-        # A lock owned by SOMEBODY ELSE must never be deleted.
+        # A lock owned by SOMEBODY ELSE must never be deleted. Simulated by
+        # making the holder lookup report a foreign pid - a DEAD pid no longer
+        # works as a stand-in, because a stale lock is now cleaned up on sight
+        # (that cleanup is the fix for pid reuse refusing a launch).
         with open(lock, "w") as f:
-            f.write("999999")
+            _json.dump({"pid": 4242, "cmd": "engine/app.py --attach"}, f)
         exits2 = []
         os._exit = lambda code=0: exits2.append(code)
+        real_holder = app_mod._lock_holder
+        app_mod._lock_holder = lambda path, marker="app.py": 4242
         try:
             r._hard_exit()
         finally:
             os._exit = real_exit
+            app_mod._lock_holder = real_holder
         check(os.path.exists(lock),
-              "another process's lock is left alone")
+              "a lock held by ANOTHER live instance is left alone")
+        check(exits2 == [0], "and we still exit")
     finally:
         try:
             os.unlink(lock)
@@ -2340,6 +2348,56 @@ def test_cooldowns_fall_back_to_attack_not_dodge():
           "in that order - Dodge only once Attack has also failed")
 
 
+def test_lock_verifies_identity_not_just_liveness():
+    """A bare pid is not enough, because PIDS GET REUSED.
+
+    `os.kill(pid, 0)` only proves SOMETHING is alive. Observed live: the lock
+    held a pid from a long-dead instance, the OS had recycled that number for an
+    unrelated process, and a launch was refused with "another bot window is
+    already running" while no bot was running at all. The operator's only
+    recourse was to delete the lock - which is exactly the habit that let eight
+    instances stack up in the first place.
+    """
+    print("\nlock verifies identity, not just liveness")
+    import app as app_mod
+    import json as _json
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    lock = os.path.join(d, "app.lock")
+    me = os.getpid()
+    mycmd = app_mod._proc_cmd(me)
+    check(bool(mycmd), "the holder's command line can be read at all")
+
+    def holder(rec):
+        with open(lock, "w") as f:
+            if isinstance(rec, str):
+                f.write(rec)
+            else:
+                _json.dump(rec, f)
+        return app_mod._lock_holder(lock)
+
+    # pid 1 is alive on every unix and is certainly not this program.
+    check(holder({"pid": 1, "cmd": "engine/app.py --attach"}) is None,
+          "a RECYCLED pid does not hold the lock")
+    check(not os.path.exists(lock),
+          "and the stale lock is removed, so the next launch is not refused")
+
+    check(holder({"pid": 999999, "cmd": "engine/app.py"}) is None,
+          "a dead pid does not hold the lock")
+
+    check(holder({"pid": me, "cmd": mycmd}) == me,
+          "a genuine holder IS respected - identity matches")
+    check(os.path.exists(lock), "and its lock is left alone")
+
+    check(holder({"pid": me, "cmd": "some/other/program.py"}) is None,
+          "the same pid running a DIFFERENT program does not hold it")
+
+    # A legacy bare-pid lock still gets held to the marker test.
+    check(holder("1") is None,
+          "a legacy bare-pid lock naming a stranger is refused too")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2361,6 +2419,7 @@ def main():
                test_closed_window_shuts_the_bot_down,
                test_panel_stays_alive_during_a_mission,
                test_quit_exits_cleanly_and_frees_the_lock,
+               test_lock_verifies_identity_not_just_liveness,
                test_task_switch_interrupts_the_running_task,
                test_stop_aborts_the_task_but_keeps_the_panel,
                test_relog_rescues_an_unreadable_state,
