@@ -90,11 +90,26 @@ GRADES = ["auto", "S", "A", "B", "C"]
 # dpr 2 is the reference every template was cut at. The others are offered
 # because they work through the transform, but templates are NOT re-cut for
 # them, so matching is weaker off-reference - which is why the panel warns.
+# MINIMUM WIDTH IS A CONSTRAINT, NOT A PREFERENCE. The page centres the game in
+# the FULL viewport, ignoring the panel, so with a 960-wide game and a 380-wide
+# panel:
+#
+#     centred game   (W+960)/2 <= W-380   ->   W >= 1720
+#
+# Measured the hard way: a 1440 viewport put the game at 240..1200 against a
+# dock starting at 1060 - a 140 px OVERLAP, with the panel drawn on top of the
+# game and the no-click zone covering playable area. NOTHING BELOW 1720 IS SAFE
+# while the game is centred.
+#
+# Flush-lefting the game would drop the floor to 1340, and that was tried and
+# REVERTED - see the note in dock.py's focus(). Do not re-add a narrower option
+# here without that working first.
+MIN_VIEWPORT_W = 1720
 VIEWPORTS = [
     {"key": "1720x720@2", "label": "1720x720", "w": 1720, "h": 720, "dpr": 2},
-    {"key": "1440x720@2", "label": "1440x720", "w": 1440, "h": 720, "dpr": 2},
     {"key": "1920x900@2", "label": "1920x900", "w": 1920, "h": 900, "dpr": 2},
     {"key": "2200x980@2", "label": "2200x980", "w": 2200, "h": 980, "dpr": 2},
+    {"key": "2560x1080@2", "label": "2560x1080", "w": 2560, "h": 1080, "dpr": 2},
 ]
 VIEWPORT_PATH = "run/viewport.json"
 

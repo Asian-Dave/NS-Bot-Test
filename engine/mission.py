@@ -606,7 +606,24 @@ class MissionRunner:
     CHAR_MIN_H = 95
 
     @classmethod
-    def find_character(cls, frame_bgr):
+    def canvas_x(cls, cap=None):
+        """The canvas' left/right edge in CAPTURED px, following the live game.
+
+        CANVAS_X0/X1 are REFERENCE values (760..2680, the game centred at a 1720
+        viewport). Focus mode now flush-LEFTS the game, and a different viewport
+        moves it anyway, so anything that clamps an ROI or aims at a map edge
+        has to ask where the canvas actually is. Without this, left-aligning
+        sent traversal to x=2640 on a canvas ending at 1920 - a click outside
+        the game entirely.
+        """
+        if cap is None:
+            return cls.CANVAS_X0, cls.CANVAS_X1
+        x0, _ = cap.fix(cls.CANVAS_X0, 0)
+        x1, _ = cap.fix(cls.CANVAS_X1, 0)
+        return x0, x1
+
+    @classmethod
+    def find_character(cls, frame_bgr, cap=None):
         """Where our own character is standing. (x, y) in captured px, or None.
 
         Delegates to the shared finder so mission traversal and the Kekkai seal
@@ -614,8 +631,9 @@ class MissionRunner:
         this one was fixed for a purple robe.
         """
         y0, y1 = cls.CHAR_BAND
+        x0, x1 = cls.canvas_x(cap)
         return perceive.find_character(
-            frame_bgr, x0=cls.CANVAS_X0, x1=cls.CANVAS_X1, y0=y0, y1=y1,
+            frame_bgr, x0=x0, x1=x1, y0=y0, y1=y1,
             sat=cls.CHAR_SAT, min_h=cls.CHAR_MIN_H)
 
     # Figures (our character AND enemies) stand out from the map by COLOUR
@@ -639,7 +657,7 @@ class MissionRunner:
     FIG_MAX_ASPECT = 2.5        # blobs merge with their shadow, so this is loose
 
     @classmethod
-    def find_figures(cls, frame_bgr):
+    def find_figures(cls, frame_bgr, cap=None):
         """Every figure-like blob on the map. [(x, y, area)], biggest first.
 
         Includes our own character, enemies, and - unavoidably - some scenery:
@@ -649,7 +667,7 @@ class MissionRunner:
         """
         h, w = frame_bgr.shape[:2]
         y0, y1 = cls.FIG_BAND
-        x0, x1 = cls.CANVAS_X0, cls.CANVAS_X1
+        x0, x1 = cls.canvas_x(cap)
         x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
         y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
         if x1 - x0 < 8 or y1 - y0 < 8:
@@ -685,7 +703,10 @@ class MissionRunner:
         costs exactly what a dead end already costs - one cycle.
         """
         best = None
-        for (x, y, a) in self.find_figures(frame_bgr):
+        # `getattr`, not `self.cap`: the canvas correction is an optional
+        # refinement, and a caller without a capture must still work - it simply
+        # falls back to the reference constants.
+        for (x, y, a) in self.find_figures(frame_bgr, getattr(self, "cap", None)):
             if me is not None and abs(x - me[0]) < 220 and abs(y - me[1]) < 220:
                 continue                       # that one is us
             if (x, y) in getattr(self, "_dud_targets", ()):
@@ -762,8 +783,9 @@ class MissionRunner:
         # Corroborated on the entry map: the detector put the character at
         # x=911 (left of centre) and said "right", and the game itself drew a
         # right-pointing "Go!" arrow on that very frame.
-        pos = self.find_character(frame_bgr)
-        centre = (self.CANVAS_X0 + self.CANVAS_X1) // 2
+        pos = self.find_character(frame_bgr, getattr(self, "cap", None))
+        cx0, cx1 = self.canvas_x(getattr(self, "cap", None))
+        centre = (cx0 + cx1) // 2
 
         # CLEAR THE MAP BEFORE LEAVING IT. An enemy standing on this map has to
         # be killed first; running to the edge past it is what made a mission
@@ -805,8 +827,8 @@ class MissionRunner:
             self._heading = heading
         else:
             heading = getattr(self, "_heading", "right")
-        x = (self.CANVAS_X1 - self.EDGE_MARGIN if heading == "right"
-             else self.CANVAS_X0 + self.EDGE_MARGIN)
+        x = (cx1 - self.EDGE_MARGIN if heading == "right"
+             else cx0 + self.EDGE_MARGIN)
         # RUN ALONG THE CHARACTER'S OWN ROW, not a fixed ground line. GROUND_Y is
         # 880, which on the desert map is ~240 px BELOW the character's feet -
         # off the walkable path, so the run barely moved and read as a dead end.

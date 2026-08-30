@@ -305,7 +305,19 @@ def count_nodes(frame, centre, box=(260, 160), min_area=700, max_area=6000):
                if min_area <= st[i, cv2.CC_STAT_AREA] <= max_area)
 
 
-def heading_from_spawn(frame, log=None):
+def canvas_x(cap=None):
+    """Canvas left/right in CAPTURED px, following the live game.
+
+    CANVAS_X0/X1 are REFERENCE values. Focus mode flush-lefts the game and a
+    different viewport moves it, so an edge target computed from the constants
+    can land outside the canvas entirely.
+    """
+    if cap is None:
+        return CANVAS_X0, CANVAS_X1
+    return cap.fix(CANVAS_X0, 0)[0], cap.fix(CANVAS_X1, 0)[0]
+
+
+def heading_from_spawn(frame, log=None, cap=None):
     """Which way to run, from where the character is standing.
 
     You enter a map through one edge, so you spawn NEAR that edge and must head
@@ -318,7 +330,8 @@ def heading_from_spawn(frame, log=None):
     Returns "right" | "left", defaulting to "right" if the character cannot be
     found (no information is not a reason to stand still).
     """
-    centre = (CANVAS_X0 + CANVAS_X1) // 2
+    cx0, cx1 = canvas_x(cap)
+    centre = (cx0 + cx1) // 2
     pos = find_character(frame)
     if pos is None:
         if log:
@@ -739,7 +752,7 @@ def hunt_and_solve(cap, actor, log, length=3, max_rounds=6, max_walks=10):
     be found any more.
     """
     solved = 0
-    heading = heading_from_spawn(cap.frame(gray=False), log)
+    heading = heading_from_spawn(cap.frame(gray=False), log, cap)
     for rnd in range(max_rounds):
         # STOP AS SOON AS THE MISSION IS OVER. Breaking the last seal ends the
         # mission, and what follows is an epilogue cutscene and the Success
@@ -766,7 +779,12 @@ def hunt_and_solve(cap, actor, log, length=3, max_rounds=6, max_walks=10):
             # heading_from_spawn: you spawn near the edge you entered through, so
             # you must head away from it, and that has to be re-derived on every
             # new map.
-            edge = EDGE_RIGHT if heading == "right" else EDGE_LEFT
+            # The edge is computed from the LIVE canvas, not the reference
+            # constants: focus mode flush-lefts the game, so a target of
+            # x=2640 would land outside a canvas that now ends at 1920.
+            _cx0, _cx1 = canvas_x(cap)
+            edge = ((_cx1 - 40, GROUND_Y) if heading == "right"
+                    else (_cx0 + 40, GROUND_Y))
             log.info("round %d: no seal here; running %s to the edge %s",
                      rnd + 1, heading, edge)
             # Movement is judged by WHERE THE CHARACTER IS, not by a whole-frame
@@ -783,7 +801,7 @@ def hunt_and_solve(cap, actor, log, length=3, max_rounds=6, max_walks=10):
             moved = (x_before is not None and x_after is not None
                      and abs(x_after - x_before) >= 150)
             if moved or find_kekkai(after_f):
-                heading = heading_from_spawn(after_f, log)
+                heading = heading_from_spawn(after_f, log, cap)
                 log.info("   moved (x %s -> %s)", x_before, x_after)
             else:
                 heading = "left" if heading == "right" else "right"

@@ -207,6 +207,14 @@ _BOOTSTRAP = r"""
         const cur = parseFloat(getComputedStyle(g).marginTop) || 0;
         g.style.marginTop = Math.round(cur - r0.y) + "px";
       }
+      // NOT LEFT-ALIGNED, and that was tried and REVERTED. Nudging marginLeft
+      // as well looked right in a single measurement and broke in the loop:
+      // both corrections were computed from ONE rect, but changing marginLeft
+      // REFLOWS the page and invalidates the r.y used a moment later. Live, the
+      // margins ran away - marginTop reached 177 px - and the game ended up
+      // shifted with its top clipped. Fixing it needs a re-measure between the
+      // two corrections and a convergence check per axis; until that is done
+      // and verified, one axis only.
     } else {
       document.querySelectorAll("[data-nsbot-hid]").forEach(el => {
         el.style.display = el.getAttribute("data-nsbot-hid");
@@ -215,6 +223,10 @@ _BOOTSTRAP = r"""
       if (g.hasAttribute("data-nsbot-mt")) {
         g.style.marginTop = g.getAttribute("data-nsbot-mt");
         g.removeAttribute("data-nsbot-mt");
+      }
+      if (g.hasAttribute("data-nsbot-ml")) {
+        g.style.marginLeft = g.getAttribute("data-nsbot-ml");
+        g.removeAttribute("data-nsbot-ml");
       }
     }
     window.__nsbotFocusOn = !!on;

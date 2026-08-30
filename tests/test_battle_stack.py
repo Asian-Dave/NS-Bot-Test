@@ -2398,6 +2398,36 @@ def test_lock_verifies_identity_not_just_liveness():
           "a legacy bare-pid lock naming a stranger is refused too")
 
 
+def test_no_viewport_lets_the_panel_cover_the_game():
+    """Every offered window size must leave the game clear of the panel.
+
+    The page centres the game in the FULL viewport, ignoring the panel. With a
+    960-wide game and a 380-wide panel that needs W >= 1720. Measured the hard
+    way: a 1440 viewport put the game at 240..1200 against a dock starting at
+    1060 - a 140px OVERLAP, with the panel drawn over the game and the no-click
+    zone covering playable area. An offered size that breaks the bot is worse
+    than not offering it.
+    """
+    print("\nno offered window lets the panel cover the game")
+    import app as app_mod
+    import dock as dock_mod
+
+    game_w, panel_w = 960, dock_mod.WIDTH
+    for vp in app_mod.VIEWPORTS:
+        w = vp["w"]
+        left = (w - game_w) / 2.0          # the page centres it
+        right = left + game_w
+        panel_left = w - panel_w
+        check(right <= panel_left,
+              f"{vp['label']}: game ends {right:.0f}, panel starts "
+              f"{panel_left:.0f} - clear")
+        check(w >= app_mod.MIN_VIEWPORT_W,
+              f"{vp['label']} is at or above the {app_mod.MIN_VIEWPORT_W} floor")
+    check(app_mod.MIN_VIEWPORT_W >= 2 * (game_w / 2 + panel_w),
+          f"the floor itself is derived, not guessed "
+          f"({2 * (game_w / 2 + panel_w):.0f})")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2420,6 +2450,7 @@ def main():
                test_panel_stays_alive_during_a_mission,
                test_quit_exits_cleanly_and_frees_the_lock,
                test_lock_verifies_identity_not_just_liveness,
+               test_no_viewport_lets_the_panel_cover_the_game,
                test_task_switch_interrupts_the_running_task,
                test_stop_aborts_the_task_but_keeps_the_panel,
                test_relog_rescues_an_unreadable_state,

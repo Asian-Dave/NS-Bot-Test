@@ -1384,6 +1384,40 @@ so the expensive case would be the common one. The large sizes (1.18 Victory,
 1.84 Mission Success) already have their own rungs; a dialog's check measured
 1.10, so 1.00..1.20 in five steps is enough and 4x cheaper.
 
+### NOTHING BELOW A 1720 VIEWPORT — the panel will cover the game
+
+The page centres the game in the FULL viewport, ignoring the panel. With a
+960-wide game and a 380-wide panel:
+
+    centred game   (W+960)/2 <= W-380   ->   W >= 1720
+
+Measured the hard way, after a 1440 option was offered in the panel: game
+240..1200 against a dock starting at 1060 — a **140 px OVERLAP**, with the panel
+drawn on top of the game and the no-click zone covering playable area. A test
+now checks every offered size against the panel width, because an offered size
+that breaks the bot is worse than not offering it.
+
+### TRIED AND REVERTED: flush-lefting the game to remove the dead strip
+
+Left-aligning would remove the wallpaper strip AND drop the floor to 1340
+(`960 <= W-380`), so it is worth doing properly one day. The attempt broke the
+game and was reverted.
+
+**It was NOT a resize** — the iframe and the inner `ruffle-player` both stayed
+960x839 with no width/height set. The fault was in `align()`: **both axis
+corrections were computed from ONE rect measurement**, and changing `marginLeft`
+REFLOWS the page, invalidating the `r.y` used a line later. Each pass
+over-corrected and the margins compounded — `marginTop` reached **177 px** —
+pushing the game down and clipping its top, which is where the panel tabs live.
+
+Second trap, on the way back out: removing the code that SETS a margin does not
+clear a margin already applied. The stale inline `-220px` / `177px` persisted in
+the DOM and the game stayed broken until they were explicitly cleared and focus
+re-applied from scratch.
+
+To retry: re-measure the rect BETWEEN the two corrections, and converge each
+axis separately with its own tolerance check.
+
 ### THERE IS NO TABLE OF WINDOW SIZES — one stage, two transform axes
 
 The client's own AIR manifest (`ref/swf_assets/AIR_application.xml`) settles
