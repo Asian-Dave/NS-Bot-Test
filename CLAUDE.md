@@ -845,6 +845,44 @@ shrub's 77, so height separates cleanly where area inverts the answer: a bush is
 short and broad, a ninja is tall and narrow. `CHAR_MIN_H` is 95 and the TALLEST
 qualifying blob wins.
 
+### ANIMATION IS NOT A SIGNAL HERE — measured, not assumed
+
+A reasonable suggestion, and worth recording as a dead end so it is not retried:
+detect enemies by whether they ANIMATE, since scenery does not.
+
+**The map is completely static.** Four full frames 0.45 s apart on a traversal
+map measured mean difference **0.00**, `frac>4 = 0.0001`, and **zero** moving
+blobs at any threshold from 3 to 12. Our own character standing idle does not
+animate either. Frame differencing has nothing to work with.
+
+(Note this is the opposite of the hand-seal board, where the training dummy
+animates continuously and differencing is useless for the OTHER reason. Neither
+screen supports a motion-based detector.)
+
+### A FIGURE CANDIDATE MUST BE ON WALKABLE GROUND
+
+The runner "never moved to the enemy" because the candidates were in the TREE
+CANOPY: `(1907, 254)` and `(2513, 261)`, 17% down the frame. Clicking there
+cannot move the character at all, so the spot could never be reached - 6 s
+timeout, marked scenery, repeat.
+
+**What we LOOK AT and what we ACCEPT are different questions.** `FIG_BAND` stays
+(200, 950) because the mask is built from the ROI's own background MEDIAN and
+narrowing it changes that estimate and loses real enemies - that mistake already
+broke enemy detection once. Acceptance is separate: `FIG_MIN_Y = 420`, below the
+measured range of real enemies (y 460..875) and of our own character (487..805).
+
+### NEVER RUN INTO AN EDGE YOU ARE ALREADY AGAINST
+
+The heading comes from a pixel detector, and when it misfires the heading
+INVERTS. Measured on a dark forest map: the character stood 64 px from the
+canvas's left edge while the finder reported foliage on the right, so the runner
+clicked the LEFT edge seven times with no progress.
+
+The guard is geometric and needs no detector to be right: if the character is
+already within a few strides of the edge it is being sent toward, go the other
+way. Mid-map it does not interfere.
+
 ### REMEMBER A DUD WITH TOLERANCE — a centroid jitters, an exact tuple never matches
 
 The "don't try that spot again" set matched on an exact `(x, y)`, and a blob

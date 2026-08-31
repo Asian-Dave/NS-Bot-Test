@@ -2686,6 +2686,59 @@ def test_command_buttons_are_map_independent():
               "so between-turns is vetoed too - the pair covers both")
 
 
+def test_never_runs_into_an_edge_it_is_already_at():
+    """The walk must not be sent into an edge the character is already against.
+
+    The heading comes from a pixel detector, and when that misfires the heading
+    INVERTS. Measured live on a dark forest map: the character stood 64 px from
+    the canvas's left edge (x=824, canvas starts at 760) while the finder
+    reported foliage on the RIGHT, so the runner concluded "head left" and
+    clicked the left edge seven times with no progress.
+
+    ANIMATION WAS CONSIDERED AND MEASURED AWAY as an alternative signal: across
+    four frames 0.45 s apart the map's mean difference was 0.00 and there were
+    ZERO moving blobs at any threshold - the sprites, our own character
+    included, do not animate while idle. So the guard is geometric, not motion
+    based: it needs no detector to be right.
+    """
+    print("\nnever runs into an edge it is already at")
+    import mission as mission_mod
+    R = mission_mod.MissionRunner
+
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/mission/traverse_at_left_edge.png"))
+    check(f is not None, "the at-the-left-edge frame is committed")
+    if f is None:
+        return
+    pos = R.find_character(f)
+    check(pos is not None, f"the character is located ({pos})")
+    if pos:
+        check(pos[0] - R.CANVAS_X0 < R.EDGE_MARGIN * 4,
+              f"and it really is against the left edge "
+              f"(x={pos[0]}, canvas starts {R.CANVAS_X0})")
+
+    # The guard itself: whatever the heading says, do not go into that edge.
+    near = R.EDGE_MARGIN * 4
+    for at_x, want in ((R.CANVAS_X0 + 40, "right"), (R.CANVAS_X1 - 40, "left")):
+        for asked in ("left", "right"):
+            h = asked
+            if h == "left" and at_x - R.CANVAS_X0 <= near:
+                h = "right"
+            elif h == "right" and R.CANVAS_X1 - at_x <= near:
+                h = "left"
+            check(h == want,
+                  f"at x={at_x} asked {asked} -> {h} (must be {want})")
+
+    # Mid-map, the guard must NOT interfere - the detector's answer stands.
+    mid = (R.CANVAS_X0 + R.CANVAS_X1) // 2
+    for asked in ("left", "right"):
+        h = asked
+        if h == "left" and mid - R.CANVAS_X0 <= near:
+            h = "right"
+        elif h == "right" and R.CANVAS_X1 - mid <= near:
+            h = "left"
+        check(h == asked, f"mid-map, {asked} is left alone")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2704,6 +2757,7 @@ def main():
                test_command_buttons_are_map_independent,
                test_character_finder_rejects_scenery,
                test_one_character_finder_shared_by_both_runners,
+               test_never_runs_into_an_edge_it_is_already_at,
                test_map_is_cleared_before_leaving,
                test_closed_window_shuts_the_bot_down,
                test_panel_stays_alive_during_a_mission,

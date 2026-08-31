@@ -652,6 +652,15 @@ class MissionRunner:
     # background MEDIAN, so narrowing the band silently changed which blobs pass
     # and lost that enemy entirely.
     FIG_BAND = (200, 950)
+    # WHAT WE LOOK AT vs WHAT WE ACCEPT are different questions. The mask needs
+    # the wider band because it is built from the ROI's own background MEDIAN,
+    # and narrowing that changes the estimate and loses real enemies. But a
+    # figure STANDS ON GROUND, so a candidate high in the tree canopy is
+    # scenery: measured live, (1907, 254) and (2513, 261) were proposed as
+    # enemies - 17% down the frame - and clicking there cannot move the
+    # character at all, so they could never be reached. Real enemies measure
+    # y 460..875, our own character 487..805; 420 sits below both.
+    FIG_MIN_Y = 420
     FIG_MIN_H, FIG_MAX_H = 90, 400
     FIG_MIN_AREA = 3000
     FIG_MAX_ASPECT = 2.5        # blobs merge with their shadow, so this is loose
@@ -722,6 +731,8 @@ class MissionRunner:
         # refinement, and a caller without a capture must still work - it simply
         # falls back to the reference constants.
         for (x, y, a) in self.find_figures(frame_bgr, getattr(self, "cap", None)):
+            if y < self.FIG_MIN_Y:
+                continue                       # canopy, not walkable ground
             if me is not None and abs(x - me[0]) < 220 and abs(y - me[1]) < 220:
                 continue                       # that one is us
             if self._is_dud(x, y):
@@ -851,6 +862,29 @@ class MissionRunner:
             self._heading = heading
         else:
             heading = getattr(self, "_heading", "right")
+        # NEVER RUN INTO AN EDGE WE ARE ALREADY AGAINST.
+        #
+        # The heading comes from a pixel detector, and when it misfires the
+        # heading INVERTS - measured live on a dark forest map: the character was
+        # 64 px from the canvas's left edge while the finder reported foliage on
+        # the right, so it concluded "head left" and clicked the left edge over
+        # and over. Seven runs, no progress.
+        #
+        # This guard needs no detector to be right. If we are already within a
+        # stride of the edge we are being sent toward, the only useful direction
+        # is the other one.
+        if pos is not None:
+            near = self.EDGE_MARGIN * 4
+            if heading == "left" and pos[0] - cx0 <= near:
+                heading = "right"
+                self._heading = heading
+                self.log.info("mission: already at the LEFT edge (x=%d); "
+                              "heading right instead", pos[0])
+            elif heading == "right" and cx1 - pos[0] <= near:
+                heading = "left"
+                self._heading = heading
+                self.log.info("mission: already at the RIGHT edge (x=%d); "
+                              "heading left instead", pos[0])
         x = (cx1 - self.EDGE_MARGIN if heading == "right"
              else cx0 + self.EDGE_MARGIN)
         # RUN ALONG THE CHARACTER'S OWN ROW, not a fixed ground line. GROUND_Y is
