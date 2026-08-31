@@ -1176,8 +1176,25 @@ solver had narrowed 216 candidates down to it correctly and then threw the win
 away. This is the SAME trap documented just below for digit reading — check for
 a closed panel FIRST — walked into again by a later edit one branch higher.
 
+### THE TWO DISCS RENDER DIGITS DIFFERENTLY — harvest per (digit, disc)
+
+This is why the digit reader keeps blocking a mission, and it is systematic, not
+random. Observed across three separate failures:
+
+    GREEN disc  ->  digits drawn as an OUTLINE   (seen: 0, 0, 0)
+    GOLD  disc  ->  digits drawn SOLID/FILLED    (seen: 2, 3, 0-with-glare)
+
+So the exemplar set needs BOTH forms per digit, and a green exemplar does not
+help a gold read at all: green-0 against the gold-0s measures 0.503, 0.152 and
+**-0.057**. Harvest with that in mind rather than one-per-digit.
+
+**Normalising the two forms was tried and measured WORSE.** Flood-filling the
+outline so it matches the solid gave 0.000 against 0.503 raw - the fill produces
+degenerate near-uniform masks. Same outcome as the earlier glare-cleanup
+attempt. Two forms it is.
+
 Digit exemplars are still harvested by hand as new renderings appear (`0` now
-has 9 variants, `1` three, `2` two — outline AND solid — and **3+ none at all**). A glare-cleanup
+has 10 variants, `1` three, `2` two, `3` one — and **4+ none at all**). A glare-cleanup
 filter was tried and measured WORSE — dropping border-touching blobs removed
 most of the digit too (match 0.501 -> 0.196), because the outline touches the
 border as well.
