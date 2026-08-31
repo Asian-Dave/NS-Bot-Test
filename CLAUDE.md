@@ -1502,6 +1502,32 @@ Applying a window size RELOADS the game, so the panel arms on the first press
 and commits on a second within 6 s, and the runner clears the drift cache and
 re-arms alignment afterwards - stale hints aim every click at the old layout.
 
+### A HALF-APPLIED DRIFT CORRECTION IS WORSE THAN NONE
+
+The memory board stopped halfway with a confusing signature: **19 faces known,
+11 pairs REFUSED, 10/19 cleared, "no proposable pair; stopping"**. It looked
+like a matching problem. It was a coordinate problem, and a self-inflicted one:
+the correction had been wired into the READ path and not the CLICK path.
+
+    board_frame  ->  board_box(cap)   CORRECTED origin
+    crop         ->  pos_xy(i)        RAW position   <- mixed space
+    flip         ->  pos_xy(i)        RAW position   <- click 117 px out
+
+Two consequences, and the first is what made it hard to see:
+
+* `crop` subtracted a CORRECTED origin from a RAW position, so every cell crop
+  was offset by the drift. The faces were still mutually distinguishable, so 19
+  were "known" - but they were the WRONG faces for those indices, hence
+  pairings the board refused.
+* the flip clicked 117 px off, against cards ~150 px tall - the neighbouring
+  row, or the gap between rows.
+
+`pos_xy`, `crop`, `cell_state` and `identify` all take `cap` now, and every
+geometry site in `play()` passes it. **One coordinate space, or none** - a
+partial correction produces plausible-looking output and hides the fault.
+
+`cards.py`'s solving logic is still untouched; only the coordinate space moved.
+
 ### One shared drift correction, rather than an anchor per minigame
 
 `Capture.game_offset()` measures how far the game canvas has moved from the

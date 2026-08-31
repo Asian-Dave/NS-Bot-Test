@@ -136,19 +136,31 @@ _HUD = None
 FACE, BACK, REMOVED = "face", "back", "removed"
 
 
-def pos_xy(i):
-    """Card index 0..19 -> (x, y) in CAPTURED px. Row-major, left to right."""
-    return COLS[i % len(COLS)], ROWS[i // len(COLS)]
+def pos_xy(i, cap=None):
+    """Card index 0..19 -> (x, y) in CAPTURED px. Row-major, left to right.
+
+    PASS `cap` OR EVERY COORDINATE IS WRONG WHEN THE GAME DRIFTS. COLS/ROWS are
+    reference values; `cap.fix` maps them onto wherever the game actually is.
+    Measured while the board was stuck: drift (-11, -117), so a click aimed at
+    ROWS[3]=1038 landed at 921 - a different card, or the gap between rows.
+    """
+    x, y = COLS[i % len(COLS)], ROWS[i // len(COLS)]
+    return cap.fix(x, y) if cap is not None else (x, y)
 
 
-def crop(frame, i, origin=(0, 0)):
+def crop(frame, i, origin=(0, 0), cap=None):
     """Cell i out of a frame whose top-left is `origin` in captured px.
 
     `origin` is what makes the same geometry work on a full frame (0,0) and on a
     BOARD_BOX clip - the clip is captured at scale=dpr so it is the same pixel
     space, just translated.
     """
-    x, y = pos_xy(i)
+    # The cell position and the clip origin must be in the SAME space, so both
+    # are corrected or neither is. Correcting only the origin (which
+    # `board_frame` does) left every crop 117 px out - the faces were still
+    # distinguishable, so 19 were "known", but the PAIRINGS were wrong and the
+    # board refused eleven of them.
+    x, y = pos_xy(i, cap)
     x -= origin[0]
     y -= origin[1]
     return frame[max(0, y - CARD_H // 2):y + CARD_H // 2,
@@ -231,9 +243,9 @@ def distance(a, b):
     return float(np.abs(a - b).mean())
 
 
-def cell_state(frame, i, origin=(0, 0)):
+def cell_state(frame, i, origin=(0, 0), cap=None):
     """FACE, BACK or REMOVED for cell i."""
-    c = crop(frame, i, origin)
+    c = crop(frame, i, origin, cap)
     if c is None or c.size == 0:
         return BACK
     hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
@@ -268,11 +280,11 @@ class Board:
         self.sat_gate = sat_gate
         self.match_gate = match_gate
 
-    def identify(self, frame, i, origin=(0, 0)):
+    def identify(self, frame, i, origin=(0, 0), cap=None):
         """Record the face at position i. True if a face was actually there."""
-        if cell_state(frame, i, origin) != FACE:
+        if cell_state(frame, i, origin, cap) != FACE:
             return None
-        s = sig(crop(frame, i, origin))
+        s = sig(crop(frame, i, origin, cap))
         if s is None:
             return None
         self.seen[i] = s
@@ -435,7 +447,7 @@ def solve_live(cap, actor, log, timeout=80.0, save_crops=False,
             log.info("board gone before flipping card %d - aborting instead of "
                      "clicking through to whatever replaced it", i)
             return None, None, o
-        if cell_state(f, i, o) == REMOVED:
+        if cell_state(f, i, o, cap) == REMOVED:
             # SELF-HEALING, and it covers two different situations.
             #
             # 1. A pair we wrongly recorded as refused was actually taken. The
@@ -452,14 +464,14 @@ def solve_live(cap, actor, log, timeout=80.0, save_crops=False,
                 b.vacant.add(i)
             b.seen.pop(i, None)
             return False, f, o
-        actor.click_pixel(*pos_xy(i), why=f"flip card {i}")
+        actor.click_pixel(*pos_xy(i, cap), why=f"flip card {i}")
         t = time.time()
         while time.time() - t < deadline:
             f, o = read()
             if f is None:
                 log.info("board gone right after flipping card %d - stopping", i)
                 return None, None, o
-            if cell_state(f, i, o) == FACE:
+            if cell_state(f, i, o, cap) == FACE:
                 if save_crops:
                     # NOT ref/auto/tp/faces - that holds the twenty COMMITTED
                     # calibration crops whose true pairing the match-gate test
@@ -469,12 +481,12 @@ def solve_live(cap, actor, log, timeout=80.0, save_crops=False,
                     os.makedirs(d, exist_ok=True)
                     cv2.imwrite(os.path.join(
                         d, f"pos{i:02d}_{int(time.time()*1000)}.png"),
-                        crop(f, i, o))
+                        crop(f, i, o, cap))
                 # RECORDING THE FACE IS THE POINT OF THE FLIP. Returning "yes it
                 # is a face" without storing the signature left `seen` empty, so
                 # `unknown_positions()` never shrank and the run re-flipped the
                 # same two cells for its entire 80 s clock.
-                b.identify(f, i, o)
+                b.identify(f, i, o, cap)
                 return True, f, o
         return False, f, o
 
@@ -506,7 +518,7 @@ def solve_live(cap, actor, log, timeout=80.0, save_crops=False,
             f, o = read()
             if f is None:
                 return None
-            si, sj = cell_state(f, i, o), cell_state(f, j, o)
+            si, sj = cell_state(f, i, o, cap), cell_state(f, j, o, cap)
             if si == REMOVED and sj == REMOVED:
                 return True
             if si == BACK and sj == BACK:
@@ -672,10 +684,10 @@ def main():
         print(f"  clip shape {f.shape}, origin {o}, "
               f"HUD present={board_present(f, o)}")
         for i in range(N):
-            cc = crop(f, i, o)
+            cc = crop(f, i, o, cap)
             hsv = cv2.cvtColor(cc, cv2.COLOR_BGR2HSV)
             print(f"    cell {i:2d} {str(cc.shape[:2]):10s} sat={hsv[:,:,1].mean():6.1f}"
-                  f" val={hsv[:,:,2].mean():6.1f} -> {cell_state(f, i, o)}")
+                  f" val={hsv[:,:,2].mean():6.1f} -> {cell_state(f, i, o, cap)}")
         c.close()
         return 0
 
