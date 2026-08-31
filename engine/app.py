@@ -194,6 +194,9 @@ class Runner:
         # mission.
         m = cfg.get("mission", {})
         self.relog_after = int(m.get("relog_after_unknown", 8))
+        # Save a frame for teaching once the streak is clearly not a hiccup, but
+        # BEFORE the relog wipes the screen away.
+        self.teach_at = max(2, int(m.get("teach_at_unknown", 4)))
         self.max_relogs = int(m.get("max_relogs", 2))
         self._relogs = 0
         # Focus mode is armed by default and applied as soon as the game is
@@ -595,6 +598,34 @@ class Runner:
         except Exception:
             pass
 
+    def _save_for_teaching(self):
+        """Write the current frame to ref/auto/unknown/ and flag it loudly.
+
+        A screen the bot cannot name is not a mystery to be pondered - it is one
+        template away from being handled. Every such case this project has hit
+        (the mission list, a battle between turns, the seal-broken dialog, the
+        Level Up panel) was fixed by cutting a single anchor from a single
+        frame. The hard part was always CATCHING the frame; by the time an
+        operator looks, the screen has moved on.
+        """
+        try:
+            import time as _t
+            d = os.path.join(ROOT, "ref/auto/unknown")
+            os.makedirs(d, exist_ok=True)
+            name = _t.strftime("unknown_%Y%m%d_%H%M%S.png")
+            path = os.path.join(d, name)
+            frame = self.cap.frame(gray=False)
+            cv2.imwrite(path, frame)
+            self.note = (f"UNRECOGNISED SCREEN - saved {name} for teaching. "
+                         f"Cut an anchor from it and add a rung.")
+            self.log.error("%s", self.note)
+            self.log.error("  teach it: score templates against "
+                           "ref/auto/unknown/%s, cut what is unique to this "
+                           "screen, and add it to the ladder or the veto set",
+                           name)
+        except Exception as e:
+            self.log.info("could not save the unrecognised frame: %s", e)
+
     def _refocus_after_reload(self):
         """Re-apply focus after the page reloaded under a running task."""
         if not self.focus_wanted:
@@ -711,6 +742,15 @@ class Runner:
                 except (OSError, CDPError) as e:
                     raise Disconnected(str(e))
                 return
+            # SAVE THE EVIDENCE THE FIRST TIME A SCREEN DEFEATS US.
+            #
+            # "Do nothing" is the right action on a screen we cannot name - it
+            # is what stops a blind click - but on its own it teaches nobody
+            # anything, and every such screen in this project was eventually
+            # fixed by cutting ONE anchor from ONE frame. So capture that frame
+            # while it is on screen, and say plainly that it needs teaching.
+            if self.unknown == self.teach_at:
+                self._save_for_teaching()
             if self.unknown >= self.max_unknown:
                 self.note = (f"{self.unknown} unrecognised frames in a row - "
                              f"pausing rather than spinning. Look at the screen.")

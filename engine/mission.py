@@ -780,9 +780,22 @@ class MissionRunner:
                 continue                     # canopy - not walkable
             if self._is_dud(cx, cy):
                 continue
+            bh = st[i, cv2.CC_STAT_HEIGHT]
             if best is None or a > best[0]:
-                best = (a, cx, cy)
-        return (best[1], best[2]) if best else None
+                best = (a, cx, cy, bh)
+        if best is None:
+            return None
+        # AIM LOW, AT THE FEET, NOT THE TORSO.
+        #
+        # The blob centre is the middle of the sprite - measured 222x245 centred
+        # (2169, 990), so the sprite spans y 867..1112. A walk-to click wants the
+        # GROUND the unit is standing on: aiming at the torso can put the
+        # destination behind or above it. A third of the height below centre
+        # lands near the feet while staying well inside the sprite, so the click
+        # is still ON THE UNIT - which is what makes the character walk to it
+        # rather than to open ground.
+        _, cx, cy, bh = best
+        return (int(cx), int(cy + bh // 3))
 
     def find_enemy_on_map(self, frame_bgr, me):
         """A figure on this map that is not us. (x, y) or None.

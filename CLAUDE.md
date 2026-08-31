@@ -845,6 +845,39 @@ shrub's 77, so height separates cleanly where area inverts the answer: a bush is
 short and broad, a ninja is tall and narrow. `CHAR_MIN_H` is 95 and the TALLEST
 qualifying blob wins.
 
+### "DO NOTHING" MUST LEAVE EVIDENCE — save the frame that defeated us
+
+Refusing to click on a screen the bot cannot name is the right ACTION, and it is
+what stops a blind click. But on its own it teaches nobody anything, and the
+screen is gone by the time an operator looks.
+
+Every unrecognised screen in this project turned out to be ONE anchor from ONE
+frame away from handled - the mission list, a battle between turns, the
+seal-broken dialog, the Level Up panel. The hard part was always CATCHING the
+frame. So on the `teach_at_unknown` (4th) unrecognised frame - before the relog
+wipes the screen away - the runner writes it to `ref/auto/unknown/` and says
+plainly that it needs teaching, with the recipe.
+
+### CLICK A UNIT AT ITS FEET, NOT ITS TORSO
+
+A walk-to click wants the GROUND the unit stands on. The moving blob's centre is
+mid-sprite: measured 222x245 centred (2169, 990), so the sprite spans
+y 867..1112. Aiming a third of the height below centre lands at 1070 - near the
+feet, still firmly ON the unit, so the character walks TO IT rather than to open
+ground beside it.
+
+### THE MISSION PROGRESS TRACK — real, but not universal
+
+Some maps draw a track along the bottom: a start icon, node dots, and a red
+"Goal" marker. Measured by the width of its saturated yellow bar:
+
+    desert map   1482 px at y=702   -> track present, 3 nodes
+    dark map      450 px            -> no track
+
+So it can answer "how many sections remain" where it is drawn, and cannot answer
+"what kind of section is this". For the latter, the positive phase classifier is
+the mechanism - see the note on negative definitions.
+
 ### MOVEMENT IS THE BEST ENEMY DETECTOR — enemies animate, scenery does not
 
 Measured on a live traversal map with one enemy standing on it: six frames

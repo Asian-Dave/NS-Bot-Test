@@ -2781,10 +2781,20 @@ def test_movement_finds_the_enemy_colour_misses():
     got = inst.find_moving_figure()
     check(got is not None, f"a moving figure is found ({got})")
     if got:
-        check(abs(got[0] - 2179) < 40 and abs(got[1] - 991) < 40,
-              f"at the enemy's real position {got} ~= (2179, 991)")
+        check(abs(got[0] - 2179) < 40,
+              f"horizontally on the enemy ({got[0]} ~= 2179)")
+        # AIMED AT THE FEET, not the torso: a walk-to click wants the ground the
+        # unit stands on, and the sprite spans y 867..1112 around a centre of
+        # 990. The target must still be ON the unit, so the character walks to
+        # it rather than to open ground.
+        check(867 <= got[1] <= 1112,
+              f"vertically inside the sprite ({got[1]}, sprite 867..1112)")
+        check(got[1] > 990,
+              f"and BELOW its centre, towards the feet ({got[1]} > 990)")
         check(got[1] >= R.FIG_MIN_Y,
-              "and on walkable ground, not in the canopy")
+              "on walkable ground, not in the canopy")
+        check(isinstance(got[0], int) and isinstance(got[1], int),
+              "and returned as plain ints - a numpy int would leak into a click")
 
     # The colour pass on the same frame: only scenery, and no enemy at all.
     f0 = cv2.imread(paths[0])
