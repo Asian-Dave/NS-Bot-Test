@@ -845,19 +845,38 @@ shrub's 77, so height separates cleanly where area inverts the answer: a bush is
 short and broad, a ninja is tall and narrow. `CHAR_MIN_H` is 95 and the TALLEST
 qualifying blob wins.
 
-### ANIMATION IS NOT A SIGNAL HERE — measured, not assumed
+### MOVEMENT IS THE BEST ENEMY DETECTOR — enemies animate, scenery does not
 
-A reasonable suggestion, and worth recording as a dead end so it is not retried:
-detect enemies by whether they ANIMATE, since scenery does not.
+Measured on a live traversal map with one enemy standing on it: six frames
+0.35 s apart, differenced and thresholded, give exactly **ONE** blob —
+area 19560, 222x245, centre **(2169, 990)** — against an enemy really at
+~(2179, 991). Ten pixels.
 
-**The map is completely static.** Four full frames 0.45 s apart on a traversal
-map measured mean difference **0.00**, `frac>4 = 0.0001`, and **zero** moving
-blobs at any threshold from 3 to 12. Our own character standing idle does not
-animate either. Frame differencing has nothing to work with.
+On that same frame the colour/shape pass found **only canopy scenery**
+(y 254..382) and returned **None** for the enemy, because it stands at y=991,
+below `FIG_BAND`'s 950 floor.
 
-(Note this is the opposite of the hand-seal board, where the training dummy
-animates continuously and differencing is useless for the OTHER reason. Neither
-screen supports a motion-based detector.)
+Two reasons movement wins outright:
+
+* it cannot be fooled by scenery, which is what the colour pass keeps proposing
+  (a cactus, a bush, roof tiles);
+* **our own character does not animate while idle**, so a moving blob needs no
+  "that one is us" exclusion at all - the colour pass needs a 220 px window and
+  still gets it wrong.
+
+`MissionRunner.find_moving_figure` does this and runs FIRST in traversal, with
+the colour pass as the fallback for a frame where nothing moved. It costs ~1 s
+in captures against the 6.5 s timeouts it avoids.
+
+**A WRONG CONCLUSION, KEPT BECAUSE THE MISTAKE IS THE LESSON.** This was first
+measured on an EMPTY map - mean difference 0.00, zero blobs at any threshold -
+and written off as "animation is not a signal here". That test could not have
+worked: nothing alive was on screen. **Measure the thing you are trying to
+detect.** The operator pushed back on the conclusion and was right.
+
+(Contrast the hand-seal board, where the training dummy animates continuously
+and differencing is useless for the opposite reason. Motion is a signal exactly
+where the still parts are still.)
 
 ### A FIGURE CANDIDATE MUST BE ON WALKABLE GROUND
 

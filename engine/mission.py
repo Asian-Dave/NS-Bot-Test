@@ -713,6 +713,77 @@ class MissionRunner:
                 return True
         return False
 
+    # ENEMIES ANIMATE; SCENERY DOES NOT. This is the strongest signal we have
+    # for "something alive is on this map", and it was the operator's idea.
+    #
+    # Measured on a live traversal map with one enemy standing on it: six frames
+    # 0.35 s apart, differenced and thresholded, gave exactly ONE blob -
+    # area 19560, 222x245, centred (2169, 990) - against an enemy really at
+    # ~(2179, 991). Ten pixels.
+    #
+    # On the same frame the colour/shape detector found only canopy scenery
+    # (y 254..382) and returned None for the enemy, because it sits at y=991,
+    # below FIG_BAND's 950 floor.
+    #
+    # Our own character does NOT move while idle, so a moving blob needs no
+    # "that one is us" exclusion - a real advantage over the colour pass.
+    #
+    # NOTE ON A PREVIOUS WRONG CONCLUSION: this was first measured on an EMPTY
+    # map and recorded as "animation is not a signal here". That test could not
+    # have worked - there was nothing alive on screen. Measure the thing you are
+    # trying to detect.
+    MOVE_FRAMES = 4
+    MOVE_GAP = 0.30
+    MOVE_THRESHOLD = 15
+    MOVE_MIN_AREA = 2500
+    MOVE_BAND = (200, 1150)      # deeper than FIG_BAND: enemies stand at y~991
+
+    def find_moving_figure(self, cap=None):
+        """Something on this map that MOVES. (x, y) or None.
+
+        Costs `MOVE_FRAMES` captures (~1 s). Worth it: it is the only detector
+        measured to find a real enemy on a dark map, and it cannot be fooled by
+        scenery, which does not animate.
+        """
+        cap = cap or getattr(self, "cap", None)
+        if cap is None:
+            return None
+        y0, y1 = self.MOVE_BAND
+        x0, x1 = self.canvas_x(cap)
+        shots = []
+        for i in range(self.MOVE_FRAMES):
+            if i:
+                time.sleep(self.MOVE_GAP)
+            f = cap.frame(gray=False)
+            h, w = f.shape[:2]
+            yy0, yy1 = max(0, min(y0, h)), max(0, min(y1, h))
+            xx0, xx1 = max(0, min(x0, w)), max(0, min(x1, w))
+            if xx1 - xx0 < 8 or yy1 - yy0 < 8:
+                return None
+            shots.append(cv2.cvtColor(f[yy0:yy1, xx0:xx1], cv2.COLOR_BGR2GRAY))
+        acc = None
+        for a, b in zip(shots, shots[1:]):
+            d = cv2.absdiff(a, b)
+            acc = d if acc is None else np.maximum(acc, d)
+        if acc is None:
+            return None
+        m = cv2.morphologyEx((acc > self.MOVE_THRESHOLD).astype(np.uint8) * 255,
+                            cv2.MORPH_CLOSE, np.ones((13, 13), np.uint8))
+        n, _, st, ce = cv2.connectedComponentsWithStats(m)
+        best = None
+        for i in range(1, n):
+            a = st[i, cv2.CC_STAT_AREA]
+            if a < self.MOVE_MIN_AREA:
+                continue
+            cx, cy = int(ce[i][0]) + xx0, int(ce[i][1]) + yy0
+            if cy < self.FIG_MIN_Y:
+                continue                     # canopy - not walkable
+            if self._is_dud(cx, cy):
+                continue
+            if best is None or a > best[0]:
+                best = (a, cx, cy)
+        return (best[1], best[2]) if best else None
+
     def find_enemy_on_map(self, frame_bgr, me):
         """A figure on this map that is not us. (x, y) or None.
 
@@ -825,7 +896,16 @@ class MissionRunner:
         # produce a battle, the spot is remembered as a dud and the normal
         # edge-run happens instead, which costs exactly what a dead end already
         # costs.
-        foe = self.find_enemy_on_map(frame_bgr, pos)
+        # MOVEMENT FIRST, colour second. The moving-blob pass is the only
+        # detector measured to find a real enemy on a dark map, and it cannot be
+        # fooled by scenery. The colour pass stays as the fallback for a frame
+        # where nothing moved - and it is the one that proposes cacti, so it goes
+        # second on purpose.
+        foe = self.find_moving_figure()
+        if foe is not None:
+            self.log.info("mission: something MOVED at %s - that is alive", foe)
+        else:
+            foe = self.find_enemy_on_map(frame_bgr, pos)
         # BOUND THE ENGAGING, not just the repeats. Tolerance stops the SAME
         # blob being retried, but a map full of shrubs can still offer a fresh
         # one every pass. After this many failures on one map, stop proposing

@@ -2739,6 +2739,69 @@ def test_never_runs_into_an_edge_it_is_already_at():
         check(h == asked, f"mid-map, {asked} is left alone")
 
 
+def test_movement_finds_the_enemy_colour_misses():
+    """ENEMIES ANIMATE, SCENERY DOES NOT - the strongest signal we have.
+
+    The operator suggested it, and on a live map with one enemy standing on it
+    the measurement is unambiguous: six frames 0.35s apart, differenced, gave
+    exactly ONE blob at (2169, 990) against an enemy really at ~(2179, 991).
+
+    On that same frame the colour/shape pass found ONLY canopy scenery
+    (y 254..382) and returned None for the enemy, which sits at y=991 - below
+    FIG_BAND's 950 floor.
+
+    A WRONG CONCLUSION WORTH KEEPING: this was first measured on an EMPTY map
+    and written off as "animation is not a signal here". That test could not
+    have worked - nothing alive was on screen. Measure the thing you are trying
+    to detect.
+    """
+    print("\nmovement finds the enemy where colour misses")
+    import mission as mission_mod
+    R = mission_mod.MissionRunner
+
+    paths = [os.path.join(ROOT, f"ref/auto/mission/moving/en{i}.png")
+             for i in range(6)]
+    check(all(os.path.exists(p) for p in paths),
+          "the six-frame moving-enemy sequence is committed")
+    if not all(os.path.exists(p) for p in paths):
+        return
+
+    class Replay:
+        def __init__(self, ps): self.ps, self.i = ps, 0
+        def frame(self, gray=False):
+            f = cv2.imread(self.ps[min(self.i, len(self.ps) - 1)])
+            self.i += 1
+            return f
+        def fix(self, x, y): return (x, y)
+
+    inst = R.__new__(R)
+    inst._dud_targets = set()
+    inst.cap = Replay(paths)
+    inst.MOVE_GAP = 0.0
+    got = inst.find_moving_figure()
+    check(got is not None, f"a moving figure is found ({got})")
+    if got:
+        check(abs(got[0] - 2179) < 40 and abs(got[1] - 991) < 40,
+              f"at the enemy's real position {got} ~= (2179, 991)")
+        check(got[1] >= R.FIG_MIN_Y,
+              "and on walkable ground, not in the canopy")
+
+    # The colour pass on the same frame: only scenery, and no enemy at all.
+    f0 = cv2.imread(paths[0])
+    inst2 = R.__new__(R)
+    inst2._dud_targets = set()
+    me = R.find_character(f0)
+    colour = inst2.find_enemy_on_map(f0, me)
+    check(colour is None or abs(colour[1] - 991) > 100,
+          f"the colour pass does NOT find this enemy ({colour}) - which is why "
+          f"movement goes first")
+
+    # Our own idle character must not register as movement - no exclusion needed.
+    if got and me:
+        check(abs(got[0] - me[0]) > 200,
+              f"the moving blob is the enemy, not us (us {me}, moving {got})")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2758,6 +2821,7 @@ def main():
                test_character_finder_rejects_scenery,
                test_one_character_finder_shared_by_both_runners,
                test_never_runs_into_an_edge_it_is_already_at,
+               test_movement_finds_the_enemy_colour_misses,
                test_map_is_cleared_before_leaving,
                test_closed_window_shuts_the_bot_down,
                test_panel_stays_alive_during_a_mission,
