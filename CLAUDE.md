@@ -803,6 +803,34 @@ shrub's 77, so height separates cleanly where area inverts the answer: a bush is
 short and broad, a ninja is tall and narrow. `CHAR_MIN_H` is 95 and the TALLEST
 qualifying blob wins.
 
+### REMEMBER A DUD WITH TOLERANCE — a centroid jitters, an exact tuple never matches
+
+The "don't try that spot again" set matched on an exact `(x, y)`, and a blob
+centroid moves a pixel or two between frames. So it never matched, and the bot
+re-clicked the same scenery indefinitely. Measured in one session:
+
+    509 failed engagements
+    ONE piece of scenery retried SEVENTY times
+    the same bush as (1199,706) (1200,706) (1200,707) (1201,705) (1201,707)
+    at ~6.5 s per attempt
+
+That is most of an hour spent clicking a bush, and from outside it looks like
+"the bot is acting strange and nothing works". `DUD_RADIUS` is 40 px.
+
+**Tolerance alone is not enough**: a map full of shrubs can still offer a FRESH
+candidate every pass. After six failures on one map, stop proposing targets and
+walk — the edge run is the reliable move.
+
+General rule for any "remember what failed" set built from pixel measurements:
+**compare with a radius, never with equality.**
+
+### A DIAGNOSTIC NOTE, worth more than it looks
+
+`engine/app.py` launched bare writes its log to the TERMINAL, and `run/app.log`
+then holds a STALE log from a previous session - which was read as current and
+nearly produced a wrong diagnosis. Check `ls -l run/app.log` against the clock
+before trusting it, and prefer `> run/app.log 2>&1` so the log is real.
+
 ### A story map must be CLEARED before you leave it
 
 `_traverse` only ever ran to the MAP EDGE. That rule came from the Kekkai

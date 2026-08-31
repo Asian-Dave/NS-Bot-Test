@@ -689,6 +689,21 @@ class MissionRunner:
             out.append((int(ce[i][0]) + x0, int(ce[i][1]) + y0, int(a)))
         return sorted(out, key=lambda r: -r[2])
 
+    # A dud is remembered with TOLERANCE, because a blob centroid jitters.
+    #
+    # Exact-tuple matching was useless in practice: the same bush came back as
+    # (1199,706), (1200,706), (1200,707), (1201,705)... so the dud set never
+    # matched and the bot re-clicked it forever. Measured in one session: 509
+    # failed engagements, a single piece of scenery retried SEVENTY times, at
+    # ~6.5 s per attempt. That is most of an hour spent clicking a bush.
+    DUD_RADIUS = 40
+
+    def _is_dud(self, x, y):
+        for (dx, dy) in getattr(self, "_dud_targets", ()):
+            if abs(x - dx) <= self.DUD_RADIUS and abs(y - dy) <= self.DUD_RADIUS:
+                return True
+        return False
+
     def find_enemy_on_map(self, frame_bgr, me):
         """A figure on this map that is not us. (x, y) or None.
 
@@ -709,7 +724,7 @@ class MissionRunner:
         for (x, y, a) in self.find_figures(frame_bgr, getattr(self, "cap", None)):
             if me is not None and abs(x - me[0]) < 220 and abs(y - me[1]) < 220:
                 continue                       # that one is us
-            if (x, y) in getattr(self, "_dud_targets", ()):
+            if self._is_dud(x, y):
                 continue                       # clicking it did nothing before
             if best is None or a > best[2]:
                 best = (x, y, a)
@@ -800,6 +815,15 @@ class MissionRunner:
         # edge-run happens instead, which costs exactly what a dead end already
         # costs.
         foe = self.find_enemy_on_map(frame_bgr, pos)
+        # BOUND THE ENGAGING, not just the repeats. Tolerance stops the SAME
+        # blob being retried, but a map full of shrubs can still offer a fresh
+        # one every pass. After this many failures on one map, stop proposing
+        # and just walk - the edge run is the reliable move.
+        if foe is not None and len(getattr(self, "_dud_targets", ())) >= 6:
+            self.log.info("mission: %d engage attempts on this map all failed - "
+                          "walking instead of trying more scenery",
+                          len(self._dud_targets))
+            foe = None
         if foe is not None:
             self.log.info("mission: enemy on this map at %s - engaging before "
                           "moving on", foe)

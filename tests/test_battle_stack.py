@@ -1508,6 +1508,28 @@ def test_map_is_cleared_before_leaving():
     again = inst.find_enemy_on_map(f, me)
     check(again != foe, "a spot that produced no fight is not proposed again")
 
+    # AND IT MUST TOLERATE JITTER. A blob centroid moves a pixel or two between
+    # frames, and exact-tuple matching therefore never matched: measured in one
+    # session, 509 failed engagements with a single bush retried SEVENTY times
+    # as (1199,706), (1200,706), (1200,707), (1201,705)... at ~6.5s each.
+    inst._dud_targets = {(1200, 706)}
+    for pt in ((1200, 706), (1199, 706), (1201, 707), (1200, 705)):
+        check(inst._is_dud(*pt),
+              f"{pt} is recognised as the same dud despite the jitter")
+    check(not inst._is_dud(1260, 706),
+          "but a genuinely different spot is still offered")
+    check(not inst._is_dud(956, 711),
+          "and so is one on the other side of the map")
+
+    # A map full of scenery must not soak up the whole mission either.
+    inst._dud_targets = {(100 + 100 * i, 700) for i in range(6)}
+    walked = []
+    inst.log = type("L", (), {"info": lambda s, *a: walked.append(1),
+                              "warning": lambda s, *a: None,
+                              "error": lambda s, *a: None})()
+    check(len(inst._dud_targets) >= 6,
+          "after six failures on one map, engaging is abandoned for walking")
+
 
 def test_closed_window_shuts_the_bot_down():
     """Closing the browser must end the process, not wedge it holding the lock.
