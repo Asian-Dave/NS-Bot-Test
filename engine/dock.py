@@ -199,6 +199,28 @@ _BOOTSTRAP = r"""
       // its width or height, so the SWF's own scaling is unaffected. Resizing
       // it would desync click -> stage mapping inside the game (CLAUDE.md).
       scrollTo(0, 0);
+      // PIN THE SITE'S OWN POSITIONING INSTEAD OF FIGHTING IT.
+      //
+      // The endless re-aligning had one cause: the SITE's JavaScript sets
+      //     #game-container { position:absolute; top:-58.5px }
+      // pushing the container up by the overflow (the game is 839 CSS tall in a
+      // 780 wrapper). Focus mode counteracted that with a fixed marginTop on
+      // the iframe - but the site RECOMPUTES that top on any reflow, so a fixed
+      // number only cancels it at one particular layout, and every reflow put
+      // the game back out of place. That is why it needed re-aligning forever.
+      //
+      // An !important STYLESHEET declaration beats an inline non-important one,
+      // so this cannot be undone by the site rewriting its inline style.
+      // Verified: pinned to y=0, and still 0 after re-setting top=-58.5px
+      // inline. Position only - never a size, which would desync click -> stage
+      // mapping inside the SWF.
+      let pin = document.getElementById("__nsbot_pin");
+      if (!pin) {
+        pin = document.createElement("style");
+        pin.id = "__nsbot_pin";
+        document.documentElement.appendChild(pin);
+      }
+      pin.textContent = "#game-container{top:0 !important;}";
       const r0 = g.getBoundingClientRect();
       if (Math.abs(r0.y) > 1) {
         if (!g.hasAttribute("data-nsbot-mt")) {
@@ -224,6 +246,8 @@ _BOOTSTRAP = r"""
         g.style.marginTop = g.getAttribute("data-nsbot-mt");
         g.removeAttribute("data-nsbot-mt");
       }
+      const pin0 = document.getElementById("__nsbot_pin");
+      if (pin0) pin0.remove();
       if (g.hasAttribute("data-nsbot-ml")) {
         g.style.marginLeft = g.getAttribute("data-nsbot-ml");
         g.removeAttribute("data-nsbot-ml");
@@ -244,6 +268,14 @@ _BOOTSTRAP = r"""
     // The page can scroll out from under us even in focus mode; rect.y is
     // viewport-relative, so put the scroll back first and then measure.
     if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
+    // Re-assert the pin: a reload drops the injected <style>, and without it the
+    // site's own top:-58.5px takes over again.
+    if (!document.getElementById("__nsbot_pin")) {
+      const st = document.createElement("style");
+      st.id = "__nsbot_pin";
+      st.textContent = "#game-container{top:0 !important;}";
+      document.documentElement.appendChild(st);
+    }
     const r = g.getBoundingClientRect();
     if (Math.abs(r.y) <= 1) return "aligned";
     if (!g.hasAttribute("data-nsbot-mt")) {

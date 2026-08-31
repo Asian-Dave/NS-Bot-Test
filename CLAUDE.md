@@ -1548,6 +1548,37 @@ blaming itself.
 **A missing measurement returns (0, 0), never a guess** — an unlocatable game
 must not be able to move a click.
 
+### WHY IT NEEDED RE-ALIGNING AT ALL — the SITE moves the game, every reflow
+
+Root cause, and it is not ours. The site's own JavaScript sets
+
+    #game-container { position: absolute; top: -58.5px }
+
+pushing the container up by the overflow — the game is 839 CSS px tall inside a
+780 px wrapper. Focus mode counteracted it with a fixed `marginTop: 59px` on the
+iframe, and **a fixed number only cancels that at ONE layout**. The site
+recomputes its `top` on any reflow (the Admin Message banner, hiding siblings, a
+container resize), so the game went out of place again and again — which is the
+whole history of "the game drifted; re-aligned" in the logs.
+
+**Ruled out first, by measurement:** the ancestors ARE flex-centred
+(`display:flex; align-items:center`), but setting `flex-start` and removing the
+margin entirely left the game still at -58. So centring was not the cause; the
+absolute `top` was.
+
+**The fix pins instead of chasing.** An `!important` STYLESHEET declaration
+beats an inline non-important one, so the site cannot undo it:
+
+    #game-container { top: 0 !important; }
+
+Verified live: y goes to 0, and stays 0 after re-setting `top:-58.5px` inline —
+exactly what the site does on reflow. `align()` re-asserts the rule because a
+reload drops the injected `<style>`, and turning focus off removes it. Position
+only, never a size: resizing `ruffle-player` desyncs click -> stage mapping.
+
+The margin nudge is kept as a residual fallback, in case the container id ever
+changes and the rule stops matching.
+
 ### THE GAME DRIFTS OUT OF ALIGNMENT, AND EVERY ABSOLUTE GEOMETRY GOES WITH IT
 
 A one-shot align cannot hold. Focus mode top-aligns the game once, then the page

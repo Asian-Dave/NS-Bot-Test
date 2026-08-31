@@ -2549,6 +2549,46 @@ def test_scroll_is_refused_under_focus_mode():
           "a pinned game reports the scroll was refused")
 
 
+def test_focus_pins_the_container_rather_than_nudging_it():
+    """The endless re-aligning had ONE cause, and it was not ours.
+
+    The SITE's own JavaScript sets
+
+        #game-container { position: absolute; top: -58.5px }
+
+    pushing the container up by the overflow - the game is 839 CSS tall in a 780
+    wrapper. Focus mode counteracted that with a fixed marginTop on the iframe,
+    but the site RECOMPUTES that top on any reflow, so a fixed number only
+    cancels it at one layout and every reflow put the game back out of place.
+
+    An !important stylesheet declaration beats an inline non-important one, so
+    pinning cannot be undone by the site rewriting its inline style. Verified
+    live: pinned to y=0, and still 0 after re-setting top=-58.5px inline.
+    """
+    print("\nfocus pins the container rather than nudging it")
+    import dock as dock_mod
+    import inspect as _i
+
+    src = _i.getsource(dock_mod)
+    check("__nsbot_pin" in src, "focus mode injects a pin rule")
+    check("top:0 !important" in src,
+          "with !important, so the site's inline top cannot win")
+    # The pin must be re-asserted by align too - a reload drops the <style>.
+    align = src[src.index("window.__nsbotAlign"):]
+    align = align[:align.index("window.__nsbotRender")]
+    check("__nsbot_pin" in align,
+          "and align re-asserts it, since a reload drops the injected style")
+    # And it must be removed when focus is turned off.
+    focus = src[src.index("window.__nsbotFocus = "):]
+    focus = focus[:focus.index("window.__nsbotAlign")]
+    check("pin0.remove()" in focus or "remove()" in focus,
+          "turning focus off removes the pin again")
+    # Position only - never a size. Resizing desyncs click -> stage mapping.
+    for bad in ("style.width", "style.height"):
+        check(bad not in focus,
+              f"focus never touches {bad} - that would desync the SWF")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2571,6 +2611,7 @@ def main():
                test_panel_stays_alive_during_a_mission,
                test_panel_recovers_its_content_after_a_reload,
                test_scroll_is_refused_under_focus_mode,
+               test_focus_pins_the_container_rather_than_nudging_it,
                test_quit_exits_cleanly_and_frees_the_lock,
                test_lock_verifies_identity_not_just_liveness,
                test_no_viewport_lets_the_panel_cover_the_game,
