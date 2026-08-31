@@ -71,6 +71,9 @@ import cv2
 # +-3px at scale 0.46 — border-midpoint noise, not real irregularity).
 
 CMD_SIDE = 108.7
+# How far the re-cut command templates' match centre sits BELOW the old wide
+# crop's centre. Measured +25/+26 px on COMBAT.png; see the note in `locate`.
+CMD_ANCHOR_DY = 25
 
 COMMAND = {
     "AT": (0.0, -CMD_SIDE),        # Attack  top-left
@@ -253,6 +256,20 @@ class BattleGeometry:
 
         conf_ch, s_ch, (cx, cy) = ch
         conf_do, s_do, (dx, dy) = do
+        # THE COMMAND TEMPLATES WERE RE-CUT, SO THE ANCHOR MOVED.
+        #
+        # They used to be 110x86, including the label BELOW each disc, which put
+        # the template's centre ~25 px ABOVE the disc centre. Cut tight to the
+        # disc (78x78) they are map-independent - the wide cut carried the map
+        # background and collapsed to 0.613 on a night map - but their match
+        # centre is now the disc centre.
+        #
+        # Every offset in this file was calibrated against the OLD centre, so
+        # recover it rather than re-deriving ~2,500 measurements. Measured on
+        # COMBAT.png: charge (923,978) -> (921,1003), dodge (1033,867) ->
+        # (1033,893) - a consistent +25/+26 in y, x unchanged. The PITCH is
+        # unaffected (-111 vs -110), so scale still comes out right; only the
+        # absolute anchor shifted.
         scale = (s_ch + s_do) / 2.0
         expect = CMD_SIDE * scale
         if expect <= 0:
@@ -438,5 +455,22 @@ def _best(frame_gray, tpl, scales):
         res = cv2.matchTemplate(frame_gray, small, cv2.TM_CCOEFF_NORMED)
         _, mx, _, loc = cv2.minMaxLoc(res)
         if best is None or mx > best[0]:
-            best = (float(mx), s, (loc[0] + tw // 2, loc[1] + th // 2))
+            # RECOVER THE HISTORICAL ANCHOR HERE, so all three paths in
+            # `locate` share it - hint, narrow sweep and full sweep. Doing it in
+            # the full-sweep branch alone left the other two uncorrected, and
+            # since they return early they are the COMMON case.
+            #
+            # The command templates were re-cut from 110x86 (disc plus the label
+            # below it) to 78x78 (disc only), which made them map-independent -
+            # the wide cut carried the map background and collapsed to 0.613 on
+            # a night map. That moved the match centre onto the disc, ~25
+            # template px lower. Every offset in this file was calibrated
+            # against the old centre, so shift back rather than re-derive them.
+            #
+            # It is in TEMPLATE UNITS, so it SCALES: a raw 25 was right at scale
+            # 1.0 and wrong by 12 px at 0.46, because 25 * 0.46 = 11.5.
+            # ROUND TO AN INT: these centres are used to SLICE frames further
+            # down, and numpy will not take a float index.
+            cy = int(round(loc[1] + th // 2 - CMD_ANCHOR_DY * s))
+            best = (float(mx), s, (loc[0] + tw // 2, cy))
     return best

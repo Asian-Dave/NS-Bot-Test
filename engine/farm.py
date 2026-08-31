@@ -493,7 +493,21 @@ def in_mission(frame, templates):
 NOT_IN_MISSION = ("lobby_rail_fortune", "char_slot_level", "play_btn",
                   "logged_out", "grade_tab", "mission_room",
                   "page_next", "page_prev", "mission_locked",
-                  "list_back_arrow", "action_flag", "level_up")
+                  "list_back_arrow", "action_flag", "level_up",
+                  # The COMMAND BUTTONS are complementary to `action_flag`, not
+                  # redundant. Measured across three combat frames:
+                  #
+                  #   between turns       charge/dodge 0.391  action_flag 0.897
+                  #   dark map, our turn  charge/dodge 1.000  action_flag 0.750
+                  #   daylight, our turn  charge/dodge 0.949  action_flag 0.993
+                  #
+                  # The flag drops on a dark map because an enemy sprite
+                  # OCCLUDES the "Action!" text - no crop fixes that. The
+                  # buttons used to drop there because the old wide cut included
+                  # the map background behind them; re-cut tight their worst
+                  # non-combat score is 0.431. Between the two, every combat
+                  # state is vetoed.
+                  "charge_btn", "dodge_btn")
 
 
 def looks_like_mission_scene(frame, templates):

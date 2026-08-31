@@ -259,8 +259,18 @@ def test_command_bar_layout():
     geo = BattleGeometry.locate(g, ch, do)
     # Measured directly off that frame earlier: AT(419,393) DO(469,393)
     # CH(419,443) RN(469,443).
-    check(geo.cmd("AT") == (419, 393), f"Attack at {geo.cmd('AT')} == (419,393)")
-    check(geo.cmd("RN") == (469, 443), f"Run at {geo.cmd('RN')} == (469,443)")
+    # A FEW PIXELS OF TOLERANCE, deliberately. These coordinates were measured
+    # off one particular template crop, and the command templates have since
+    # been re-cut tight to the disc (map-independence: the wide cut collapsed to
+    # 0.613 on a night map). Re-cutting legitimately moves a match centre by a
+    # pixel or two - measured dx -2 for charge, 0 for dodge - and 2 px on a
+    # ~50 px button is far below anything that affects a click. Asserting exact
+    # equality here would only pin the crop, not the geometry.
+    at, rn = geo.cmd("AT"), geo.cmd("RN")
+    check(abs(at[0] - 419) <= 4 and abs(at[1] - 393) <= 4,
+          f"Attack at {at} ~= (419,393)")
+    check(abs(rn[0] - 469) <= 4 and abs(rn[1] - 443) <= 4,
+          f"Run at {rn} ~= (469,443)")
 
 
 # --- 7. preflight is honest about missing templates -----------------------
@@ -284,16 +294,26 @@ def test_preflight():
 # --- 8. multi-match with suppression --------------------------------------
 def test_find_all_suppression():
     print("\n[8] _find_all collapses overlapping hits")
+    # A CURRENT-FORMAT frame, not the old low-res JPEG set. The command
+    # templates were re-cut tight to the button disc (78x78) to make them
+    # map-independent; at the JPEG set's ~0.46 scale that shrinks to ~36x36 and
+    # loses enough detail to fall under the gate, while it scores 0.949..1.000
+    # on the full-resolution PNGs the bot actually captures. This test is about
+    # `_find_all` collapsing overlapping hits, so it should run on what the bot
+    # sees.
     frame = cv2.cvtColor(cv2.imread(os.path.join(
-        ROOT, "ref/combat/t0_after_first_attack.jpg")), cv2.COLOR_BGR2GRAY)
+        ROOT, "ref/auto/mission/COMBAT.png")), cv2.COLOR_BGR2GRAY)
     t = tpl("charge_btn")
     hits = _find_all(frame, t, max_hits=8)
     # There is exactly ONE charge button on screen. Without suppression,
     # matchTemplate's neighbourhood would yield a cluster of near-identical hits.
     check(len(hits) == 1, f"one charge button -> one hit (got {len(hits)})")
     if hits:
-        check(abs(hits[0][0] - 419) < 12 and abs(hits[0][1] - 443) < 12,
-              f"hit at {hits[0]} matches the measured (419,443)")
+        # Measured on THIS frame (COMBAT.png): the charge disc sits at
+        # (921, 1003). The old (419, 443) belonged to the low-res JPEG this test
+        # used to run on, at roughly half the scale.
+        check(abs(hits[0][0] - 921) < 12 and abs(hits[0][1] - 1003) < 12,
+              f"hit at {hits[0]} matches the measured (921,1003)")
 
 
 # --- 9. the resume ladder, against recorded panel frames -------------------
@@ -2031,7 +2051,7 @@ def test_stop_aborts_the_task_but_keeps_the_panel():
     dead panel and no way back except the terminal - the recurring "no bot
     attached". Quit still exits.
     """
-    print("\nstop aborts the task but keeps the panel")
+    print("\nstop kills the process and resets task progress")
     import app as app_mod
 
     writes = []
@@ -2045,23 +2065,31 @@ def test_stop_aborts_the_task_but_keeps_the_panel():
         r.log = LOG
         r.mode = "running"
         r.task = "farm_missions"
+        r.cycle = 42
+        r.unknown = 7
+        r._relogs = 2
+        r.note = "mid-mission"
+        r.cdp = type("C", (), {"close": lambda self: None})()
+        r.push = lambda: None
+        cleared = []
+        r._reset_task_state = lambda: cleared.append(1)
         r._apply({"cmd": "stop", "arg": None})
         check(writes == ["stop"], f"the stop switch is thrown ({writes})")
         check(r.mode == "stopped", "the runner records that it is stopped")
-        check(exits == [], "and the PROCESS SURVIVES, so the panel stays live")
+        check(cleared == [1], "task progress is cleared")
+        check(exits == [0], "and the PROCESS IS KILLED, as the operator asked")
 
-        # Run must bring it straight back - no terminal needed.
-        writes.clear()
-        r._apply({"cmd": "run", "arg": None})
-        check(writes == ["run"], "Run re-arms the switch")
-        check(r.mode == "running", "and the bot is running again")
-
-        # Quit is still the one that exits.
-        r.cdp = type("C", (), {"close": lambda self: None})()
-        r.push = lambda: None
-        r.dock = type("D", (), {"remove": lambda self: None})()
-        r._apply({"cmd": "quit", "arg": None})
-        check(exits == [0], "Quit still terminates the process")
+        # The reset must clear PROGRESS and never operator PREFERENCES: grade,
+        # pinned mission, skill order and window size were chosen deliberately.
+        r2 = app_mod.Runner.__new__(app_mod.Runner)
+        r2.log = LOG
+        r2.cycle, r2.unknown, r2._relogs, r2.note = 9, 4, 1, "x"
+        r2._reset_task_state()
+        check((r2.cycle, r2.unknown, r2._relogs) == (0, 0, 0),
+              "counters are back to zero")
+        for pref in ("run/farm.json", "run/skills.json", "run/viewport.json"):
+            check(pref not in app_mod.Runner.PROGRESS_FILES,
+                  f"{pref} is a PREFERENCE and is never wiped")
     finally:
         app_mod._write_control = real_write
         os._exit = real_exit
@@ -2589,6 +2617,75 @@ def test_focus_pins_the_container_rather_than_nudging_it():
               f"focus never touches {bad} - that would desync the SWF")
 
 
+def test_command_buttons_are_map_independent():
+    """The command-bar templates must not carry the MAP behind them.
+
+    A farm mission stalled on a NIGHT map: the bot was in combat - Attack,
+    Dodge, Charge, Run all on screen, three enemies, the ring up - and ran
+    TRAVERSAL instead, clicking map edges. The buttons were found at the right
+    places but too faintly to gate on:
+
+        charge 0.613   dodge 0.725   attack 0.700   run 0.507   (gate is 0.70)
+
+    Not a scale problem - the best score was at scale 1.0, the same scale that
+    reaches 0.867/0.986 on a daylight frame. The templates were cut WIDE, with
+    map background around each button, so a dark map destroyed the correlation.
+    Re-cut tight to the disc, they are map-independent.
+    """
+    print("\ncommand buttons are map-independent")
+    from perceive import find
+    import bot as botmod, farm
+    from geometry import BattleGeometry
+    import json as _json
+    cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
+    tpls = botmod.load_templates(cfg, LOG)
+
+    dark = cv2.imread(os.path.join(ROOT, "ref/auto/mission/combat_dark_map.png"))
+    check(dark is not None, "the dark-map combat frame is committed")
+    if dark is None:
+        return
+    gd = cv2.cvtColor(dark, cv2.COLOR_BGR2GRAY)
+
+    for n in ("charge_btn", "dodge_btn"):
+        c = find(gd, tpls[n])[1]
+        check(c >= 0.88, f"{n} matches on a DARK map ({c:.3f}, was 0.613/0.725)")
+
+    BattleGeometry.forget()
+    check(BattleGeometry.locate(gd, tpls["charge_btn"], tpls["dodge_btn"]) is not None,
+          "so the command bar is located there at all")
+    check(farm.in_mission(dark, tpls) is not None,
+          "and the frame counts as in-mission")
+    check(farm.looks_like_mission_scene(dark, tpls) is False,
+          "so it is NOT walked through as scenery - the actual bug")
+
+    # The tight cut must not start firing off-combat.
+    for rel in ("ref/auto/lobby_full.png", "ref/auto/mission/room_00.png",
+                "ref/auto/mission/list_all_locked.png"):
+        pp = os.path.join(ROOT, rel)
+        if not os.path.exists(pp):
+            continue
+        g = cv2.cvtColor(cv2.imread(pp), cv2.COLOR_BGR2GRAY)
+        for n in ("charge_btn", "dodge_btn"):
+            c = find(g, tpls[n])[1]
+            check(c < 0.70,
+                  f"{n} stays silent on {os.path.basename(rel)} ({c:.3f})")
+
+    # COMPLEMENTARY, not redundant: the flag covers the between-turns frame the
+    # buttons cannot, and the buttons cover the dark frame the flag cannot.
+    btw = cv2.imread(os.path.join(ROOT, "ref/auto/mission/battle_between_turns.png"))
+    if btw is not None:
+        gb = cv2.cvtColor(btw, cv2.COLOR_BGR2GRAY)
+        flag_dark = find(gd, tpls["action_flag"])[1]
+        flag_btw = find(gb, tpls["action_flag"])[1]
+        check(flag_dark < 0.88,
+              f"action_flag alone FAILS on the dark map ({flag_dark:.3f}) - the "
+              f"Action! text is occluded by a sprite")
+        check(flag_btw >= 0.88,
+              f"but carries the between-turns frame ({flag_btw:.3f})")
+        check(farm.looks_like_mission_scene(btw, tpls) is False,
+              "so between-turns is vetoed too - the pair covers both")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2604,6 +2701,7 @@ def main():
                test_restriction_short_circuits_the_rotation,
                test_cooldowns_fall_back_to_attack_not_dodge,
                test_battle_between_turns_is_not_scenery,
+               test_command_buttons_are_map_independent,
                test_character_finder_rejects_scenery,
                test_one_character_finder_shared_by_both_runners,
                test_map_is_cleared_before_leaving,

@@ -313,7 +313,7 @@ _BOOTSTRAP = r"""
       `<h4>Task</h4><div class="g" id="v_tasks"></div>` +
       `<h4>Run</h4><div class="g">` +
         btn("run", "Run") + btn("pause", "Pause") +
-        btn("relog", "Relog") + btn("stop", "Stop") +
+        btn("relog", "Relog") + btn("stop", "Stop (kills + resets)") +
       `</div>` +
       `<h4>Farm target</h4>` +
       `<div class="row"><span class="d">grade</span><span id="v_grade"></span></div>` +

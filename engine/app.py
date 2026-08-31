@@ -304,9 +304,27 @@ class Runner:
             # it survives, but its buttons have no receiver. The operator is left
             # with a dead panel and no way back except the terminal, which is
             # exactly the "no bot attached" they kept hitting. Quit still exits.
-            self.log.info("operator: STOP (task aborted; press Run to resume)")
+            # STOP = KILL AND RESET, at the operator's request.
+            #
+            # This has been both ways in this project, so the reasoning is
+            # recorded. It first aborted the task and kept the process, because
+            # killing it left a live-looking panel with dead buttons. That is
+            # now a solved problem - the panel's staleness banner says "no bot
+            # attached" and prints the relaunch command - and the operator wants
+            # Stop to mean START AGAIN FROM NOTHING, not "pause here".
+            #
+            # So it wipes the transient task state as well. Everything held in
+            # memory - the cycle counter, the unknown streak, the relog budget,
+            # cached battle geometry, remembered dud targets - dies with the
+            # process, which is most of the reset. What has to be cleaned up
+            # explicitly is anything PERSISTED that would otherwise carry into
+            # the next launch.
+            self.log.info("operator: STOP - killing the bot and clearing task "
+                          "progress")
             _write_control("stop")
             self.mode = "stopped"
+            self._reset_task_state()
+            self._hard_exit()
         elif c == "skill":
             k = cmd.get("arg")
             if k in SKILL_SLOTS:
@@ -414,6 +432,32 @@ class Runner:
             self.relog()
 
     HEARTBEAT_EVERY = 3.0        # seconds; see the note below
+
+    # Files under run/ that hold TASK PROGRESS rather than operator PREFERENCES.
+    # Preferences must survive a Stop - the grade, the pinned mission, the skill
+    # order and the window size are all things the operator chose deliberately,
+    # and wiping them would be a nasty surprise.
+    PROGRESS_FILES = ("run/tasks.json",)
+
+    def _reset_task_state(self):
+        """Clear progress so the next launch starts fresh. Never preferences."""
+        self.cycle = 0
+        self.unknown = 0
+        self._relogs = 0
+        self.note = ""
+        try:
+            from geometry import BattleGeometry
+            BattleGeometry.forget()
+        except Exception:
+            pass
+        for rel in self.PROGRESS_FILES:
+            try:
+                os.unlink(os.path.join(ROOT, rel))
+                self.log.info("cleared %s", rel)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
 
     def _hard_exit(self, code=0):
         """Leave now, but leave things tidy.

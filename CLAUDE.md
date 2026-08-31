@@ -764,6 +764,48 @@ turn starts the rotation again from the top. `battle.restricted_after` tunes it.
 Note this is the *cheap* direction of the trade. Probing more costs 6 s a go and
 tells us nothing new; probing less costs at most one turn spent dodging.
 
+### THE COMMAND TEMPLATES CARRIED THE MAP BEHIND THEM — re-cut tight
+
+A farm mission stalled on a NIGHT map. The bot was plainly in combat — Attack,
+Dodge, Charge, Run on screen, three enemies, the ring up — and ran TRAVERSAL,
+clicking map edges. The buttons were found at exactly the right places but too
+faintly to gate on:
+
+    charge 0.613   dodge 0.725   attack 0.700   run 0.507      (gate 0.70)
+
+**Not a scale problem** — the best score was at scale 1.0, the same scale that
+reaches 0.867/0.986 on a daylight frame. The templates were cut **110x86**, wide
+enough to include the map background around each disc, and a dark map destroys
+that correlation. Re-cut to **78x78**, the disc only:
+
+| | dark map | daylight | worst non-combat |
+|---|---|---|---|
+| old wide cut | 0.613 | 0.867 | — |
+| new tight cut | **1.000** | **0.949** | **0.431** |
+
+The old crops are kept as `tpl/_wide_*.png` (underscore = not loaded).
+
+**RE-CUTTING A TEMPLATE MOVES THE GEOMETRY ANCHOR.** `BattleGeometry` derives
+every offset from the charge/dodge match centre, and the wide crop included the
+label BELOW each disc, putting its centre ~25 template px above the disc centre.
+`CMD_ANCHOR_DY = 25` restores the historical anchor rather than re-deriving
+~2,500 measurements. Three mistakes on the way, all caught by the suite and all
+worth remembering:
+
+1. **a raw 25 px** — right at scale 1.0, wrong by 12 px at 0.46, because
+   25 * 0.46 = 11.5. The offset is in TEMPLATE UNITS and must scale.
+2. **only one of three code paths** — `locate` has hint / narrow / full-sweep
+   branches and the first two return early, so correcting the full sweep alone
+   missed the common case. It belongs in `_best`, which all three share.
+3. **float centres** — the scaled subtraction produced floats, and those centres
+   are used to SLICE frames. Round to int.
+
+`action_flag` cannot be fixed the same way: on that frame an enemy sprite
+OCCLUDES the "Action!" text (0.750). But the two are complementary — the flag
+carries the between-turns frame (0.897) where no buttons are drawn, the buttons
+carry the dark frame (1.000) where the flag is occluded — so both are in
+`NOT_IN_MISSION` and between them every combat state is vetoed.
+
 ### A battle BETWEEN TURNS has no command bar — gate combat on `action_flag`
 
 This is the third instance of "a negative definition needs a positive veto",
