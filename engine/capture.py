@@ -204,7 +204,16 @@ class Capture:
         bottom. Anything that might sit in the hidden band must be looked for at
         both.
         """
+        # DO NOTHING IN FOCUS MODE. Focus mode hides the game's siblings so the
+        # document is no taller than the game and the scroll is deterministic -
+        # that is its entire purpose. Scrolling then is not just pointless, it
+        # MOVES THE GAME UNDER THE BOT and fights the re-align: measured in one
+        # session, 40 ladder scrolls against 5 re-aligns, with focus reporting
+        # ON while the game sat 58 CSS px above the viewport. From outside that
+        # looks like "it scrolls the window down instead of clicking, then tries
+        # to realign again".
         js = """(() => {
+          if (window.__nsbotFocusOn) return -2;   // pinned; scrolling is harmful
           const f = document.querySelector('iframe[src*="emulator"]')
                  || document.querySelector('iframe[src*="play"]');
           if (!f) return -1;

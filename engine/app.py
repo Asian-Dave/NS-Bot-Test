@@ -525,6 +525,17 @@ class Runner:
         if now - getattr(self, "_last_beat", 0.0) < self.HEARTBEAT_EVERY:
             return
         self._last_beat = now
+        # HOLD THE ALIGNMENT DURING LONG TASKS TOO. `ensure_focus` only runs
+        # between cycles, and a mission blocks for minutes - so the game could
+        # drift mid-task and stay drifted, which is exactly how the kekkai runes
+        # ended up located at a shifted position while the click never landed.
+        # `align` is a no-op when the game is already in place, so this cannot
+        # reintroduce the jumping that re-APPLYING focus caused.
+        try:
+            if self.focus_on and self.dock.align() == "realigned":
+                self.log.info("focus: drifted mid-task; re-aligned")
+        except Exception:
+            pass
         try:
             if self.dock.heartbeat() == "empty":
                 # The page reloaded and re-injected the panel with no state, so

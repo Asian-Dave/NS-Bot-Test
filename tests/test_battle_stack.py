@@ -2512,6 +2512,43 @@ def test_panel_recovers_its_content_after_a_reload():
           "focus is NOT forced back on when the operator turned it off")
 
 
+def test_scroll_is_refused_under_focus_mode():
+    """The ladder must not scroll the page while focus mode has it pinned.
+
+    Focus mode hides the game's siblings so the document is no taller than the
+    game and the scroll is deterministic - that is its entire purpose. The
+    resume ladder scrolls on every unrecognised frame to peek at the hidden
+    band, and under focus mode that is not merely pointless: it MOVES THE GAME
+    UNDER THE BOT and fights the re-align. Measured in one session, 40 ladder
+    scrolls against 5 re-aligns, with focus reporting ON while the game sat 58
+    CSS px above the viewport - which from outside looks like "it scrolls the
+    window down instead of clicking, then tries to realign again".
+    """
+    print("\nscroll is refused under focus mode")
+    import capture as capture_mod
+    import inspect as _i
+
+    src = _i.getsource(capture_mod.Capture.scroll_game)
+    check("__nsbotFocusOn" in src,
+          "scroll_game checks whether focus mode has the game pinned")
+    # The guard must come BEFORE any scrollTo, or it scrolls then bails.
+    guard = src.index("__nsbotFocusOn")
+    first_scroll = src.index("scrollTo(")
+    check(guard < first_scroll,
+          "and it checks BEFORE scrolling, not after")
+
+    class StubCDP:
+        def __init__(self): self.js = []
+        def evaluate(self, expr):
+            if "devicePixelRatio" in expr: return 2
+            if "innerWidth" in expr: return '{"w":1720,"h":720}'
+            self.js.append(expr)
+            return -2                     # what the guard returns
+    cap = capture_mod.Capture(StubCDP())
+    check(cap.scroll_game(1.0) == -2,
+          "a pinned game reports the scroll was refused")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2533,6 +2570,7 @@ def main():
                test_closed_window_shuts_the_bot_down,
                test_panel_stays_alive_during_a_mission,
                test_panel_recovers_its_content_after_a_reload,
+               test_scroll_is_refused_under_focus_mode,
                test_quit_exits_cleanly_and_frees_the_lock,
                test_lock_verifies_identity_not_just_liveness,
                test_no_viewport_lets_the_panel_cover_the_game,
