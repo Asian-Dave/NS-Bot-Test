@@ -42,11 +42,17 @@ WHAT IS STILL UNVERIFIED — read before trusting this live
   "turn did not resolve inside `action_timeout`" as failure and rotate. That is
   the reference bot's own heuristic and it is not proven correct here.
 """
+import os
+import time
+
 import cv2
 
 import combat
+import gate as gate_mod
 from gate import Stopped
 from geometry import BattleGeometry
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # Outcomes. Deliberately explicit strings — they end up in logs and counters.
@@ -86,6 +92,30 @@ class SkillRotation:
         # it keeps a buff-only slot from being counted as a damage attempt.
         self.kinds = dict(kinds or {})
 
+    def turn_ended(self, something_resolved):
+        """Close the books on this turn, now that its outcome is known.
+
+        A failure only bounds a cooldown if the turn was otherwise healthy. If
+        NOTHING resolved we were probably stunned or frozen, and every failure
+        this turn is uninformative - admitting them would invent lower bounds
+        and eventually DISABLE A WORKING SKILL, which is much worse than
+        learning nothing.
+        """
+        pending = getattr(self, "_failed_this_turn", [])
+        self._failed_this_turn = []
+        for slot in pending:
+            learned = self.tracker.record(slot, False,
+                                          turn_was_healthy=something_resolved)
+            if learned:
+                self.log.info("rotation: LEARNED %s has a %d-round cooldown "
+                              "(from a failure on an otherwise healthy turn)",
+                              slot, learned)
+            elif something_resolved:
+                lo, hi = self.tracker.bracket(slot)
+                if lo is not None or hi is not None:
+                    self.log.info("rotation: %s cooldown is between %s and %s "
+                                  "rounds so far", slot, lo, hi)
+
     def candidates(self):
         """Offerable slots, in preference order, cooling ones removed.
 
@@ -110,7 +140,11 @@ class SkillRotation:
         the queue. Both, not either: bookkeeping is exact where we know the
         cooldown, and demotion covers the slots where we do not.
         """
-        self.tracker.use(slot)
+        learned = self.tracker.record(slot, True)
+        if learned:
+            self.log.info("rotation: LEARNED %s has a %d-round cooldown - it "
+                          "will be withheld until ready instead of clicked and "
+                          "waited on", slot, learned)
         # In PRIORITY mode a slot with a KNOWN cooldown keeps its place: the
         # tracker will withhold it until it is ready again, so the order can stay
         # exactly as configured. A slot whose cooldown we do NOT know still has
@@ -126,9 +160,15 @@ class SkillRotation:
     def failed(self, slot):
         """Called when clicking `slot` did nothing observable.
 
-        Same demotion, but no cooldown bookkeeping — we did not spend it. Most
-        likely it was on cooldown or we lacked the CP.
+        Same demotion, and the failure is REMEMBERED rather than acted on: on
+        its own it does not say why. A skill can fail because it is cooling,
+        because we are stunned, because CP ran out, or because the click
+        missed - and only the first of those says anything about a cooldown.
+        What separates them is whether anything ELSE resolved this turn, which
+        is not known until the turn is over. So it waits for `turn_ended`.
         """
+        self._failed_this_turn = getattr(self, "_failed_this_turn", [])
+        self._failed_this_turn.append(slot)
         if slot in self.order:
             self.order.remove(slot)
             self.order.append(slot)
@@ -386,6 +426,27 @@ class BattleRunner:
                 skipped = True
                 continue
             point = geo.slot(slot) if slot.startswith("S") else geo.cmd(slot)
+
+            # DO NOT CLICK A GREYED SKILL AT ALL. The game draws a cooling
+            # skill in true greyscale - measured saturation 0.0 inside the
+            # tile against 164.0 for a ready one - so the answer to "may I use
+            # this" is on screen before we touch anything.
+            #
+            # This is the operator's actual complaint: a cooling skill was
+            # clicked, the click did nothing, and the turn then burned the full
+            # ~6s resolve timeout before falling through to Attack. Twice in a
+            # turn is 12s of standing still. Reading the tile removes the click
+            # rather than making the wait shorter.
+            #
+            # An UNKNOWN reading (None - off-frame, degenerate crop) offers the
+            # slot anyway: the cost of trying is one timeout, while the cost of
+            # wrongly withholding is a skill that never fires again.
+            if slot.startswith("S"):
+                if combat.slot_cooling(frame_bgr, point):
+                    self.log.info("battle: %s is greyed out (cooling) - not "
+                                  "clicking it", slot)
+                    continue
+
             self.actor.click_pixel(*point, why=f"action {slot} (round {rounds})")
 
             # Two-step: action, then target. CLAUDE.md records this as the
@@ -397,6 +458,9 @@ class BattleRunner:
             resolved = self._wait_resolved(slot)
             if resolved:
                 self.rotation.resolved(slot)
+                # Something fired, so this turn was NOT a stun - which is what
+                # makes every other failure in it usable evidence.
+                self.rotation.turn_ended(True)
                 return True
             self.rotation.failed(slot)
             misses += 1
@@ -421,6 +485,11 @@ class BattleRunner:
             self.actor.click_pixel(*geo.cmd(slot),
                                    why=f"restricted -> {slot} (round {rounds})")
             if self._wait_resolved(slot):
+                # Dodge resolving while everything else failed is the STUN
+                # signature, so this turn teaches nothing about cooldowns.
+                # Recording it would invent lower bounds for skills that were
+                # never cooling at all.
+                self.rotation.turn_ended(False)
                 return True
 
         # Fall back to the configured closing
@@ -434,10 +503,28 @@ class BattleRunner:
             if target:
                 self.actor.click_pixel(*geo.target(target),
                                        why=f"target {target} for closing")
-            return bool(self._wait_resolved(self.closing_action))
+            closed = bool(self._wait_resolved(self.closing_action))
+            # A plain attack landing PROVES we were not stunned, so the skills
+            # that failed this turn really were cooling - that is the most
+            # informative turn there is for learning a cooldown.
+            self.rotation.turn_ended(closed)
+            return closed
         self.log.warning("battle: no action resolved this turn and no closing "
                          "action configured")
+        # NOTHING resolved at all, so nothing is known about why any of it
+        # failed. Flush as unhealthy, and flush on EVERY exit: a turn whose
+        # failures are never flushed leaves them pending, and they would then
+        # be attributed to the NEXT turn's round number - a silent off-by-one
+        # in the one place a wrong number disables a working skill.
+        self.rotation.turn_ended(False)
         return False
+
+    # The game's own refusal message, if we have a template for it. Named here
+    # rather than inline so it is obvious what to cut and where it plugs in.
+    COOLDOWN_TPL = "skill_cooldown"
+    # How many mystery frames to keep per process. Enough to cut a template
+    # from; not enough to fill a disk on a bad night.
+    KEEP_FAILED_FRAMES = 3
 
     def _wait_resolved(self, slot):
         """Did the turn actually end after clicking `slot`?
@@ -446,9 +533,66 @@ class BattleRunner:
         signal the reference bot uses. Note this cannot distinguish "the skill
         fired" from "the skill fired and did nothing useful"; the watchdog is
         what catches the latter, one turn later.
+
+        A REFUSAL IS ALSO AN ANSWER, and a much faster one. When a skill is on
+        cooldown the game says so in a message at the top of the screen, and
+        nothing else happens - so waiting for the command bar to disappear
+        means waiting out the whole `action_timeout` (~6 s) to learn what the
+        game told us immediately. Two failures in a turn is 12 s of standing
+        still.
+
+        So the refusal is watched for alongside the success conditions, and it
+        LOSES the race deliberately: whichever fires first ends the wait, and a
+        refusal returns False at once.
+
+        This activates by itself when `tpl/skill_cooldown.png` exists, and is
+        simply skipped until then - no code change needed to switch it on. The
+        template has to be cut from a real frame showing the message, which is
+        what `_keep_failed_frame` below is for. Guessing at a crop for a
+        message nobody has looked at would be the "measure, don't eyeball"
+        mistake this project keeps paying for.
         """
         waits = [self.conditions["result_panel"],
                  self.conditions["command_bar_gone"]]
+        cd_tpl = (self.templates or {}).get(self.COOLDOWN_TPL)
+        if cd_tpl is not None:
+            waits.append(gate_mod.template(self.COOLDOWN_TPL, cd_tpl))
         fired = self.gate.wait_for_any(waits, self.action_timeout,
                                        why=f"resolve {slot}")
+        if fired is not None and getattr(fired, "name", "") == self.COOLDOWN_TPL:
+            self.log.info("battle: the game says %s is on COOLDOWN - moving to "
+                          "the next action instead of waiting out %.1fs",
+                          slot, self.action_timeout)
+            return False
+        if not fired:
+            self._keep_failed_frame(slot)
         return bool(fired)
+
+    def _keep_failed_frame(self, slot):
+        """Save the screen that refused us, so the message can be templated.
+
+        Every unrecognised screen in this project turned out to be ONE anchor
+        from ONE frame away from handled - the mission list, a battle between
+        turns, the seal-broken dialog, the Level Up panel. The hard part was
+        always CATCHING the frame, and a skill timing out on cooldown is
+        exactly the moment the refusal message is on screen.
+        """
+        if (self.templates or {}).get(self.COOLDOWN_TPL) is not None:
+            return                      # already templated; nothing to learn
+        n = getattr(self, "_kept_frames", 0)
+        if n >= self.KEEP_FAILED_FRAMES:
+            return
+        try:
+            frame = self.capture.frame(gray=False)
+            d = os.path.join(ROOT, "ref/auto/battle")
+            os.makedirs(d, exist_ok=True)
+            path = os.path.join(d, f"cooldown_msg_{slot}_{int(time.time())}.png")
+            cv2.imwrite(path, frame)
+            self._kept_frames = n + 1
+            self.log.info("battle: %s timed out - saved %s. If the game drew "
+                          "an 'on cooldown' message, crop it to "
+                          "tpl/%s.png and this wait gets ~%.0fs shorter.",
+                          slot, os.path.relpath(path, ROOT), self.COOLDOWN_TPL,
+                          self.action_timeout)
+        except Exception as e:
+            self.log.warning("battle: could not save the refusal frame: %s", e)

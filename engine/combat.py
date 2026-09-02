@@ -201,7 +201,69 @@ def find_enemy_bars(frame_bgr, x0, x1, y0, y1, bar_h=10, min_run=40,
 
 
 # ---------------------------------------------------------------------------
-# Cooldowns — ROUND-based bookkeeping, not pixel inspection
+# READING COOLDOWN OFF THE ICON - which this file long said was impossible.
+#
+# **CORRECTION, and the old measurement was aimed at the wrong pixels rather
+# than simply wrong.** The standing rule was "do not use icon saturation as the
+# primary cooldown signal", on the evidence that mean saturation across the
+# eight slots ran 56.2 .. 190.8 CONTINUOUSLY with no bimodal split, and that a
+# pale-pink slot read 56 while perfectly usable.
+#
+# That mean was taken over the WHOLE TILE - including the metal border, which
+# stays coloured whatever the state and drags a cooling tile up into the usable
+# range. Measured on the tile INTERIOR instead, on live frames where three
+# skills were cooling and one was ready:
+#
+#     slot   mean sat   frac(sat > 60)   state
+#     S1         0.0         0.000       cooling
+#     S2       164.0         0.905       READY
+#     S3         0.0         0.000       cooling
+#     S4         0.0         0.000       cooling
+#
+# A cooling skill is drawn in TRUE GREYSCALE - saturation identically zero, not
+# merely low - which is about as clean a signal as this project has found. The
+# pale-pink counter-example was a COLOURED tile with washed-out art: it has
+# some saturation, whereas a cooling tile has none at all.
+#
+# The game also prints the remaining count on the tile (7, 22 and 10 were
+# observed on the three cooling slots), so an exact countdown is there if it is
+# ever wanted. The bot does not need it: "may I use this now" is the only
+# question being asked, and greyscale answers it with no digit reading.
+#
+# SAMPLE CAVEAT, stated plainly: this comes from two frames six seconds apart
+# in ONE battle - one ready example, three cooling. The separation is total and
+# the mechanism is a standard convention, but a second ready slot on a
+# different frame would make it solid. The gate sits well below the observed
+# ready value so a washed-out-but-ready tile has room.
+COOLING_SAT = 60          # a pixel this saturated counts as coloured
+COOLING_FRAC = 0.25       # ready measured 0.905, cooling 0.000
+# The interior, as an inset from the tile centre - deliberately inside the
+# border, which is exactly what poisoned the original measurement.
+COOLING_BOX = (38, 42, 30)   # half-width, up from centre, down from centre
+
+
+def slot_cooling(frame_bgr, centre):
+    """Is the skill at `centre` greyed out (cooling)? True / False / None.
+
+    None means the tile could not be sampled - off-frame or degenerate - and a
+    caller must treat that as UNKNOWN, never as ready or cooling.
+    """
+    if frame_bgr is None or centre is None:
+        return None
+    dx, up, down = COOLING_BOX
+    cx, cy = int(centre[0]), int(centre[1])
+    h, w = frame_bgr.shape[:2]
+    x0, x1 = max(0, cx - dx), min(w, cx + dx)
+    y0, y1 = max(0, cy - up), min(h, cy + down)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    box = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+    frac = float((box[:, :, 1] > COOLING_SAT).mean())
+    return frac < COOLING_FRAC
+
+
+# ---------------------------------------------------------------------------
+# Cooldowns - ROUND bookkeeping, as a cross-check and a fallback
 # ---------------------------------------------------------------------------
 class CooldownTracker:
     """Track skill cooldowns by counting ROUNDS, not by reading icons.
@@ -221,6 +283,9 @@ class CooldownTracker:
         self.round = 0
         self.cooldowns = dict(cooldowns or {})   # slot -> cd length in rounds
         self.used_at = {}                        # slot -> round it was used
+        self.learned = {}                        # slot -> length measured in play
+        self._lo = {}                            # slot -> cooldown is >= this
+        self._hi = {}                            # slot -> cooldown is <= this
 
     def next_round(self):
         self.round += 1
@@ -232,9 +297,103 @@ class CooldownTracker:
     def ready(self, slot):
         cd = self.cooldowns.get(slot)
         if cd is None:
+            cd = self.learned.get(slot)          # measured in play, if we have it
+        if cd is None:
             return None                          # unknown length - do not guess
         used = self.used_at.get(slot)
         return True if used is None else (self.round - used) >= cd
+
+    # ------------------------------------------------------------------
+    # LEARNING THE LENGTHS, from outcomes we already record.
+    #
+    # The lengths are not in the game's client - `SKILL_DATA` is populated at
+    # runtime by the server - so this file's own note says each slot has to be
+    # measured in game and written into the config by hand. That never happened
+    # for a single slot (`rounds_per_slot` is still `{}`), so `ready()` has
+    # always returned None and the rotation has always fallen back to
+    # rotate-on-resolve. Which means the bot re-clicks a cooling skill, waits
+    # out the full ~6 s resolve timeout, and only then tries something else.
+    #
+    # But the length can be BRACKETED from what already happens, with no new
+    # perception whatsoever:
+    #
+    #     a slot USED at round U and used again SUCCESSFULLY at round R
+    #         -> the cooldown is at most R - U
+    #     a slot USED at round U that FAILED at round R
+    #         -> the cooldown is more than R - U
+    #
+    # Squeeze the two together and the value is exact. It is the same shape as
+    # the Mastermind solver in `kekkai.py`: keep every candidate consistent
+    # with the evidence and wait for one to survive.
+    #
+    # THE FAILURE SIDE IS THE DANGEROUS HALF, because a skill can fail for
+    # reasons that have nothing to do with cooldown - a stun, too little CP, a
+    # click that missed. A lower bound learned from one of those would be a
+    # lie, and a lie here DISABLES A WORKING SKILL. So a failure is only
+    # admitted as evidence when the caller can say the turn was otherwise
+    # healthy (see `observe_failure`), and a length is only TRUSTED once the
+    # bracket has closed and held. Until then `ready()` keeps returning None
+    # and nothing changes.
+    MAX_PLAUSIBLE = 12          # rounds; beyond this we have mis-inferred
+
+    def record(self, slot, fired, turn_was_healthy=True):
+        """The ONE way to report what happened to a slot. Returns a length if
+        this observation closed the bracket, else None.
+
+        A SINGLE ENTRY POINT ON PURPOSE. The first version of this had separate
+        `observe_success` / `observe_failure` next to `use()`, and the order you
+        called them in silently decided whether anything was learned: `use()`
+        overwrites the last-used round, so calling it first made the gap zero
+        and the upper bound was never recorded. A simulation of a 3-round
+        cooldown ran eleven rounds and learned nothing, with the bracket stuck
+        at (3, None) - an API where the wrong order fails silently is a bad API,
+        so the bookkeeping is done here where the order cannot be got wrong.
+
+        A FAILED use does not consume the skill, so `used_at` is only advanced
+        when it actually fired.
+        """
+        used = self.used_at.get(slot)
+        if fired:
+            if used is not None and self.round - used > 0:
+                gap = self.round - used
+                hi = self._hi.get(slot)
+                self._hi[slot] = gap if hi is None else min(hi, gap)
+            self.used_at[slot] = self.round          # spent, so it starts now
+        elif turn_was_healthy and used is not None:
+            # It did not fire and the turn was otherwise fine, so the cooldown
+            # must still have been running: it is longer than this gap.
+            gap = self.round - used
+            if gap >= 0:
+                lo = self._lo.get(slot)
+                self._lo[slot] = gap + 1 if lo is None else max(lo, gap + 1)
+        return self._settle(slot)
+
+    def _settle(self, slot):
+        """Promote a closed bracket to a learned length. Returns it, or None."""
+        lo, hi = self._lo.get(slot), self._hi.get(slot)
+        if lo is None:
+            # A COOLDOWN IS AT LEAST ONE ROUND, by definition - nothing can be
+            # cast twice in the same round. So the lower bound is never really
+            # unknown, and without this a 1-round cooldown could NEVER be
+            # learned: it is ready again the very next round, so it never
+            # fails, so no failure-derived bound is ever recorded and the
+            # bracket sits at (None, 1) forever. Measured exactly that way -
+            # cooldowns of 2, 3, 5 and 7 all converged while 1 stayed unknown.
+            lo = 1
+        if hi is None or lo != hi:
+            return None
+        if not (1 <= lo <= self.MAX_PLAUSIBLE):
+            # Contradictory or absurd. Throw the bracket away rather than act
+            # on it - the evidence was polluted by something we cannot see.
+            self._lo.pop(slot, None)
+            self._hi.pop(slot, None)
+            return None
+        self.learned[slot] = lo
+        return lo
+
+    def bracket(self, slot):
+        """(low, high) of what the cooldown could still be. For logging."""
+        return (self._lo.get(slot), self._hi.get(slot))
 
     def rounds_remaining(self, slot):
         cd = self.cooldowns.get(slot)
