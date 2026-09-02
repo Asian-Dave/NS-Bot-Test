@@ -58,6 +58,7 @@ import cv2
 
 import browser
 import dock as dock_mod
+import presence
 import resume
 from act import Actor, Controls
 from bot import load_templates
@@ -1223,6 +1224,9 @@ def main():
                          "instead of launching an app window")
     ap.add_argument("--no-dock", action="store_true",
                     help="skip the panel (headless-ish; controls via run/bot.control)")
+    ap.add_argument("--no-keep-awake", action="store_true",
+                    help="let the machine idle normally while the bot runs "
+                         "(screen sleeps and locks, Teams presence goes Away)")
     a = ap.parse_args()
 
     # ONE RUNNER AT A TIME. Nothing stopped a second instance attaching to the
@@ -1270,6 +1274,13 @@ def main():
                        window=(VIEWPORT[0] + 8, VIEWPORT[1] + 90))
 
     log = Log()
+
+    # A run is long and hands-off, so the machine would idle out from under it:
+    # display asleep, screen locked, Teams presence Away. See engine/presence.py.
+    keeper = presence.KeepAwake(log)
+    if not a.no_keep_awake:
+        keeper.start()
+
     tpls = load_templates(cfg, log)
     controls = Controls(os.path.join(ROOT, "run/bot.control"), log)
     _write_control("pause")
@@ -1287,6 +1298,10 @@ def main():
     except KeyboardInterrupt:
         log.info("interrupted")
     finally:
+        try:
+            keeper.stop()
+        except Exception:
+            pass
         c.close()
         try:
             if _lock_holder(lock) == os.getpid():
