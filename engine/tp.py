@@ -240,27 +240,102 @@ def find_mission_rows(frame, x0=1650, x1=2550, y0=200, y1=1050,
             if (r[-1] - r[0]) >= min_h]
 
 
+# How much of the screen must change for a click to count as having DONE
+# something. A detail panel covers a large part of the canvas, so this does not
+# need to be delicate - it only has to separate "a panel opened" from "the
+# click was swallowed".
+ROW_CHANGE_FRAC = 0.02
+
+
+def _changed(a, b, frac=ROW_CHANGE_FRAC):
+    """Did the screen materially change between two frames?
+
+    Returns (changed, measured_fraction) so the number reaches the log and the
+    threshold can be re-derived from real runs instead of argued about.
+    """
+    if a is None or b is None or a.shape != b.shape:
+        return True, 1.0
+    d = cv2.absdiff(cv2.cvtColor(a, cv2.COLOR_BGR2GRAY),
+                    cv2.cvtColor(b, cv2.COLOR_BGR2GRAY))
+    f = float((d > 24).mean())
+    return f >= frac, f
+
+
+
+def _save_frame(frame, log, tag):
+    """Keep the frame that ended a decision, so it can be taught later.
+
+    Same reasoning as the runner's unknown-screen dump: every unrecognised
+    screen in this project turned out to be one anchor from one frame away from
+    handled, and the hard part was always CATCHING the frame.
+    """
+    try:
+        d = os.path.join(ROOT, "ref/auto/tp")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{tag}_{int(time.time())}.png")
+        cv2.imwrite(path, frame)
+        log.info("saved %s - commit it to teach this screen",
+                 os.path.relpath(path, ROOT))
+    except Exception as e:
+        log.warning("could not save the frame: %s", e)
+
 def start_row(actor, cap, log, y, x=2195, settle=2.6):
-    """Open the mission whose title bar is at `y`, and press its green check."""
+    """Open the mission whose title bar is at `y`, and press its green check.
+
+    Returns (started, reason). The REASON is the point: "it did not start" was
+    previously one outcome covering two completely different situations, and
+    the bot needs them apart to know when a day's list is genuinely finished.
+
+        "started"    the green check was pressed
+        "exhausted"  the row is inert or has no green check - it is done
+        "no_panel"   the click changed the screen but produced no usable panel,
+                     which is a transient miss and worth another sweep
+
+    A COMPLETED TP mission is not clickable, and an unclickable row leaves the
+    screen exactly as it was. So "nothing changed" is a POSITIVE reading of
+    "this one is finished" rather than the absence of a green check - which is
+    the negative definition this project keeps getting caught by.
+    """
+    before = cap.frame(gray=False)
     actor.click_pixel(x, y, why=f"open the mission at y={y}")
     time.sleep(settle)
-    g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+    after = cap.frame(gray=False)
+
+    moved, frac = _changed(before, after)
+    if not moved:
+        log.info("the row at y=%d did not respond to a click (%.4f of the "
+                 "screen changed) - it is greyed out, so it is already done",
+                 y, frac)
+        return False, "exhausted"
+
+    g = cv2.cvtColor(after, cv2.COLOR_BGR2GRAY)
     pt, cc = green_check(g)
     if not pt:
-        log.info("detail panel did not open, or its green check was not found "
-                 "(%.3f)", cc)
-        return False
+        # The screen DID change, so something opened - but there is no control
+        # to start it. Save the frame: this is the shape a completed or locked
+        # TP row takes, and one committed frame is all a proper template needs.
+        log.info("the row at y=%d opened something with no green check "
+                 "(%.3f) - treating it as done", y, cc)
+        _save_frame(after, log, f"tp_row_no_check_y{y}")
+        return False, "exhausted"
+
     actor.click_pixel(*pt, why=f"start mission ({cc:.3f})")
     time.sleep(3.0)
-    return True
+    return True, "started"
 
 
-def pick_any(actor, cap, log, skip=(), max_pages=3):
+def pick_any(actor, cap, log, skip=(), max_pages=3, done=None):
     """Start ANY unplayed mission on the TP list. Returns its (page, y) or None.
 
     Name-agnostic on purpose: what the mission actually is gets decided by
     looking at the minigame once it opens.
+
+    `done` collects rows found to be EXHAUSTED (greyed out, or opening with no
+    green check). The caller adds them to `skip` so a finished row is not
+    re-clicked on every sweep, which is what made a pass look like it was
+    stuck re-reading the same list.
     """
+    done = done if done is not None else []
     nxt = _tpl("page_next", 0.85)
     for page in range(max_pages):
         f = cap.frame(gray=False)
@@ -269,9 +344,15 @@ def pick_any(actor, cap, log, skip=(), max_pages=3):
         for y in rows:
             if any(abs(y - sy) < 40 and page == sp for sp, sy in skip):
                 continue
-            if start_row(actor, cap, log, y):
+            started, why = start_row(actor, cap, log, y)
+            if started:
                 return (page, y)
-            log.info("row at y=%d would not start; trying the next", y)
+            # An exhausted row is not worth revisiting on a later sweep, so it
+            # joins the skip list the caller passed in. A transient miss is
+            # left alone deliberately - the next sweep should try it again.
+            if why == "exhausted":
+                done.append((page, y))
+            log.info("row at y=%d would not start (%s); trying the next", y, why)
         g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
         nm, nc = find(g, nxt)
         if not nm.found:
@@ -434,7 +515,13 @@ def close_out(actor, cap, log, timeout=45):
     return False
 
 
-def run_all(cap, actor, log, max_missions=6, relog=None):
+# A TRIPWIRE, NOT A POLICY. The pass ends when the list says it is finished,
+# so this exists purely so a bug cannot spin forever - if it is ever hit, the
+# termination condition is broken and the log should say so loudly.
+SWEEP_TRIPWIRE = 40
+
+
+def run_all(cap, actor, log, relog=None, max_missions=None):
     """Play EVERY TP mission on the list, whatever they turn out to be.
 
     The mission is chosen by position, not by name, and what it IS gets decided
@@ -443,22 +530,56 @@ def run_all(cap, actor, log, max_missions=6, relog=None):
     implies is not necessarily the minigame you get, and matching names needs a
     new template for every mission that is ever added or renamed.
 
-    Completed missions drop out of the day's list, so this simply keeps taking
-    the first startable row until nothing is left. A FAILED mission is NOT
-    consumed - it stays listed - so rows that fail are remembered and skipped
-    rather than retried forever.
+    THERE IS NO MISSION CAP. There used to be one (`max_missions=6`), and it
+    was the wrong shape of answer twice over: a count is not the thing that
+    decides whether the day's list is finished, and it silently stopped a pass
+    while startable missions were still on screen. The list itself is the
+    authority - keep going until every row is either played or measured to be
+    unstartable.
+
+    **CORRECTION - completed missions do NOT drop out of the list.** This
+    function used to say they did, and built its termination on it. They stay
+    listed and go GREY, which is not clickable, which is why a pass could look
+    like it was working through a list that never shrank. An unclickable row
+    leaves the screen unchanged when clicked, and `start_row` reads that as a
+    positive "this one is done" rather than inferring it from a missing green
+    check.
+
+    A FAILED mission is NOT consumed - it stays listed and startable - so rows
+    that fail are remembered and skipped for the rest of THIS pass rather than
+    retried forever.
+
+    `max_missions` remains only as an explicit opt-in bound for a caller that
+    genuinely wants one (a test, or a cautious manual run). The default is
+    unbounded.
 
     Returns (played, banked).
     """
     played = banked = 0
-    tried = []
-    for _ in range(max_missions):
+    tried = []        # rows started this pass: played, or failed and set aside
+    exhausted = []    # rows measured to be finished - greyed out or unstartable
+    sweeps = 0
+    while True:
+        sweeps += 1
+        if max_missions is not None and played >= max_missions:
+            log.info("stopping at the caller's limit of %d mission(s)",
+                     max_missions)
+            break
+        if sweeps > SWEEP_TRIPWIRE:
+            log.error("TP: %d sweeps without exhausting the list - the "
+                      "termination check is not working; stopping to avoid "
+                      "looping. %d played, %d rows set aside",
+                      sweeps, played, len(tried) + len(exhausted))
+            break
         if not to_tp_list(actor, cap, log):
             log.info("could not reach the TP list")
             break
-        spot = pick_any(actor, cap, log, skip=tried)
+        spot = pick_any(actor, cap, log, skip=tried + exhausted,
+                        done=exhausted)
         if spot is None:
-            log.info("no more startable TP missions today")
+            log.info("every TP row is now played or greyed out - the day's "
+                     "list is finished (%d played, %d already done)",
+                     played, len(exhausted))
             break
         tried.append(spot)
         played += 1
@@ -489,7 +610,7 @@ def _recover_to_lobby(cap, actor, log, timeout=120, relog=None):
     none supplied the behaviour is unchanged.
     """
     import resume
-    from bot import load_templates
+    from perceive import load_templates
     import json as _json
 
     def _climb():

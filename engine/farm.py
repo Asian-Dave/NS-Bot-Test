@@ -409,9 +409,17 @@ def farm(cap, actor, log, cfg, controls=None, repeat=0):
             log.info("nothing startable; stopping")
             break
         started += 1
+        # A PLAIN IMPORT, at the top of the loop body rather than hidden in the
+        # argument list. `__import__("bot")` lived here and was invisible to
+        # every grep for an import statement, so deleting `bot.py` broke the
+        # mission-start path only - the one place a test suite that never
+        # launches a mission could not see. It cost a live run: the bot reached
+        # the start dialogue, pressed the green check, and threw
+        # ModuleNotFoundError on every single attempt.
+        from perceive import load_templates
         runner = mission_mod.MissionRunner(
             Gate(cap, log, controls), actor, cap,
-            __import__("bot").load_templates(cfg, log), cfg, log, controls)
+            load_templates(cfg, log), cfg, log, controls)
         runner.grade = g          # the panel already told us; do not re-require it
         try:
             out, stats = runner.run()
@@ -457,6 +465,43 @@ def in_mission(frame, templates):
     waited for input, and combat never reacted at all.
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # ASK THE CHEAP QUESTIONS FIRST. This used to run the command-bar geometry
+    # sweep before any template, and a cold sweep on a 3440x1440 frame measures
+    # **12.96 s** against 1.28 s warm - so pressing Run from the village paid
+    # thirteen seconds of 100% CPU in `matchTemplate` to be told there is no
+    # command bar, which is exactly the screen where the answer was already
+    # obvious. It reads as the bot freezing before it starts, and the panel
+    # genuinely does stop responding: nothing captures during a sweep, so the
+    # operator's buttons are not pumped either.
+    #
+    # The order below is by COST, with correctness preserved at every step:
+    #
+    #   1. IN_MISSION anchors      ~0.07 s   positive proof we ARE in one
+    #   2. OUTSIDE_MISSION anchors ~0.07 s   positive proof we are NOT
+    #   3. command-bar geometry    12.96 s   only for the genuinely ambiguous
+    #
+    # Step 3 still exists because it is the ONLY thing that catches a battle
+    # whose `action_flag` is occluded - measured 0.750 on the dark map, where
+    # the command buttons read 1.000. That case is rare; it should not be
+    # charged to every cycle in the village.
+    for name in IN_MISSION:
+        t = templates.get(name)
+        if t is not None and find(gray, t)[0].found:
+            return name
+
+    # Lobby, character select and mission-list UI. None of these is ever drawn
+    # during a battle or a traversal map, so a match is positive proof that we
+    # are not inside a mission and the sweep can be skipped entirely.
+    #
+    # Deliberately NOT `NOT_IN_MISSION`, despite the name: that set is the veto
+    # list for `looks_like_mission_scene` and CONTAINS `action_flag` and the
+    # command buttons, which prove the opposite of what is wanted here.
+    for name in OUTSIDE_MISSION:
+        t = templates.get(name)
+        if t is not None and find(gray, t)[0].found:
+            return None
+
     ch, do = templates.get("charge_btn"), templates.get("dodge_btn")
     if ch is not None and do is not None:
         try:
@@ -465,11 +510,21 @@ def in_mission(frame, templates):
                 return "command_bar"
         except Exception:
             pass
-    for name in IN_MISSION:
-        t = templates.get(name)
-        if t is not None and find(gray, t)[0].found:
-            return name
     return None
+
+
+# Screens that are OUTSIDE a mission entirely: the village, character select,
+# and the mission list/detail UI you pass through to start one. A match here
+# means the expensive command-bar sweep can be skipped.
+#
+# This is a strict subset of NOT_IN_MISSION with the combat anchors removed -
+# `action_flag`, `level_up`, `charge_btn` and `dodge_btn` all belong to a
+# mission in progress, and including them here would report "not in a mission"
+# in the middle of a battle, which is the bug `in_mission` exists to prevent.
+OUTSIDE_MISSION = ("lobby_rail_fortune", "char_slot_level", "play_btn",
+                   "logged_out", "grade_tab", "mission_room",
+                   "page_next", "page_prev", "mission_locked",
+                   "list_back_arrow")
 
 
 # Anchors that prove we are NOT in a mission. All are high-margin.

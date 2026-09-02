@@ -60,8 +60,9 @@ import browser
 import dock as dock_mod
 import presence
 import resume
+import tasks
 from act import Actor, Controls
-from bot import load_templates
+from perceive import load_templates
 from capture import Capture
 from cdp import CDP, CDPError, find_page_target
 
@@ -114,26 +115,94 @@ VIEWPORTS = [
 ]
 VIEWPORT_PATH = "run/viewport.json"
 
-TASKS = [
-    {"key": "resume_to_lobby", "label": "Resume to lobby"},
-    {"key": "tp_training",     "label": "TP training"},
-    {"key": "farm_missions",   "label": "Farm missions"},
-    {"key": "idle",            "label": "Idle"},
-]
+# The panel's task list comes from the registry, so a task is declared in
+# exactly one place - see engine/tasks.py. It used to be declared here AND
+# handled in two separate branches of `step`.
+TASKS = tasks.AS_DICTS
+
+
+# OPENCV THREADS. Capped where the build allows it - which is NOT here.
+#
+# `cv2` defaults to one thread per core (18 on this machine) and every template
+# match saturates them, which is most of "why does my Mac get hot while the bot
+# runs". So capping looked like free heat relief.
+#
+# **A MEASUREMENT THAT WAS NOT MEASURING ANYTHING.** A sweep of thread counts
+# came back suspiciously flat - 1.265 s at "1 thread" against 1.281 s at
+# "18" - and the reason is not that threading fails to help. It is that this
+# wheel is built with **GCD** as its parallel framework
+# (`cv2.getBuildInformation()` -> "Parallel framework: GCD"), and under GCD
+# `setNumThreads` is a NO-OP:
+#
+#     setNumThreads(4) -> getNumThreads() == 18
+#     setNumThreads(1) -> getNumThreads() == 18
+#
+# So all seven rows measured the same configuration. The honest conclusion is
+# that OpenCV's thread count is NOT controllable from Python on this build, and
+# nothing here can reduce the core burn directly.
+#
+# The call is KEPT anyway, because it is not a no-op everywhere: Linux and
+# Windows wheels use TBB / pthreads / OpenMP, where it does what it says. It is
+# inert on this host rather than wrong, and it logs which case applies so the
+# next person does not repeat the mistake above.
+#
+# WHAT ACTUALLY REDUCES THE HEAT IS DOING LESS WORK. The search band and the
+# half-resolution prefilter cut template matching by 7.55x, and that is 7.55x
+# less CPU burned - a real reduction, unlike this.
+def _cap_cv_threads(log=None):
+    try:
+        cores = os.cpu_count() or 4
+        want = max(1, min(4, cores // 2))
+        had = cv2.getNumThreads()
+        cv2.setNumThreads(want)
+        got = cv2.getNumThreads()
+        if log is not None:
+            if got == had and had > want:
+                log.info("opencv threads stay at %d - this build's parallel "
+                         "framework ignores setNumThreads, so the heat can "
+                         "only come down by doing less work", had)
+            elif got != had:
+                log.info("opencv threads %d -> %d (of %d cores)",
+                         had, got, cores)
+        return want
+    except Exception:
+        return None
 
 
 class Log:
-    """Logs to the terminal AND to the dock's log pane."""
+    """Logs to the terminal AND to the dock's log pane.
+
+    THE STREAM IS TIMESTAMPED TOO, not just the dock. It used to stamp only the
+    lines kept for the panel, so `run/app.log` had no times in it at all - and
+    an operator pasting from the dock's pane got timestamps while the file that
+    records a whole session did not. That makes the file useless for the one
+    thing a log is for: working out where the seconds went. Every timing
+    conclusion had to come from durations the code happened to print itself.
+
+    Levels are distinguished for the same reason. `warning = error = info` meant
+    a crash and a routine step looked identical in the file, so the eye had
+    nothing to catch on when scanning a few thousand lines.
+    """
 
     def __init__(self, sink=None, keep=14):
         self.lines, self.keep, self.sink = [], keep, sink
 
-    def info(self, m, *a):
+    def _emit(self, tag, m, a):
         msg = (m % a) if a else m
-        print("  " + msg, flush=True)
-        self.lines.append(f"{time.strftime('%H:%M:%S')} {msg}"[:120])
+        stamp = time.strftime("%H:%M:%S")
+        print(f"{stamp} {tag}{msg}", flush=True)
+        # The dock pane is narrow, so it keeps the compact form it always had.
+        self.lines.append(f"{stamp} {msg}"[:120])
         del self.lines[:-self.keep]
-    warning = error = info
+
+    def info(self, m, *a):
+        self._emit("  ", m, a)
+
+    def warning(self, m, *a):
+        self._emit("  WARN  ", m, a)
+
+    def error(self, m, *a):
+        self._emit("  ERROR ", m, a)
 
 
 class Disconnected(Exception):
@@ -644,54 +713,104 @@ class Runner:
             pass
 
     # -- work --------------------------------------------------------------
+    # HOW MANY SETBACKS A LOOPING TASK RIDES OUT before it hands back to a
+    # human. Generous on purpose: the game's own render-stall bug (a mission
+    # that draws the map but never the character) is cleared by a relog, and
+    # "farm until I press Stop" means surviving that without supervision.
+    MAX_SETBACKS = 6
+
+    def _setback(self, note, fatal=False):
+        """Something went wrong. Carry on, or hand back to a human?
+
+        WHY THIS IS ONE DECISION AND NOT FOUR. Four separate paths used to
+        pause the bot - an unreadable screen, a task error, a mission-runner
+        error, and a disconnect - and each did it unconditionally. For a
+        ONE-SHOT that is right: it was asked to do a thing once, and the thing
+        failed. For a LOOPING task it is wrong, because "farm missions" means
+        keep farming, and pausing on the first hiccup left the bot sitting idle
+        until someone noticed and pressed Run.
+
+        The distinction is whether a HUMAN is required, not how alarming the
+        message looks:
+
+            logged out / HALT   -> fatal. Only a person can sign in, and this
+                                   bot must never try.
+            unreadable screen   -> a relog usually clears it (this is the
+                                   documented recovery for the game's render
+                                   stall), so relog and carry on.
+            task error          -> may be transient; retry a bounded number of
+                                   times before giving up.
+
+        Bounded, because a bot spinning silently is worse than one that stops
+        and says why - this file's own rule. The budget resets whenever a cycle
+        gets somewhere recognisable, so it is spent on the NEXT problem rather
+        than staying exhausted.
+        """
+        self.note = note
+        self.log.error("%s", note)
+        task = tasks.get(self.task)
+        if fatal or task.oneshot:
+            self.mode = "paused"
+            return
+        self._setbacks = getattr(self, "_setbacks", 0) + 1
+        # Say when it is the SAME failure again. "setback 3/6" tells you the
+        # budget is draining; "the same failure 3 times" tells you it is
+        # deterministic and no amount of relogging will fix it.
+        same = (note == getattr(self, "_last_setback", None))
+        self._last_setback = note
+        if same:
+            self.log.error("this is the SAME failure %d times in a row - "
+                           "relogging will not fix a deterministic error",
+                           self._setbacks)
+        if self._setbacks > self.MAX_SETBACKS:
+            self.note = (f"{note} - and that is {self._setbacks} setbacks in a "
+                         f"row, so stopping rather than thrashing. Look at the "
+                         f"screen.")
+            self.log.error("%s", self.note)
+            self.mode = "paused"
+            self._setbacks = 0
+            return
+        self.log.info("%s is a looping task, so recovering and carrying on "
+                      "(setback %d/%d)", self.task, self._setbacks,
+                      self.MAX_SETBACKS)
+        # Back off a little, so a fault that recurs instantly cannot burn the
+        # whole budget inside a second.
+        time.sleep(min(3.0 * self._setbacks, 15.0))
+        try:
+            self.relog()
+        except (OSError, CDPError) as e:
+            raise Disconnected(str(e))
+        except Exception as e:
+            self.log.error("recovery relog failed: %s", e)
+
+    def guard(self, fn, default=None):
+        """Run a perception call, keeping the disconnect distinction intact.
+
+        A dropped connection must NOT be swallowed as "the detector found
+        nothing": the loop needs to reconnect, and a bot that reads a dead
+        socket as an empty screen will happily walk into furniture forever.
+        So OSError/CDPError still become `Disconnected`, and only genuine
+        detector failures fall back to `default`.
+        """
+        try:
+            return fn()
+        except (OSError, CDPError) as e:
+            raise Disconnected(str(e))
+        except Exception:
+            return default
+
     def step(self):
         """One cycle of the selected task. Blocks for as long as it takes."""
         self.cycle += 1
-        if self.task == "idle":
-            self.state = "idle"
-            return
+        task = tasks.get(self.task)
 
-        # ALREADY IN A MISSION? Then play it, and do not ask the resume ladder
-        # to find the lobby first - it cannot, because battles and traversal are
-        # deliberately not its job. Demanding the lobby before acting is why a
-        # session that began mid-mission logged "no anchor matched" forever
-        # while a battle sat waiting for input.
-        if self.task == "farm_missions":
-            try:
-                import farm as farm_mod
-                where = farm_mod.in_mission(self.cap.frame(gray=False), self.tpls)
-            except (OSError, CDPError) as e:
-                raise Disconnected(str(e))
-            except Exception:
-                where = None
-            if where:
-                self.state = where
-                self.note = f"mission already in progress ({where}) - playing it"
-                self.log.info("%s", self.note)
-                self.push()
-                self._run_mission()
-                return
-            # A traversal screen has no anchor of its own - it is scenery - so
-            # the ladder cannot name it and the bot used to sit there while the
-            # mission waited for it to walk. Hand over only after the ladder has
-            # failed REPEATEDLY and nothing says we are in the village, because
-            # what this licenses is a click on the map edge, and a map-edge click
-            # in the village lands on a building.
-            if self.unknown >= 3:
-                try:
-                    scene = farm_mod.looks_like_mission_scene(
-                        self.cap.frame(gray=False), self.tpls)
-                except Exception:
-                    scene = False
-                if scene:
-                    self.state = "traversal"
-                    self.note = ("no anchor anywhere and nothing says village - "
-                                 "treating this as a mission map and walking")
-                    self.log.info("%s", self.note)
-                    self.push()
-                    self.unknown = 0
-                    self._run_mission()
-                    return
+        # A task gets to handle the cycle BEFORE the ladder runs. That is where
+        # "I am already in a mission" lives, because only the task knows
+        # whether it can start from the middle of its own work.
+        if task.preflight(self):
+            return
+        if not task.needs_lobby:
+            return
 
         gray = cv2.cvtColor(self.cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
         out, info = self.resumer.advance(gray)
@@ -753,51 +872,42 @@ class Runner:
             if self.unknown == self.teach_at:
                 self._save_for_teaching()
             if self.unknown >= self.max_unknown:
-                self.note = (f"{self.unknown} unrecognised frames in a row - "
-                             f"pausing rather than spinning. Look at the screen.")
-                self.log.error("%s", self.note)
-                self.mode = "paused"
+                streak = self.unknown
                 self.unknown = 0
                 self._relogs = 0
+                self._setback(f"{streak} unrecognised frames in a row")
             return
         self.unknown = 0
         # The ladder got somewhere it recognises, so the relog budget is spent
         # on a DIFFERENT problem next time rather than staying exhausted.
         self._relogs = 0
+        # NOTE the setback budget is deliberately NOT reset here. Reaching the
+        # lobby is not progress - a relog always reaches the lobby, so a
+        # deterministic failure reset the counter every lap and looped forever.
+        # Observed live: "setback 1/6" over and over, never 2/6, while the bot
+        # relogged endlessly on a mission-start crash. Only COMPLETED WORK
+        # clears it; see the reset after `task.run` below.
         self.note = ""
 
-        if self.task == "resume_to_lobby":
-            self.mode = "paused"
-            self.log.info("arrived in the lobby; pausing")
-            return
-
-        if self.task == "tp_training":
-            import tp as tp_mod
-            self.note = "TP run in flight - the panel pauses until it finishes"
-            self.push()
-            # Play whatever is listed, identifying each minigame from the
-            # screen. Names are not used to choose: the family a title implies
-            # is not guaranteed to be the minigame you get, and a name-matched
-            # picker silently skips anything renamed or newly added.
-            played, banked = tp_mod.run_all(self.cap, self.actor,
-                                            self.log, relog=self.relog)
-            self.note = f"TP pass: {played} started, {banked} banked"
-            self.log.info(self.note)
-            self.mode = "paused"
-            return
-
-        if self.task == "farm_missions":
-            # Choose by READING the grade panel rather than by config: the grade
-            # bars are colour coded and a locked grade renders grey, so "best
-            # available" is a measurement. See engine/farm.py.
-            import farm as farm_mod
-            self.note = "mission in flight - the panel pauses until it finishes"
-            self.push()
-            started, banked = farm_mod.farm(self.cap, self.actor, self.log,
-                                            self.battle_cfg(), self.controls,
-                                            repeat=1)
-            self.note = f"farm: {started} started, {banked} banked"
-            self.log.info(self.note)
+        note = task.run(self)
+        # A COMPLETED CYCLE IS THE ONLY THING THAT COUNTS AS PROGRESS. If
+        # `run` raised we never get here, so a repeating failure accumulates
+        # and the cap can actually be reached.
+        self._setbacks = 0
+        if note:
+            self.note = note
+            self.log.info("%s", note)
+        # A ONE-SHOT FINISHING IS AN ENDING; a lap finishing is not.
+        #
+        # The supervisor stays attached either way - the connection and the
+        # panel belong to it, not to the task - so going quiet here costs
+        # nothing and switching task remains immediate. What it must NOT do is
+        # silently start the same one-shot again: a TP pass that re-ran itself
+        # would keep re-walking a list it had just established was finished.
+        if task.oneshot:
+            self.mode = "ready"
+            self.log.info("%s finished - ready (press Run, or pick another "
+                          "task)", task.key)
 
     def _save_farm(self):
         _write_json(FARM_PATH, {"grade": self.grade, "page": self.pin_page,
@@ -839,9 +949,7 @@ class Runner:
             self.note = f"mission: {out} {stats}"
             self.log.info("%s", self.note)
         except Exception as e:
-            self.note = f"mission runner: {type(e).__name__}: {e}"
-            self.log.error("%s", self.note)
-            self.mode = "paused"
+            self._setback(f"mission runner: {type(e).__name__}: {e}")
 
     def browser_alive(self, timeout=2.0):
         """Is the BROWSER still there? (not: is our page still there)
@@ -1058,6 +1166,31 @@ class Runner:
             self.log.error("could not re-inject the dock: %s", e)
             return False
 
+    # SLEEP IS DETECTABLE, EVEN THOUGH IT CANNOT BE PREVENTED.
+    #
+    # On macOS `time.monotonic()` does not tick while the machine is asleep,
+    # but the wall clock does - it is re-read from the RTC on wake. So the
+    # difference between the two deltas across one loop iteration IS the time
+    # spent suspended, and it distinguishes a sleep from a slow iteration,
+    # which a wall-clock threshold alone cannot do: a mission legitimately
+    # blocks for minutes.
+    #
+    # It degrades safely. If a platform's monotonic clock DOES include suspend
+    # time, the difference stays near zero and this simply never fires - no
+    # false relogs, which matters because a relog throws away an in-flight
+    # mission.
+    SLEPT_SECONDS = 60
+
+    def _slept_for(self):
+        """Seconds the machine was suspended since the last call, else 0."""
+        w, m = time.time(), time.monotonic()
+        prev = getattr(self, "_clocks", None)
+        self._clocks = (w, m)
+        if prev is None:
+            return 0.0
+        gap = (w - prev[0]) - (m - prev[1])
+        return gap if gap >= self.SLEPT_SECONDS else 0.0
+
     def loop(self, tick=1.0):
         self.log.info("ready - press Run in the panel")
         self.push()
@@ -1068,6 +1201,28 @@ class Runner:
                 # raises: no call is in flight, so no socket error surfaces and
                 # the process sits there holding the pid lock. Poll the browser
                 # itself now and then - it is one local HTTP request.
+                # A SLEEP OUTLASTS THE GAME'S SESSION. The process resumes
+                # exactly where it left off, so nothing raises - but the game
+                # has been disconnected from its server for however long the
+                # lid was shut, and every cached geometry hint now describes a
+                # screen that is gone. Carrying on from stale beliefs is how a
+                # bot spends ten minutes clicking a dead canvas.
+                slept = self._slept_for()
+                if slept:
+                    self.log.info("the machine was asleep for %.0fs - the game "
+                                  "session will not have survived that; "
+                                  "relogging", slept)
+                    try:
+                        self.relog()
+                        # Same reasoning as applying a window size: the drift
+                        # cache and the alignment flag are keyed to the layout
+                        # we had before, so keeping them aims every click at a
+                        # screen that no longer exists.
+                        self.cap._off_at = 0.0
+                        self.focus_aligned = False
+                    except Exception as e:
+                        self.log.error("relog after wake failed: %s", e)
+
                 idle_checks += 1
                 if idle_checks % 5 == 0 and not self.browser_alive():
                     self.log.info("the browser window was closed - exiting "
@@ -1096,15 +1251,22 @@ class Runner:
                     except (OSError, CDPError) as e:
                         raise Disconnected(str(e))
                     except Exception as e:
-                        self.note = f"{type(e).__name__}: {e}"
-                        self.log.error("task error: %s", self.note)
-                        self.mode = "paused"
+                        self._setback(f"task error: {type(e).__name__}: {e}")
                 self.push()
             except Disconnected as e:
+                # RESUME WHAT WE WERE DOING. This used to leave `mode` paused
+                # even when the reconnect SUCCEEDED, so a single transient CDP
+                # hiccup stopped a farm loop for good and the operator had to
+                # notice and press Run. A restored connection is not a reason
+                # to stop working.
+                was = self.mode
                 self.log.info("disconnected (%s)", e)
                 self.mode = "paused"
                 if not self.reconnect():
                     break
+                if was == "running":
+                    self.mode = "running"
+                    self.log.info("reconnected - resuming %s", self.task)
                 continue
             if self.mode != "running":
                 time.sleep(tick)
@@ -1259,6 +1421,34 @@ def main():
     url = cfg.get("target", {}).get("game_url", "")
     profile = os.path.join(ROOT, "run/chrome-profile")
 
+    # FAIL FAST AND SAY WHAT TO DO. `--attach` with no browser on the port
+    # used to poll `find_page_target` for 30-40 s and then raise "no page
+    # target after 40s" - forty seconds of silence followed by a traceback,
+    # which reads exactly like a hang. `cdp_ready` answers the same question
+    # in 1.5 s.
+    #
+    # The advice matters as much as the speed: the site's session cookie is a
+    # BROWSER-SESSION cookie, so a Chrome that has quit has also signed out,
+    # and relaunching lands on the logged-out page. The bot must never
+    # authenticate, so that last step is the operator's and saying so here
+    # saves them discovering it via a halt several minutes later.
+    if a.attach and not browser.cdp_ready(a.port):
+        log_early = Log()
+        log_early.error("--attach was given, but nothing is serving CDP on "
+                        "port %d, so there is no browser to attach to.",
+                        a.port)
+        log_early.error("Launch one instead:  .venv/bin/python engine/app.py")
+        log_early.error("Chrome having quit also means the game signed out "
+                        "(its session cookie is a browser-session cookie), so "
+                        "sign in once in the new window by hand - the bot "
+                        "never enters credentials.")
+        # Only ever release a lock we hold - the same rule `_hard_exit` and
+        # the caller's `finally` follow. Unlinking unconditionally is how a
+        # guard ends up deleting a legitimate holder's lock.
+        if _lock_holder(lock) == os.getpid():
+            _drop_lock(lock)
+        return 2
+
     if not a.attach:
         # app_mode gives a window with no tab strip and no omnibox - the whole
         # "native app" part of this is one Chrome flag. Measured: window chrome
@@ -1274,6 +1464,7 @@ def main():
                        window=(VIEWPORT[0] + 8, VIEWPORT[1] + 90))
 
     log = Log()
+    _cap_cv_threads(log)
 
     # A run is long and hands-off, so the machine would idle out from under it:
     # display asleep, screen locked, Teams presence Away. See engine/presence.py.

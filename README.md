@@ -102,7 +102,8 @@ from the screen, not from the mission name.
 | `engine/cdp.py` | DevTools protocol client, standard library only |
 | `engine/browser.py` | browser launch — the only OS-specific code |
 | `engine/capture.py` | CDP frame → OpenCV, plus clipped reads |
-| `engine/perceive.py` | template matching, colour masks, bar reads |
+| `engine/tasks.py` | what a task is: the registry the panel and the loop share |
+| `engine/perceive.py` | template matching, template loading, colour masks, bar reads |
 | `engine/geometry.py` | anchor-relative battle geometry |
 | `engine/gate.py` | "wait until one of these is true" |
 | `engine/battle.py` | turn loop, skill priority, restricted-turn handling |

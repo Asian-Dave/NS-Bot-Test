@@ -84,6 +84,10 @@ _CSS = """
 #__ID__ .pill.run{color:#4ade80;border-color:#2f6b45}
 #__ID__ .pill.pause{color:#fbbf24;border-color:#6b5620}
 #__ID__ .pill.stop{color:#f87171;border-color:#6b3030}
+/* READY is "attached, nothing running" - deliberately not amber, because
+   it is not a warning: a one-shot task finished and the supervisor is
+   still holding the session. */
+#__ID__ .pill.ready{color:#7dd3fc;border-color:#2b5b73}
 #__ID__ .row{display:flex;justify-content:space-between;gap:10px;padding:2px 0}
 #__ID__ .d{color:#8b94a7}
 #__ID__ .ok{color:#4ade80}
@@ -462,7 +466,8 @@ _BOOTSTRAP = r"""
     setText("v_pill", mode,
             "pill " + (mode === "running" ? "run"
                      : mode === "paused" ? "pause"
-                     : mode === "stopped" ? "stop" : ""));
+                     : mode === "stopped" ? "stop"
+                     : mode === "ready" ? "ready" : ""));
     setText("v_state", s.state || "-", s.state === "unknown" ? "warn" : "ok");
     setText("v_task", s.task || "-");
     setText("v_cycle", s.cycle == null ? "-" : s.cycle);
