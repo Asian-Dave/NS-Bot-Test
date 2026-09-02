@@ -221,7 +221,106 @@ def same_page(a, b, tol=6.0):
     return float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean()) <= tol
 
 
-def pick_highest(actor, cap, log, max_pages=15, settle=2.4):
+# THE LEVEL CEILING DOES NOT MOVE BETWEEN MISSIONS, so stop rediscovering it.
+#
+# `pick_highest` walks the list from page 1 until it meets a padlock, scanning
+# every page on the way - a capture, a row detection and a `mission_locked`
+# template match each. Measured live on Grade A (seven pages): the page TURN is
+# only 0.18-0.20 s, but the per-page scan and settle is ~3.7 s, so the whole
+# walk cost **30 s of a 178 s mission cycle - 17%** - to arrive at
+# `page 6, y=818` every single time.
+#
+# (Worth recording that this was first dismissed as "not the bottleneck" on the
+# strength of those 0.19 s page turns. The turn was never the cost; the scan
+# between turns was. Measure the phase, not the click.)
+#
+# So the answer is remembered per grade and re-used, then VERIFIED before it is
+# trusted: the row must still be there and still be unlocked. A level-up moves
+# the ceiling, and the pin is wrong the moment it does - which is exactly why
+# this is a memo to be checked rather than a pin to be obeyed.
+#
+# Deliberately IN-PROCESS, not another file in run/. It is a cache, not state:
+# a restart should rediscover the ceiling rather than trust something written
+# before an unknown amount of levelling, and this project already has more
+# scattered state files than it can account for.
+_CEILING = {}
+_CEILING_USES = {}
+
+# RE-WALK THIS OFTEN even when the memo still verifies. A level-up moves the
+# ceiling UPWARDS, and that is invisible to the check below: the remembered row
+# is still there and still unlocked, so verification PASSES and the bot happily
+# keeps farming the mission it was playing before it levelled - never
+# discovering the harder, better-paying one that just opened. Verification can
+# only catch a memo that became INVALID, not one that became SUBOPTIMAL.
+#
+# `forget_ceiling()` handles the level-ups we actually see. This bounds the
+# damage from one we miss: at worst a few cycles on a stale ceiling, and the
+# cost is one full walk amortised over RECHECK_EVERY missions (~6s per mission
+# against the 30s it replaces).
+RECHECK_EVERY = 5
+
+
+def forget_ceiling(grade=None):
+    """Drop the remembered ceiling, so the next mission re-reads the list.
+
+    Called when something happened that could have MOVED the ceiling - a level
+    up being the one that matters. Cheap to call and safe to over-call: the
+    only cost is one page walk.
+    """
+    if grade is None:
+        _CEILING.clear()
+        _CEILING_USES.clear()
+    else:
+        _CEILING.pop(grade, None)
+        _CEILING_USES.pop(grade, None)
+
+
+def _start_remembered(actor, cap, log, memo, settle=2.4):
+    """Go straight to a remembered ceiling. None if it no longer holds.
+
+    Pages forward WITHOUT the per-page padlock scan - the whole point - and
+    scans only the page it is aiming at. Any surprise returns None so the
+    caller can walk the list properly instead of guessing again.
+    """
+    want_page, want_y = memo
+    nxt = _tpl("page_next", 0.70)
+    for i in range(want_page):
+        frame = cap.frame(gray=False)
+        rows = tp.find_mission_rows(frame)
+        before = rows_signature(frame, rows)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        m, c = find(gray, nxt) if nxt is not None else (None, 0.0)
+        if m is None or not m.found:
+            log.info("remembered ceiling: no next-page arrow at page %d", i + 1)
+            return None
+        actor.click_pixel(*m.center, why=f"next page ({c:.3f})")
+        if not wait_page_turn(cap, before, log):
+            log.info("remembered ceiling: the list stops before page %d",
+                     want_page + 1)
+            return None
+
+    frame = cap.frame(gray=False)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    rows = tp.find_mission_rows(frame)
+    near = [y for y in rows if abs(y - want_y) < 60]
+    if not near:
+        log.info("remembered ceiling: no row near y=%d on page %d any more",
+                 want_y, want_page + 1)
+        return None
+    y = near[0]
+    locked = locked_rows(gray, log)
+    if locked is None:
+        return None
+    if any(abs(y - ly) < 60 for ly in locked):
+        log.info("remembered ceiling: page %d y=%d is PADLOCKED now - the "
+                 "ceiling moved, so re-reading the list", want_page + 1, y)
+        return None
+    log.info("starting the remembered ceiling (page %d, y=%d) - %d page turn(s), "
+             "no per-page padlock scan", want_page + 1, y, want_page)
+    return tp.start_row(actor, cap, log, y, settle=settle)
+
+
+def pick_highest(actor, cap, log, max_pages=15, settle=2.4, grade=None):
     """Start the highest-level mission the character can actually play.
 
     THE RULE, as the operator described it: page forward until a page shows a
@@ -244,6 +343,22 @@ def pick_highest(actor, cap, log, max_pages=15, settle=2.4):
     # of a SEVEN page list it scored 0.806 and the paging stopped dead. Whether
     # the list actually advanced is the reliable signal, and `rows_signature`
     # measures exactly that - so the threshold here is deliberately loose.
+    if grade is not None and grade in _CEILING:
+        uses = _CEILING_USES.get(grade, 0)
+        if uses >= RECHECK_EVERY:
+            log.info("re-reading the mission list after %d missions on the "
+                     "remembered ceiling - a level-up moves it upwards and "
+                     "that cannot be seen by checking the old row", uses)
+            forget_ceiling(grade)
+        else:
+            out = _start_remembered(actor, cap, log, _CEILING[grade], settle)
+            if out:
+                _CEILING_USES[grade] = uses + 1
+                return out
+        # It did not hold. Forget it and read the list properly - a stale memo
+        # must never be retried, or a level-up would wedge the farm.
+        forget_ceiling(grade)
+
     nxt, prv = _tpl("page_next", 0.70), _tpl("page_prev", 0.70)
     best = None                      # (page index, row y)
     page = 0
@@ -291,7 +406,11 @@ def pick_highest(actor, cap, log, max_pages=15, settle=2.4):
         wait_page_turn(cap, before, log)
     log.info("starting the highest unlocked mission (page %d, y=%d)",
              want_page + 1, y)
-    return tp.start_row(actor, cap, log, y, settle=settle)
+    started = tp.start_row(actor, cap, log, y, settle=settle)
+    if started and grade is not None:
+        _CEILING[grade] = (want_page, y)
+        _CEILING_USES[grade] = 0
+    return started
 
 
 def to_grade_panel(actor, cap, log):
@@ -385,7 +504,7 @@ def start_best(cap, actor, log, grade=None, page=None, row=None):
         return None
     if page and row:
         return g if start_at(actor, cap, log, page, row) else None
-    return g if pick_highest(actor, cap, log) else None
+    return g if pick_highest(actor, cap, log, grade=g) else None
 
 
 def farm(cap, actor, log, cfg, controls=None, repeat=0):
@@ -398,6 +517,12 @@ def farm(cap, actor, log, cfg, controls=None, repeat=0):
     page, row = m.get("mission_page"), m.get("mission_row")
     started = banked = 0
     n = repeat or m.get("repeat", 0) or 0
+    # LOAD THE TEMPLATES ONCE, not once per mission. They do not change between
+    # missions, and rebuilding all 59 per mission put a stray "loaded 59
+    # templates" in the middle of every cycle. Cheap (~0.01s) but it is noise
+    # in the one record used to work out where the time went.
+    from perceive import load_templates
+    tpls = load_templates(cfg, log)
     while True:
         if controls is not None and not controls.wait_if_paused():
             log.info("stop requested")
@@ -409,17 +534,14 @@ def farm(cap, actor, log, cfg, controls=None, repeat=0):
             log.info("nothing startable; stopping")
             break
         started += 1
-        # A PLAIN IMPORT, at the top of the loop body rather than hidden in the
-        # argument list. `__import__("bot")` lived here and was invisible to
-        # every grep for an import statement, so deleting `bot.py` broke the
-        # mission-start path only - the one place a test suite that never
-        # launches a mission could not see. It cost a live run: the bot reached
-        # the start dialogue, pressed the green check, and threw
-        # ModuleNotFoundError on every single attempt.
-        from perceive import load_templates
+        # NOTE the templates come from above, loaded once. This line used to
+        # read `__import__("bot").load_templates(cfg, log)` - a dynamic import
+        # buried in an argument list, invisible to every grep for an import
+        # statement. Deleting `bot.py` therefore broke only the mission-start
+        # path: the bot navigated perfectly, pressed the green check, and threw
+        # ModuleNotFoundError every single time.
         runner = mission_mod.MissionRunner(
-            Gate(cap, log, controls), actor, cap,
-            load_templates(cfg, log), cfg, log, controls)
+            Gate(cap, log, controls), actor, cap, tpls, cfg, log, controls)
         runner.grade = g          # the panel already told us; do not re-require it
         try:
             out, stats = runner.run()

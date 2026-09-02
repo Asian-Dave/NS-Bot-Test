@@ -815,6 +815,27 @@ class Runner:
         gray = cv2.cvtColor(self.cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
         out, info = self.resumer.advance(gray)
         self.state = info.get("step", out)
+
+        # A LEVEL-UP MOVES THE MISSION CEILING, and nothing else can tell the
+        # farm that. `farm` remembers which page and row held the highest
+        # unlocked mission so it does not re-walk seven pages every cycle, and
+        # it verifies that memo before trusting it - but verification can only
+        # catch a memo that became INVALID. After a level-up the remembered row
+        # is still present and still unlocked, so the check passes and the bot
+        # would keep farming the mission it was playing before it levelled,
+        # never discovering the harder one that just opened.
+        #
+        # The ladder already recognises the Level Up panel (it has its own rung,
+        # sweeping scales 1.20-1.80 because the check is drawn at 1.5), so the
+        # cheap and reliable moment to forget the memo is right here.
+        if self.state == "level_up":
+            try:
+                import farm as farm_mod
+                farm_mod.forget_ceiling()
+                self.log.info("levelled up - forgetting the remembered mission "
+                              "ceiling so the list is read again")
+            except Exception as e:
+                self.log.warning("could not reset the mission ceiling: %s", e)
         if out == resume.HALT:
             # A halt is a human's problem, not something to retry. Signing out
             # is the common one and the bot must never resolve it itself.
@@ -895,8 +916,12 @@ class Runner:
         # and the cap can actually be reached.
         self._setbacks = 0
         if note:
+            # SET the note, do not LOG it. Every task already logs its own
+            # summary through the module doing the work (`farm: 1 started, 1
+            # banked`, `TP pass finished: ...`), so logging the returned note
+            # printed each of them twice - which double-counts in a record
+            # somebody will later use to work out what happened.
             self.note = note
-            self.log.info("%s", note)
         # A ONE-SHOT FINISHING IS AN ENDING; a lap finishing is not.
         #
         # The supervisor stays attached either way - the connection and the
