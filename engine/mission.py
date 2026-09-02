@@ -736,6 +736,9 @@ class MissionRunner:
     MOVE_GAP = 0.30
     MOVE_THRESHOLD = 15
     MOVE_MIN_AREA = 2500
+    # How many approach clicks a LIVE target gets. Walking across a map takes
+    # longer than one settle, and a moving thing is worth the patience.
+    ENGAGE_TRIES = 3
     MOVE_BAND = (200, 1150)      # deeper than FIG_BAND: enemies stand at y~991
 
     def find_moving_figure(self, cap=None):
@@ -745,7 +748,7 @@ class MissionRunner:
         measured to find a real enemy on a dark map, and it cannot be fooled by
         scenery, which does not animate.
         """
-        cap = cap or getattr(self, "cap", None)
+        cap = cap or getattr(self, "capture", None)
         if cap is None:
             return None
         y0, y1 = self.MOVE_BAND
@@ -778,8 +781,16 @@ class MissionRunner:
             cx, cy = int(ce[i][0]) + xx0, int(ce[i][1]) + yy0
             if cy < self.FIG_MIN_Y:
                 continue                     # canopy - not walkable
-            if self._is_dud(cx, cy):
-                continue
+            # DO NOT DUD A MOVING TARGET.
+            #
+            # The dud list exists for SCENERY - a cactus that will never start a
+            # fight, however often you click it. A thing that MOVES is alive, so
+            # a failed approach means the walk needed longer, not that the target
+            # was imaginary. Applying the dud filter here blacklisted the only
+            # animated thing on the map after one 6 s timeout, the detector then
+            # returned None for ever, and the runner fell back to edge-running -
+            # which from outside looks like "randomly moving, never going to the
+            # target".
             bh = st[i, cv2.CC_STAT_HEIGHT]
             if best is None or a > best[0]:
                 best = (a, cx, cy, bh)
@@ -814,7 +825,7 @@ class MissionRunner:
         # `getattr`, not `self.cap`: the canvas correction is an optional
         # refinement, and a caller without a capture must still work - it simply
         # falls back to the reference constants.
-        for (x, y, a) in self.find_figures(frame_bgr, getattr(self, "cap", None)):
+        for (x, y, a) in self.find_figures(frame_bgr, getattr(self, "capture", None)):
             if y < self.FIG_MIN_Y:
                 continue                       # canopy, not walkable ground
             if me is not None and abs(x - me[0]) < 220 and abs(y - me[1]) < 220:
@@ -893,8 +904,8 @@ class MissionRunner:
         # Corroborated on the entry map: the detector put the character at
         # x=911 (left of centre) and said "right", and the game itself drew a
         # right-pointing "Go!" arrow on that very frame.
-        pos = self.find_character(frame_bgr, getattr(self, "cap", None))
-        cx0, cx1 = self.canvas_x(getattr(self, "cap", None))
+        pos = self.find_character(frame_bgr, getattr(self, "capture", None))
+        cx0, cx1 = self.canvas_x(getattr(self, "capture", None))
         centre = (cx0 + cx1) // 2
 
         # CLEAR THE MAP BEFORE LEAVING IT. An enemy standing on this map has to
@@ -915,7 +926,8 @@ class MissionRunner:
         # where nothing moved - and it is the one that proposes cacti, so it goes
         # second on purpose.
         foe = self.find_moving_figure()
-        if foe is not None:
+        moving = foe is not None
+        if moving:
             self.log.info("mission: something MOVED at %s - that is alive", foe)
         else:
             foe = self.find_enemy_on_map(frame_bgr, pos)
@@ -923,7 +935,12 @@ class MissionRunner:
         # blob being retried, but a map full of shrubs can still offer a fresh
         # one every pass. After this many failures on one map, stop proposing
         # and just walk - the edge run is the reliable move.
-        if foe is not None and len(getattr(self, "_dud_targets", ())) >= 6:
+        #
+        # A MOVING target is exempt: the cap exists to stop chasing scenery, and
+        # a thing that animates is alive. Applying it to a live enemy is how the
+        # runner talked itself out of the only real target on the map.
+        if (foe is not None and not moving
+                and len(getattr(self, "_dud_targets", ())) >= 6):
             self.log.info("mission: %d engage attempts on this map all failed - "
                           "walking instead of trying more scenery",
                           len(self._dud_targets))
@@ -931,22 +948,55 @@ class MissionRunner:
         if foe is not None:
             self.log.info("mission: enemy on this map at %s - engaging before "
                           "moving on", foe)
-            self.actor.click_pixel(*foe, why="engage enemy on the map")
             watch = [c for c in (self.conditions.get("command_bar"),
                                  self.conditions.get("action_flag"),
                                  self.conditions.get("result_panel"),
                                  self.conditions.get("cutscene_continue"))
                      if c is not None]
-            if watch:
-                got = self.gate.wait_for_any(watch, timeout=self.traverse_settle,
-                                             why="engage")
-                if got:
-                    self.log.info("mission: engaged (%s)", got.name)
-                    return
+            # APPROACH, THEN CONTACT - and judge by PROGRESS, not a stopwatch.
+            #
+            # One click and a 6 s wait was never going to work: walking across a
+            # map takes longer than that, so the runner declared the target
+            # imaginary while the character was still on its way, then went back
+            # to edge-running. That is the "randomly moving, never reaching the
+            # target" behaviour.
+            #
+            # So click, wait, and if no fight started ask whether we got CLOSER.
+            # Closing the distance means the walk is working and deserves another
+            # click; standing still means the click did not take.
+            tries = self.ENGAGE_TRIES if moving else 1
+            for attempt in range(tries):
+                before = self.find_character(frame_bgr, getattr(self, "capture", None))
+                self.actor.click_pixel(*foe, why=f"walk to the unit ({attempt + 1})")
+                if watch:
+                    got = self.gate.wait_for_any(
+                        watch, timeout=self.traverse_settle, why="engage")
+                    if got:
+                        self.log.info("mission: engaged (%s)", got.name)
+                        return
+                if attempt + 1 >= tries:
+                    break
+                after_f = self.capture.frame(gray=False)
+                after = self.find_character(after_f, getattr(self, "capture", None))
+                if before and after:
+                    d0 = abs(before[0] - foe[0]) + abs(before[1] - foe[1])
+                    d1 = abs(after[0] - foe[0]) + abs(after[1] - foe[1])
+                    if d1 < d0 - 20:
+                        self.log.info("mission: closing on it (%d -> %d) - "
+                                      "clicking again", d0, d1)
+                        frame_bgr = after_f
+                        continue
+                    self.log.info("mission: no closer (%d -> %d); the click did "
+                                  "not move us", d0, d1)
+                    break
+                frame_bgr = after_f
             # It was not an enemy, or we did not reach it. Do not keep clicking
             # the same pixel every cycle.
-            self._dud_targets = set(getattr(self, "_dud_targets", set()))
-            self._dud_targets.add(foe)
+            # Only remember SCENERY as a dud. A moving target that we failed
+            # to reach is still alive and still worth another pass.
+            if not moving:
+                self._dud_targets = set(getattr(self, "_dud_targets", set()))
+                self._dud_targets.add(foe)
             self.log.info("mission: %s did not start a fight; treating it as "
                           "scenery and running on", foe)
 
@@ -1020,6 +1070,28 @@ class MissionRunner:
             self.log.info("mission: moved on (run %d); still heading %s",
                           self._traverse_runs, heading)
             self._heading = heading
+            # NEW AREA - RESCAN IMMEDIATELY, do not wait for the next cycle.
+            #
+            # The scene changing means we are somewhere else, and the whole point
+            # of walking is to find something to fight. Returning here made the
+            # bot walk AGAIN on the next pass before it ever looked at the new
+            # area, so it could stride straight past an enemy that was standing
+            # in plain sight.
+            #
+            # Also: the dud list belongs to the OLD area. Coordinates there mean
+            # nothing here, and keeping them would blacklist innocent parts of a
+            # map the bot has never seen.
+            self._dud_targets = set()
+            foe2 = self.find_moving_figure()
+            if foe2 is not None:
+                self.log.info("mission: new area has something MOVING at %s - "
+                              "engaging before walking on", foe2)
+                self.actor.click_pixel(*foe2, why="walk to the unit (new area)")
+                if watch:
+                    got2 = self.gate.wait_for_any(
+                        watch, timeout=self.traverse_settle, why="engage")
+                    if got2:
+                        self.log.info("mission: engaged (%s)", got2.name)
             return
         self._heading = "left" if heading == "right" else "right"
         self.log.info("mission: that way is a dead end (run %d); turning %s",

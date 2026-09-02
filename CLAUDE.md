@@ -2070,3 +2070,65 @@ hardcoded IP). Findings that change our design:
   **not** a tolerance/neighbourhood variant. It calls `PixelFound` with exact
   equality; the difference is that it races all conditions concurrently
   (`Task.Run` + `Task.WhenAny`). It does not help with animated art.
+
+## Traversal: finding and REACHING a unit (measured, and one silent typo)
+
+Story-mission traversal is "run to a map edge until something ambushes you", but
+maps also hold units standing in plain sight. Engaging those is what looked
+"clunky", and there were three separate faults behind it.
+
+**1. THE DETECTOR NEVER RAN. `self.cap` does not exist — it is `self.capture`.**
+`find_moving_figure` opened with `cap = cap or getattr(self, "cap", None)`, and
+`MissionRunner.__init__` assigns `self.capture`. `getattr` with a default does
+not raise, so the detector returned `None` on **every frame ever captured**,
+silently, for as long as it existed. Six sites had the wrong name, including the
+`find_character` calls, which meant the canvas correction was also quietly
+falling back to reference constants.
+
+Symptom: the log contained no `something MOVED at` line at all, while a live
+measurement on the same screen found a moving blob of area 7149 at (2478, 496),
+about 10 px from the real enemy. It read exactly like "the bot cannot see
+enemies", and it was not a perception problem in any sense.
+
+**The unit test set `inst.cap` too, so it passed green against the bug.** A
+fixture that hand-builds an object reproduces whatever name the code uses; it
+cannot notice that the name is wrong. The suite now asserts that every capture
+lookup in `mission.py` names an attribute `__init__` actually assigns.
+
+General lesson: **`getattr(self, "x", None)` converts a typo into a permanent
+silent negative.** Anywhere a detector may legitimately return "nothing", a
+missing attribute and a genuine absence become indistinguishable.
+
+**2. A LIVE TARGET WAS BEING BLACKLISTED AS SCENERY.** `_is_dud` and the
+"6 failed engagements, walk instead" cap both exist to stop the bot chasing
+shrubs — one bush was clicked 70 times. Applied to a *moving* target they do the
+opposite of their job: one 6.1 s timeout retired the only real enemy on the map,
+after which the detector had nothing to return and the bot went back to
+edge-running. That is the "randomly moving, never going to the target" report.
+
+**A thing that animates is alive.** Movement-sourced targets are exempt from both
+the dud set and the cap; a failed approach means the walk needed longer, not that
+the target was imaginary.
+
+**3. ONE CLICK AND A STOPWATCH IS NOT AN APPROACH.** Walking across a map takes
+longer than one `traverse_settle` (6.1 s), so the runner declared failure while
+the character was still on its way. This is the same two-step the kekkai section
+already records — *a seal is APPROACHED, then OPENED* — and it applies to units:
+the first click walks you there, contact starts the fight.
+
+So engaging is now **progress-based, not time-based**: click, wait for a combat
+anchor, and if none came ask whether the character got CLOSER (Manhattan distance
+to the target, needing > 20 px of improvement). Closing means the walk is working
+and earns another click, up to `ENGAGE_TRIES = 3`. Not closing means the click
+never took, and there is no point spending two more.
+
+Clicks aim at the **feet** (`cy + bh // 3`), not the sprite centre: a walk-to
+click wants the ground the unit stands on, while staying inside the sprite so the
+character walks to the unit rather than to open ground.
+
+**4. A NEW AREA IS RESCANNED IMMEDIATELY.** On `moved on`, the runner used to
+return and walk again on the next pass before ever looking at where it had
+arrived — so it could stride straight past a unit standing in the open. It now
+rescans on arrival, and **clears the dud set**, because those coordinates
+described the previous map and would blacklist innocent ground on a map the bot
+has never seen.

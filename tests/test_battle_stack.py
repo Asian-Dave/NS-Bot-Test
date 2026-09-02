@@ -2776,7 +2776,11 @@ def test_movement_finds_the_enemy_colour_misses():
 
     inst = R.__new__(R)
     inst._dud_targets = set()
-    inst.cap = Replay(paths)
+    # `capture` is the name MissionRunner.__init__ assigns. An earlier
+    # version of this test set `inst.cap`, which is why it passed green
+    # while the live detector returned None on every single frame: the
+    # fixture reproduced the typo instead of catching it.
+    inst.capture = Replay(paths)
     inst.MOVE_GAP = 0.0
     got = inst.find_moving_figure()
     check(got is not None, f"a moving figure is found ({got})")
@@ -2795,6 +2799,21 @@ def test_movement_finds_the_enemy_colour_misses():
               "on walkable ground, not in the canopy")
         check(isinstance(got[0], int) and isinstance(got[1], int),
               "and returned as plain ints - a numpy int would leak into a click")
+
+    # GUARD THE ATTRIBUTE NAME ITSELF. The bug this test missed was not a logic
+    # error - the logic was correct and the object it reached for did not exist.
+    # `find_moving_figure` looked up `self.cap`; the constructor assigns
+    # `self.capture`; so the detector returned None on every live frame while
+    # this test, which set `inst.cap` too, stayed green. Assert instead that
+    # every capture lookup in mission.py names something __init__ really sets.
+    import mission as _mission_mod
+    _src = inspect.getsource(_mission_mod)
+    _assigned = set(re.findall(r"self\.(\w+)\s*=\s*[^=\n]*\bcapture\b", _src))
+    _looked_up = set(re.findall(r'getattr\(self,\s*"(\w+)",\s*None\)', _src))
+    _looked_up |= set(re.findall(r'\bcap\s*=\s*cap\s+or\s+getattr\(self,\s*"(\w+)"', _src))
+    check(bool(_assigned) and bool(_looked_up) and _looked_up <= _assigned,
+          f"every capture lookup uses the name __init__ assigns "
+          f"(assigns {sorted(_assigned)}, looks up {sorted(_looked_up)})")
 
     # The colour pass on the same frame: only scenery, and no enemy at all.
     f0 = cv2.imread(paths[0])
