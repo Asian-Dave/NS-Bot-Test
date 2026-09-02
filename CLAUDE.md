@@ -2132,3 +2132,400 @@ arrived — so it could stride straight past a unit standing in the open. It now
 rescans on arrival, and **clears the dud set**, because those coordinates
 described the previous map and would blacklist innocent ground on a map the bot
 has never seen.
+
+## SLEEP AND LOCK SCREEN ARE DIFFERENT PROBLEMS — one is impossible
+
+Asked as one question ("can the bot keep running when I sleep or lock the
+Mac?"), these have opposite answers, and conflating them wastes effort on the
+half that cannot be fixed.
+
+**SLEEP CANNOT BE PREVENTED, AND SHOULD NOT BE.** A user-requested sleep
+suspends the CPU; every process stops mid-instruction. `caffeinate` asserts
+against *idle* sleep only — it has no power to veto a sleep the operator asked
+for, and no userspace program does. `engine/presence.py` therefore stops the
+machine *idling* out (display sleep, auto-lock, Teams going Away) and is
+irrelevant to a deliberate sleep.
+
+**But waking up IS handleable, and the failure mode is nasty without it.** The
+process resumes exactly where it left off, so nothing raises — while the game
+has been disconnected from its server for however long the lid was shut. Every
+cached geometry hint now describes a screen that no longer exists, so the bot
+carries on clicking a dead canvas with complete confidence.
+
+**Sleep is detectable, precisely.** On macOS `time.monotonic()` does not tick
+while suspended but the wall clock does (re-read from the RTC on wake), so
+
+    wall_delta - monotonic_delta  ==  seconds spent asleep
+
+**Wall clock alone cannot do this**, and that is the whole point: a mission
+legitimately blocks for minutes, so a wall-clock threshold would relog on every
+slow mission — and a relog throws away an in-flight one. Measured awake, the
+difference is `-0.0000s`; the gate is 60 s. `Runner._slept_for` returns it, and
+waking relogs and clears the drift cache and alignment flag, exactly as the
+window-size path does and for the same reason. It degrades safely: on a
+platform whose monotonic clock includes suspend time the difference stays ~0
+and the detector simply never fires.
+
+**LOCK SCREEN IS A DIFFERENT ANIMAL — processes keep running.** macOS does not
+suspend on lock; the risk is Chrome, not the OS. Ruffle's render loop is
+`requestAnimationFrame`-driven, and Chrome suppresses rAF entirely for an
+occluded window — **measured at zero callbacks per 1500 ms**. A frozen rAF
+means the SWF stops advancing, so captures show a stale frame and every
+template match is against the past.
+
+`browser.py` already launches with the three flags that address it
+(`--disable-backgrounding-occluded-windows`, `--disable-renderer-backgrounding`,
+`--disable-background-timer-throttling`), and the running Chrome was verified
+to carry them.
+
+**Whether that is SUFFICIENT under a locked screen is not yet measured**, and
+it cannot be measured from a session that needs the screen in order to look.
+So `engine/awake_probe.py` records it instead: it installs an rAF counter in
+the page and samples the rate, `visibilityState` and focus every 2 s to
+`run/awake_probe.log` with wall-clock stamps, so the locked window is
+identifiable afterwards. Lock, wait, unlock, read the rows.
+
+    fps holds near the display rate  -> the lock screen is survivable
+    fps drops to 0.0 and recovers    -> the renderer was suspended
+
+`--fix` additionally asserts `Emulation.setFocusEmulationEnabled` and
+`Page.setWebLifecycleState("active")` — both confirmed present in this Chrome's
+protocol — so the two runs can be compared rather than argued about. **Those
+are deliberately runtime CDP calls, not launch flags:** a relaunch would cost
+the session cookie and therefore a manual sign-in, which this file already
+records as unrecoverable by the bot.
+
+It reads a COUNTER rather than taking screenshots on purpose. A second CDP
+client taking clipped screenshots re-applies device metrics and resizes the
+page under the bot — that is what pressed Relog and dropped the session once
+already.
+
+## THE REFACTOR: one entry point, one declaration of a task
+
+The bot "felt like several programs" for two concrete reasons, and neither was
+the number of library modules — those form a clean layered DAG with no cycles
+and each earns its place.
+
+**1. FOUR RIVAL `__main__` ENTRY POINTS.** `app.py` was live; `dashboard.py`
+(707 lines + `dashboard.html`), `overlay.py`, `run_mission.py` and `bot.py`
+were earlier whole-bot front ends, superseded by `dock.py` + `embed.html` and
+untouched for 7–9 days. README documented only `app.py`. Each could attach to
+the same game as the live bot and click it.
+
+`bot.py` was the instructive one: 389 lines of dry-run observation loop, of
+which the real bot imported **one 25-line function**, `load_templates`. It now
+lives in `perceive.py`, where template LOADING belongs next to template
+MATCHING, and `bot.py` is gone.
+
+Deleted: ~1,150 lines. Kept: the genuine one-off instruments
+(`mint_template.py`, `swf_extract.py`, `calibrate.py`, `measure_ruffle.py`,
+`awake_probe.py`, `capture_mission_panels.py`) — those are measuring and
+harvesting tools, not rival bots. The test that separates the two categories is
+whether a file has its own `__main__` that drives the GAME: a rival front end
+can attach to the same session as the live bot and click it, an instrument
+cannot. `capture_mission_panels.py` is imported by nothing and has no
+`__main__`, so it is dead weight rather than a hazard — left in place because
+re-deriving a fixture harvester costs more than the 160 lines it occupies.
+
+**2. THERE WAS NO SUCH THING AS A TASK.** `step()` was an if/elif over four
+task-name strings, and `farm_missions`' pre-flight (am I already in a mission?
+is this a traversal map?) was inlined into the GENERIC path before the ladder
+ran. Adding a task meant editing `step` in two places, plus `TASKS`, plus the
+reset logic, and each task hand-set `mode` and `note` on its way out. Nowhere
+did the code state what a task WAS.
+
+`engine/tasks.py` states it once:
+
+    preflight(rt) -> bool    handle this cycle BEFORE the ladder; True means
+                             handled. "I am already in a mission" belongs
+                             here, because only the task knows whether it can
+                             start from the middle of its own work.
+    run(rt) -> str|None      one cycle from the lobby; the note for the panel
+    oneshot                  finishing is an ENDING, not a lap
+    needs_lobby              False skips the ladder (only `idle`)
+
+`TASKS` is now derived from the registry, so the panel and the loop cannot
+disagree about what exists. The suite asserts `step()` mentions **no task by
+name**.
+
+### WHY SWITCHING TASKS FELT LIKE FIGHTING THE PROCESS
+
+Three things with completely different natural lifetimes were welded to one OS
+process:
+
+| | lifetime | note |
+|---|---|---|
+| the page session | long-lived, **irreplaceable** | the bot cannot recreate the session cookie; only a human can sign in |
+| the panel | survives the process | it is injected into the PAGE — which is why a kill leaves a zombie panel reading "no bot attached" |
+| the task | should be seconds | cheap, interruptible |
+
+So changing the **task** meant killing the **session**. That is the whole of
+the jankiness, and it is not a file-count problem — merging every module into
+one file would not have moved it at all.
+
+A task is now a value the supervisor swaps. The supervisor owns the connection
+and the panel for the whole session; a one-shot that finishes hands back and
+the mode becomes **`ready`** — attached, holding the session, nothing running.
+Deliberately NOT `paused`: paused reads as a warning, and this is not one. The
+panel styles it its own colour, and the suite checks the panel can render every
+mode `step()` can set, because a mode the panel does not know renders unstyled.
+
+A one-shot must not re-run itself: a TP pass that looped would re-walk a list
+it had just measured to be finished.
+
+## TP: THE DAY'S LIST DECIDES WHEN A PASS IS OVER, NOT A COUNT
+
+`run_all` had `max_missions=6` and a docstring asserting that **"completed
+missions drop out of the day's list"**. They do not. They stay listed and go
+GREY. Both halves were wrong, and together they produced "it never finishes
+them all": a count is not the thing that decides whether a list is done, and
+the pass could stop with startable missions still on screen.
+
+There is no mission cap now. The pass keeps taking startable rows until every
+row is either played or measured to be finished. `max_missions` survives only
+as an explicit opt-in bound for a cautious caller; the default is unbounded, and
+the suite pins that default.
+
+**The completion signal comes free from the operator's own description:
+"greyed out or not clickable".** An unclickable row leaves the screen unchanged
+when clicked, so `start_row` clicks and asks whether anything happened:
+
+| measured | reading |
+|---|---|
+| screen unchanged | the row is inert — **it is already done** |
+| changed, no green check | something opened that cannot be started — done |
+| changed, green check | started |
+
+That is a POSITIVE reading of "finished", not the absence of a green check —
+the negative-definition trap this file records four times over. Calibrated on
+synthetic extremes: an identical screen 0.0000, a detail panel opening 0.3600,
+a 4x4 flicker 0.0004; the gate is 0.02, which is 50x clear of the flicker.
+
+`start_row` returns `(started, reason)` because "it did not start" was one
+outcome covering two situations that need opposite responses: an **exhausted**
+row is never revisited, a **transient** miss is left for the next sweep. And
+the no-green-check frame is SAVED to `ref/auto/tp/`, because that is the shape
+a completed TP row takes and one committed frame is all a proper template needs.
+
+Termination is a measurement, so the count guard that remains
+(`SWEEP_TRIPWIRE = 40`) is a **tripwire, not a policy** — if it ever fires the
+termination check is broken, and it says so at error level rather than looking
+like a tidy stop.
+
+## "PRESSING RUN FREEZES FOR A BIT" — the sweep was first in line
+
+`farm.in_mission` ran the command-bar geometry sweep BEFORE any template
+check. A cold sweep on a 3440x1440 frame measures **12.96 s** against 1.28 s
+warm, so starting a farm from the village paid thirteen seconds of 100% CPU in
+`matchTemplate` to be told there is no command bar — on the one screen where
+that was already obvious.
+
+**And the panel freezes with it, which is why it reads as a hang rather than as
+slowness.** Nothing captures during a sweep, and `Capture.on_activity` is what
+pumps the operator's buttons, so Run/Stop are not even READ for the duration.
+This file already records the same root cause for the 40-second dock freezes;
+that fix budgeted the *repeats*, and this one removes the case from the common
+path entirely.
+
+Ordering by cost, with correctness preserved at each step:
+
+| step | cost | what it proves |
+|---|---|---|
+| `IN_MISSION` anchors | ~0.07 s | positive: we ARE in a mission |
+| `OUTSIDE_MISSION` anchors | ~0.07 s | positive: we are NOT |
+| command-bar geometry | 12.96 s cold | only the genuinely ambiguous |
+
+Measured cold on committed frames, before -> after:
+
+    lobby (village)          12.96 s  ->  0.43 s     None
+    lobby lb0                12.96 s  ->  0.43 s     None
+    mission list all locked  12.96 s  ->  0.86 s     None
+    combat, dark map         12.96 s  ->  1.94 s     command_bar
+    battle between turns     12.96 s  ->  0.36 s     action_flag
+    traversal map            13.42 s  ->  13.42 s    None   (see below)
+
+**The sweep must stay for the ambiguous case.** It is the only thing that
+catches a battle whose `action_flag` is occluded by an enemy sprite — measured
+0.750 on the dark map, where the command buttons read 1.000. Rare, and it
+should not be charged to every cycle in the village.
+
+A TRAVERSAL frame still pays in full, and that is inherent: it is scenery, so
+neither anchor set matches and there is nothing cheaper to ask. The cold-miss
+budget bounds it — measured 13.50 s, then 1.97 s, 1.98 s, 1.98 s — so it is one
+hit per process on that screen, not per cycle.
+
+**`NOT_IN_MISSION` IS MISNAMED and cannot be reused for this.** Despite the
+name it CONTAINS `action_flag`, `level_up`, `charge_btn` and `dodge_btn`,
+because it is the veto list for `looks_like_mission_scene` ("this is not
+walkable scenery"), not a statement about missions. Using it as the early-out
+would report "not in a mission" in the middle of a battle — precisely the bug
+`in_mission` exists to prevent. `OUTSIDE_MISSION` is therefore a strict subset
+with every combat anchor removed, and the suite asserts both the subset
+relation and that each combat anchor is absent from it.
+
+## "IT SHOULD FARM UNTIL I PRESS STOP" — four paths said otherwise
+
+`farm_missions` is a LOOPING task, but four separate code paths paused it
+unconditionally on the first difficulty, and one of them was outright broken.
+
+**THE BROKEN ONE: a SUCCESSFUL reconnect left the mode paused.**
+
+    except Disconnected as e:
+        self.mode = "paused"
+        if not self.reconnect():
+            break
+        continue            # <- mode is still "paused"
+
+So one transient CDP hiccup stopped a farm for good, and the only symptom was
+a bot sitting idle until the operator noticed and pressed Run. A restored
+connection is not a reason to stop working; the loop now remembers what it was
+doing and resumes it, but only after the reconnect has actually succeeded.
+
+**THE OTHER THREE were a missing distinction, not missing code.** An
+unreadable screen, a task error and a mission-runner error each called
+`self.mode = "paused"` directly. For a ONE-SHOT that is correct - it was asked
+to do a thing once and the thing failed. For a loop it is wrong.
+
+`Runner._setback(note, fatal=False)` makes it one decision instead of four,
+and the question it asks is **whether a HUMAN is required** - not how alarming
+the message looks:
+
+| condition | response | why |
+|---|---|---|
+| logged out / `resume.HALT` | pause, always | only a person can sign in, and this bot must never try |
+| unreadable screen | relog and carry on | that is the documented cure for the game's render stall |
+| task / runner error | retry, bounded | may well be transient |
+| a one-shot, anything | pause | its single job is over |
+
+Bounded at `MAX_SETBACKS = 6` with a `3s * n` backoff capped at 15s, because
+**a bot spinning silently is worse than one that stops and says why** - this
+file's own rule, and the reason the guard was there in the first place. The
+budget resets whenever the ladder reaches a screen it recognises, so it is
+spent on the NEXT problem rather than staying exhausted.
+
+### The game's render bug now gets recognised instead of walked through
+
+The other half of "stuck" was not a pause at all. When the game draws the map
+but never the CHARACTER SPRITE, no encounter can trigger and the mission is
+unplayable - a defect in the game client, cured only by a reload and relog.
+
+Left to the generic guards it cost about **150 s of visible wandering** (25
+identical repeats at ~6 s per gate timeout) and filled the log with
+`dead end (run 19); turning left`, which blames navigation for something
+navigation cannot fix.
+
+The signature is specific enough to act on, and separates cleanly on the
+committed frames:
+
+    render-stalled mission (run_00..run_10)   character found on  0 of 11
+    healthy traversal maps (traverse_*)       character found on  4 of 4
+
+So: traversal runs >= 8, ZERO battles, and no character on the map -> report
+it as the GAME's bug by name, set `stats["render_stalled"]`, and return
+STALLED at once. All three conditions are required together; runs alone, or an
+absent character alone, is not the bug. Eight clears normal play comfortably -
+a healthy mission reaches its first fight in a handful of runs, and the
+recorded stalled run reached ten with none.
+
+## SPEED: the frame was 2x bigger than the game, and negatives cost full price
+
+Where the time actually went, measured rather than assumed. **Pagination was
+never the problem** - page turns are 0.18-0.20 s, so all seven pages cost about
+1.3 s. `cv2.matchTemplate` was: **73 ms for ONE template at ONE scale** on a
+3440x1440 capture, so scoring all 59 cost 4.53 s and one resume-ladder step
+cost ~1.7 s. Cost is linear in frame AREA, and this is the hottest path in the
+bot - every subsystem goes through it.
+
+Two independent fixes compound to **7.55x**, verified over **6018
+template/frame comparisons with ZERO decision changes and ZERO coordinate
+changes**.
+
+**1. SEARCH ONLY THE GAME.** The canvas is 1920 px of a 3440 px capture; the
+rest is desktop wallpaper and the bot's own panel. Cropping does not merely
+preserve accuracy, it IMPROVES it - there is less unrelated art to match by
+accident:
+
+    lobby_rail_fortune (positive)  0.976 -> 0.976   identical
+    char_slot_level    (negative)  0.512 -> 0.443   MORE margin
+    page_next          (negative)  0.548 -> 0.531   MORE margin
+
+`Capture.apply_search_band` sets it from the LIVE rect on every full frame, not
+per cycle - a mission blocks for minutes, and a band describing where the game
+*used to be* would lose every anchor at once. If it cannot be measured the band
+is CLEARED: searching the whole frame is merely slower, while searching the
+wrong strip is wrong. That required distinguishing "measured, and it is at the
+reference" from "could not measure", which `game_metrics` could not do - both
+returned `(0, 0, 1.0)`. Hence `game_metrics_ok()`.
+
+**PAD THE BAND BY THE TEMPLATE'S OWN WIDTH.** `matchTemplate` requires the
+template to fit ENTIRELY inside the searched region, so a match straddling the
+edge is annihilated, not degraded. `lobby_logo` is 216 px wide and matches with
+its centre at x=862 - inside a band starting at 760 - but its LEFT EDGE sits at
+**754, six pixels outside**. The bare band took it from **0.998 to 0.299**, and
+21 such mismatches appeared across the committed frames. Six pixels, and the
+lobby stopped being recognised.
+
+**2. REJECT NEGATIVES AT HALF RESOLUTION.** A negative costs exactly what a
+positive costs, and nearly everything scored is a negative - "no anchor
+matched" is both the common case and the expensive one. So score at half scale
+first and only pay full price for candidates that could still clear threshold.
+Halving squeezes margin from BOTH ends (positives fall, negatives rise), so the
+cheap gate sits `COARSE_RELAX` below the real threshold. The value is measured:
+
+    relax   missed positives   worst headroom   negatives rejected
+    0.10           1               -0.007            98.6%
+    0.18           0               +0.073            96.1%
+    0.30           0               +0.193            90.2%
+
+0.10 already loses a real match. 0.18 is the smallest with zero misses AND
+headroom above the 0.07 that thresholds are calibrated to. The tightest
+positive is `nav_jutsu`. Masked templates SKIP the prefilter - they score with
+`TM_CCORR_NORMED`, whose values are not comparable, and none of the current 59
+carry alpha, so the table above was never verified for them.
+
+The halved FRAME is cached by **weak reference**, not by `id()`: an id is
+recycled once an array is freed, which would silently hand back another
+frame's pixels. One sweep over 59 templates then resizes once, not 59 times.
+
+**The geometry sweep needed the band separately.** `geometry._best` calls
+`matchTemplate` directly and so saw none of this, while being the most
+expensive thing left: a cold 90-scale sweep on a traversal frame measured
+12.86 s. Banding it brings that to **7.97 s**, with the command-bar anchor
+landing identically ((1670, 977) at scale 1.0 both ways).
+
+### CORRECTION: capping OpenCV's threads does NOTHING on this build
+
+`cv2` defaults to one thread per core (18 here) and every match saturates them,
+which is most of "why does my Mac get hot". Capping looked like free relief,
+and a thread sweep came back suspiciously flat - 1.265 s at "1 thread" against
+1.281 s at "18".
+
+**That sweep was measuring the same configuration seven times.** This wheel is
+built with GCD as its parallel framework (`cv2.getBuildInformation()` ->
+"Parallel framework: GCD"), and under GCD **`setNumThreads` is a no-op**:
+
+    setNumThreads(4) -> getNumThreads() == 18
+    setNumThreads(1) -> getNumThreads() == 18
+
+So the flat curve says nothing whatever about threading. OpenCV's thread count
+is simply **not controllable from Python on this build**, and the "threading
+buys nothing" conclusion drawn from it was unsupported.
+
+The call is kept because it is not inert everywhere - Linux and Windows wheels
+use TBB/pthreads/OpenMP - and it now logs which case applies. But on this host
+**the only thing that reduces the heat is doing less work**, which the 7.55x
+above actually does.
+
+General lesson, and it is the same one this file keeps recording: before
+trusting a measurement, check that the knob you turned is connected to
+anything. A suspiciously flat curve is usually a disconnected knob, not a
+discovery.
+
+### The log had no timestamps at all
+
+`run/app.log` recorded a whole session with no times in it - the stamps an
+operator sees pasting from the dock's pane come from the panel, and the file
+never had them. So every timing conclusion had to come from durations the code
+happened to print itself, and "why did that take so long" was unanswerable from
+the record. `Log._emit` stamps the stream too, and distinguishes levels, since
+`warning = error = info` made a crash and a routine step look identical.

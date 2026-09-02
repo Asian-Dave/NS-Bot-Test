@@ -391,6 +391,35 @@ class MissionRunner:
             # on movement, and the traversal screen has no reliable anchor yet.
             self._traverse(bgr)
 
+            # THE GAME'S OWN RENDER BUG, RECOGNISED BY ITS SIGNATURE.
+            #
+            # Sometimes the map draws but the CHARACTER SPRITE never does, so
+            # no encounter can trigger and the mission cannot be played at all.
+            # It is a defect in the game client, not in perception or
+            # navigation, and the only cure is a reload plus relog.
+            #
+            # Left to the generic guards it costs about 150 s of visible
+            # wandering - 25 identical repeats at roughly 6 s per gate timeout
+            # - and the log fills with "dead end / turning left" while nothing
+            # is wrong with either. From outside that is the bot "getting
+            # stuck", and it names the wrong subsystem.
+            #
+            # The signature is specific enough to act on: traversal runs
+            # climbing, ZERO battles, and no character found on the map. A
+            # healthy mission reaches its first fight in a handful of runs.
+            # `getattr` because `_traverse` sets this only after a completed
+            # run, and it returns early whenever it engages something.
+            runs = getattr(self, "_traverse_runs", 0)
+            if (runs >= self.RENDER_STALL_RUNS
+                    and self.stats["battles"] == 0
+                    and self.find_character(bgr, self.capture) is None):
+                self.log.error(
+                    "mission: %d traversal runs, no battles, and no character "
+                    "on the map - this is the GAME's render bug, not "
+                    "navigation. Only a reload and relog clears it.", runs)
+                self.stats["render_stalled"] = True
+                return MissionOutcome.STALLED, self.stats
+
         self.log.warning("mission: step budget %d exhausted", self.max_steps)
         return MissionOutcome.STALLED, self.stats
 
@@ -736,6 +765,10 @@ class MissionRunner:
     MOVE_GAP = 0.30
     MOVE_THRESHOLD = 15
     MOVE_MIN_AREA = 2500
+    # Traversal runs with zero battles that mean the GAME failed to draw our
+    # character. A healthy mission meets its first fight within a few runs; a
+    # render-stalled one never will, so this only has to be clear of normal.
+    RENDER_STALL_RUNS = 8
     # How many approach clicks a LIVE target gets. Walking across a map takes
     # longer than one settle, and a moving thing is worth the patience.
     ENGAGE_TRIES = 3

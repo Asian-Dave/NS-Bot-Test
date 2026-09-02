@@ -1125,7 +1125,7 @@ def test_mission_list_is_not_scenery():
     """
     print("\nmission list vs mission scenery")
     from perceive import find
-    import farm, bot as botmod
+    import farm, perceive as botmod
     import json as _json
     cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
     tpls = botmod.load_templates(cfg, LOG)
@@ -1417,7 +1417,7 @@ def test_battle_between_turns_is_not_scenery():
     """
     print("\nbattle between turns is not scenery")
     from perceive import find
-    import farm, bot as botmod
+    import farm, perceive as botmod
     import json as _json
     cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
     tpls = botmod.load_templates(cfg, LOG)
@@ -1989,7 +1989,7 @@ def test_ladder_acknowledges_a_lone_green_check():
     """
     print("\nladder acknowledges a lone green check")
     from perceive import find, Template
-    import bot as botmod, resume as resume_mod
+    import perceive as botmod, resume as resume_mod
     import json as _json
     cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
     tpls = botmod.load_templates(cfg, LOG)
@@ -2272,7 +2272,7 @@ def test_level_up_panel_is_acknowledged():
     """
     print("\nlevel-up panel is acknowledged")
     from perceive import find, Template
-    import bot as botmod, farm, resume as resume_mod
+    import perceive as botmod, farm, resume as resume_mod
     import json as _json
     cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
     tpls = botmod.load_templates(cfg, LOG)
@@ -2634,7 +2634,7 @@ def test_command_buttons_are_map_independent():
     """
     print("\ncommand buttons are map-independent")
     from perceive import find
-    import bot as botmod, farm
+    import perceive as botmod, farm
     from geometry import BattleGeometry
     import json as _json
     cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
@@ -2831,6 +2831,662 @@ def test_movement_finds_the_enemy_colour_misses():
               f"the moving blob is the enemy, not us (us {me}, moving {got})")
 
 
+
+def test_sleep_is_told_apart_from_a_slow_iteration():
+    """A long mission must not be mistaken for the machine having slept.
+
+    Wall clock alone cannot make this distinction: a mission legitimately
+    blocks for minutes, and a sleep also shows a large wall-clock gap. The
+    discriminator is that macOS's monotonic clock does not tick while
+    suspended, so `wall_delta - monotonic_delta` is the time spent asleep and
+    is ~0 for work, however slow.
+
+    This matters because the response is a RELOG, which throws away an
+    in-flight mission. A false positive would abandon a mission every time one
+    took a while.
+    """
+    print("\nsleep is told apart from a slow iteration")
+    import app as app_mod
+
+    R = app_mod.Runner
+    inst = R.__new__(R)
+
+    clock = {"w": 1000.0, "m": 500.0}
+    real_time, real_mono = time.time, time.monotonic
+    time.time = lambda: clock["w"]
+    time.monotonic = lambda: clock["m"]
+    try:
+        # The FIRST call has no baseline to compare against, so it must not
+        # report a sleep - otherwise every launch would relog immediately.
+        check(inst._slept_for() == 0.0, "the first call reports no sleep")
+
+        # A fast, ordinary iteration: both clocks advance together.
+        clock["w"] += 1.0; clock["m"] += 1.0
+        check(inst._slept_for() == 0.0, "a 1s iteration is not a sleep")
+
+        # A SLOW iteration - a whole mission, 8 minutes. Both clocks advance,
+        # so however large the wall gap, it is work and not suspension.
+        clock["w"] += 480.0; clock["m"] += 480.0
+        got = inst._slept_for()
+        check(got == 0.0, f"an 8-MINUTE mission is not a sleep ({got})")
+
+        # A real sleep: the wall clock jumped, the monotonic clock did not.
+        clock["w"] += 3600.0; clock["m"] += 0.4
+        got = inst._slept_for()
+        check(3595 < got < 3601, f"an hour of sleep IS detected ({got:.0f}s)")
+
+        # A sleep shorter than the gate stays quiet: brief suspensions are not
+        # worth throwing a mission away for.
+        clock["w"] += 5.0; clock["m"] += 0.1
+        check(inst._slept_for() == 0.0, "a 5s blip is under the gate")
+    finally:
+        time.time, time.monotonic = real_time, real_mono
+
+    # And the response must clear what a stale layout would poison - the same
+    # caches the window-size path clears, for the same reason.
+    src = inspect.getsource(R.loop)
+    check("_slept_for()" in src, "the loop actually calls the detector")
+    for needed in ("relog()", "_off_at", "focus_aligned"):
+        check(needed in src,
+              f"waking relogs and clears stale geometry ({needed})")
+
+
+
+class _Log:
+    """A log that remembers, so a test can assert on WHY something stopped.
+
+    The suite grew five ad-hoc log stubs; new tests should use this one.
+    """
+
+    def __init__(self):
+        self.lines = []
+
+    def _add(self, m, a):
+        self.lines.append((m % a) if a else str(m))
+
+    def info(self, m, *a):
+        self._add(m, a)
+
+    def warning(self, m, *a):
+        self._add(m, a)
+
+    def error(self, m, *a):
+        self._add(m, a)
+
+
+def test_tp_pass_is_bounded_by_the_list_not_by_a_count():
+    """A TP pass must finish the DAY'S LIST, not a fixed number of missions.
+
+    It used to stop after `max_missions=6` and its docstring claimed completed
+    missions drop out of the list. They do not - they stay listed and go GREY.
+    So the pass could stop with startable missions still on screen, which is
+    exactly the reported "it never finishes them all".
+
+    The replacement termination is a measurement: a greyed row is not
+    clickable, so clicking it leaves the screen unchanged, and THAT is read as
+    "this one is done". Positive reading, not the absence of a green check.
+    """
+    print("\ntp pass is bounded by the list, not by a count")
+    import tp as tp_mod
+
+    # --- the change detector, which the whole thing rests on ---------------
+    base = np.zeros((200, 200, 3), np.uint8)
+    same = base.copy()
+    moved, frac = tp_mod._changed(base, same)
+    check(not moved, f"an identical screen is NOT a change ({frac:.4f})")
+
+    panel = base.copy()
+    panel[40:160, 40:160] = 255          # a detail panel opening: 36% of frame
+    moved, frac = tp_mod._changed(base, panel)
+    check(moved, f"a panel opening IS a change ({frac:.4f})")
+
+    tiny = base.copy()
+    tiny[0:4, 0:4] = 255                 # a cursor blink: 0.04% of the frame
+    moved, frac = tp_mod._changed(base, tiny)
+    check(not moved, f"a 4x4 flicker is not a panel ({frac:.4f})")
+
+    # --- the pass itself, with the world faked out -------------------------
+    real = (tp_mod.to_tp_list, tp_mod.pick_any, tp_mod.run_one,
+            tp_mod._recover_to_lobby)
+    log = _Log()
+    try:
+        tp_mod.to_tp_list = lambda *a, **k: True
+        tp_mod._recover_to_lobby = lambda *a, **k: None
+        tp_mod.run_one = lambda *a, **k: True
+
+        # EIGHT startable rows - comfortably past the old cap of 6.
+        rows = [(0, 300 + 90 * i) for i in range(8)]
+        pending = list(rows)
+
+        def pick(actor, cap, lg, skip=(), max_pages=3, done=None):
+            for r in list(pending):
+                if r in skip:
+                    continue
+                pending.remove(r)
+                return r
+            return None
+
+        tp_mod.pick_any = pick
+        played, banked = tp_mod.run_all(None, None, log)
+        check(played == 8, f"all EIGHT missions are played, not 6 ({played})")
+        check(banked == 8, f"and all eight banked ({banked})")
+
+        # An explicit caller limit is still honoured, for a cautious run.
+        pending = list(rows)
+        played, _ = tp_mod.run_all(None, None, log, max_missions=2)
+        check(played == 2, f"an explicit limit still applies ({played})")
+
+        # A list where everything is greyed out ends immediately, and does not
+        # spin: pick_any reporting None IS the finish line.
+        pending = []
+        played, banked = tp_mod.run_all(None, None, log)
+        check(played == 0 and banked == 0,
+              f"an all-grey list plays nothing ({played}, {banked})")
+        check(any("list is finished" in l for l in log.lines),
+              "and says the list is finished rather than hitting a cap")
+
+        # A pick_any that never reports None must not loop forever - the
+        # tripwire exists so a broken termination check is loud, not silent.
+        tp_mod.pick_any = lambda *a, **k: (0, 300)
+        log.lines = []
+        played, _ = tp_mod.run_all(None, None, log)
+        check(played <= tp_mod.SWEEP_TRIPWIRE,
+              f"a stuck list trips the wire instead of spinning ({played})")
+        check(any("termination check is not working" in l for l in log.lines),
+              "and the log says the termination check is broken")
+    finally:
+        (tp_mod.to_tp_list, tp_mod.pick_any, tp_mod.run_one,
+         tp_mod._recover_to_lobby) = real
+
+    # The signature must not carry a default cap back in by accident.
+    sig = inspect.signature(tp_mod.run_all)
+    check(sig.parameters["max_missions"].default is None,
+          "run_all has no default mission cap")
+
+
+def test_a_task_is_declared_in_exactly_one_place():
+    """A task must be a VALUE the supervisor swaps, not a branch in `step`.
+
+    `step` used to be an if/elif over four task-name strings, with
+    farm_missions' pre-flight inlined into the generic path. Adding a task
+    meant editing `step` twice, plus the TASKS list, plus the reset logic - so
+    "what is a task" could only be answered by reading the whole method, and
+    changing the work looked like restarting the process.
+    """
+    print("\na task is declared in exactly one place")
+    import app as app_mod
+    import tasks as tasks_mod
+    import dock as dock_mod
+    from cdp import CDPError
+
+    # --- the registry is the single declaration ---------------------------
+    for t in tasks_mod.REGISTRY:
+        check(bool(t.key) and bool(t.label),
+              f"{type(t).__name__} declares a key and a label")
+    keys = [t.key for t in tasks_mod.REGISTRY]
+    check(len(keys) == len(set(keys)), f"keys are unique ({keys})")
+    check([d["key"] for d in app_mod.TASKS] == keys,
+          "the panel's task list IS the registry, not a second copy")
+
+    # --- step() no longer knows any task by name --------------------------
+    src = inspect.getsource(app_mod.Runner.step)
+    for key in keys:
+        check(f'"{key}"' not in src and f"'{key}'" not in src,
+              f"step() does not mention {key} by name")
+    check("preflight(" in src and ".run(" in src,
+          "step() dispatches through the interface instead")
+
+    # --- one-shot vs lap --------------------------------------------------
+    check(tasks_mod.get("tp_training").oneshot,
+          "a TP pass is a one-shot - re-running it would re-walk a list it "
+          "just proved finished")
+    check(tasks_mod.get("resume_to_lobby").oneshot,
+          "resuming to the lobby is a one-shot")
+    check(not tasks_mod.get("farm_missions").oneshot,
+          "farming is a lap, so the supervisor comes round again")
+    check(not tasks_mod.get("idle").needs_lobby,
+          "idle does not drive the resume ladder")
+
+    # An unknown key must not take down a session holding a login that only a
+    # human can restore.
+    check(tasks_mod.get("nonsense").key == "idle",
+          "an unknown task key falls back to idle rather than raising")
+
+    # --- the panel must be able to render every mode step() can set --------
+    dock_src = inspect.getsource(dock_mod)
+    for mode in ("running", "paused", "stopped", "ready"):
+        check(f'"{mode}"' in dock_src or f"'{mode}'" in dock_src,
+              f"the panel styles the {mode} state")
+
+    # --- guard keeps the disconnect distinction ---------------------------
+    # A dropped socket must NOT read as "the detector found nothing": the loop
+    # needs to reconnect, and a bot that confuses the two walks into furniture.
+    rt = app_mod.Runner.__new__(app_mod.Runner)
+
+    def boom(exc):
+        def f():
+            raise exc
+        return f
+
+    try:
+        rt.guard(boom(OSError("socket gone")))
+        check(False, "an OSError becomes Disconnected")
+    except app_mod.Disconnected:
+        check(True, "an OSError becomes Disconnected")
+    try:
+        rt.guard(boom(CDPError("target closed")))
+        check(False, "a CDPError becomes Disconnected")
+    except app_mod.Disconnected:
+        check(True, "a CDPError becomes Disconnected")
+    check(rt.guard(boom(ValueError("bad mask")), default="fallback")
+          == "fallback",
+          "a detector failure falls back instead of disconnecting")
+    check(rt.guard(lambda: "measured") == "measured",
+          "and a working call returns its value")
+
+
+def test_attach_with_no_browser_fails_fast():
+    """`--attach` with nothing to attach to must not look like a hang.
+
+    It used to fall through to `find_page_target`, which polls for 30-40s and
+    then raises "no page target after 40s". Forty seconds of silence followed
+    by a traceback reads as a hang, and the operator's next move was usually to
+    delete the pid lock - the habit that once let six instances run at once.
+
+    `cdp_ready` answers the same question in 1.5s. Measured after the fix:
+    0.155s, with the lock released.
+    """
+    print("\nattach with no browser fails fast")
+    import app as app_mod
+
+    src = inspect.getsource(app_mod.main)
+    i_ready = src.find("cdp_ready")
+    i_launch = src.find("browser.launch")
+    check(i_ready != -1, "the attach path checks cdp_ready")
+    check(i_ready < i_launch,
+          "and checks it BEFORE launching or attaching, so the cheap test "
+          "comes first")
+
+    # The message has to carry the consequence, not just the fault: a Chrome
+    # that quit has also signed the game out, and only a human can fix that.
+    window = src[i_ready:i_ready + 1400]
+    check("never enters credentials" in window or "sign in" in window,
+          "and says the operator must sign in, because the bot never does")
+    check("session cookie" in window,
+          "explaining WHY the session is gone rather than just asserting it")
+
+    # It must not leave the lock behind, and must only ever drop its OWN.
+    check("_lock_holder(lock) == os.getpid()" in window,
+          "the early exit releases only a lock it actually holds")
+
+
+def test_in_mission_asks_the_cheap_questions_first():
+    """Pressing Run in the village must not cost a full geometry sweep.
+
+    `in_mission` ran the command-bar sweep BEFORE any template, and a cold
+    sweep on a 3440x1440 frame measures 12.96s against 1.28s warm. So starting
+    a farm from the lobby paid ~13s of 100% CPU in matchTemplate to be told
+    there is no command bar - on the one screen where the answer was already
+    obvious. The panel freezes with it, because nothing captures during a
+    sweep and so the operator's buttons are never pumped.
+
+    Reordering by cost is only safe if the cheap anchors are CONCLUSIVE, which
+    is what this test pins:
+
+        lobby / list frames  -> answered without the sweep, and answered None
+        combat frames        -> still detected, including the dark map where
+                                `action_flag` is occluded (0.750) and only the
+                                command buttons carry it
+    """
+    print("\nin_mission asks the cheap questions first")
+    import json
+    import farm, perceive as tpl_mod, importlib
+
+    cfg = json.load(open(os.path.join(ROOT, "Configs/mission.json")))
+    tpls = tpl_mod.load_templates(cfg, _Log())
+
+    # OUTSIDE_MISSION must be a strict subset of NOT_IN_MISSION with every
+    # combat anchor removed - including one mid-battle would make the farm
+    # loop refuse to fight, which is the bug in_mission exists to prevent.
+    outside, veto = set(farm.OUTSIDE_MISSION), set(farm.NOT_IN_MISSION)
+    check(outside < veto, "OUTSIDE_MISSION is a strict subset of the veto set")
+    for combat_anchor in ("action_flag", "level_up", "charge_btn", "dodge_btn"):
+        check(combat_anchor not in outside,
+              f"{combat_anchor} is NOT treated as proof we left the mission")
+
+    # The ordering itself, by source: the sweep must come after both template
+    # passes, or the cost is back.
+    src = inspect.getsource(farm.in_mission)
+    i_in = src.find("for name in IN_MISSION")
+    i_out = src.find("for name in OUTSIDE_MISSION")
+    i_geo = src.find("BattleGeometry.locate")
+    check(-1 < i_in < i_geo, "IN_MISSION anchors are checked before the sweep")
+    check(-1 < i_out < i_geo, "OUTSIDE_MISSION anchors are too")
+
+    # And behaviour on real frames, with the geometry hint dropped each time so
+    # every case is measured COLD - the state a freshly launched bot is in.
+    cases = [("lobby/village_lv66.png", None), ("lobby/lb0.png", None),
+             ("mission/list_all_locked.png", None),
+             ("mission/combat_dark_map.png", "in"),
+             ("mission/battle_between_turns.png", "in")]
+    for rel, want in cases:
+        f = cv2.imread(os.path.join(ROOT, "ref/auto", rel))
+        if f is None:
+            continue
+        import geometry
+        importlib.reload(geometry)
+        t0 = time.time()
+        got = farm.in_mission(f, tpls)
+        dt = time.time() - t0
+        check(("in" if got else None) == want,
+              f"{rel} -> {got} (wanted {want or 'None'})")
+        if want is None:
+            # The whole point: a conclusive cheap answer, so no 13s sweep.
+            check(dt < 4.0,
+                  f"{rel} answered in {dt:.2f}s without a full sweep")
+
+
+def test_a_looping_task_recovers_instead_of_pausing():
+    """"Farm missions" means farm them until Stop - not until the first hiccup.
+
+    Four separate paths used to pause the bot unconditionally: an unreadable
+    screen, a task error, a mission-runner error, and a disconnect. The last
+    was outright broken - it left `mode` paused even when the reconnect
+    SUCCEEDED, so one transient CDP hiccup stopped a farm for good and the
+    operator had to notice and press Run.
+
+    The distinction that matters is whether a HUMAN is required, not how
+    alarming the message is: only a person can sign in, so a HALT is fatal,
+    while an unreadable screen is usually cleared by a relog - the documented
+    recovery for the game's own render-stall bug.
+    """
+    print("\na looping task recovers instead of pausing")
+    import app as app_mod
+
+    R = app_mod.Runner
+
+    def fresh(task):
+        rt = R.__new__(R)
+        rt.task, rt.mode, rt.note = task, "running", ""
+        rt.log, rt._setbacks = _Log(), 0
+        rt.relogs = []
+        rt.relog = lambda: rt.relogs.append(1)
+        return rt
+
+    real_sleep = app_mod.time.sleep
+    app_mod.time.sleep = lambda *_: None      # do not actually back off
+    try:
+        # --- a LOOPING task carries on ------------------------------------
+        rt = fresh("farm_missions")
+        rt._setback("20 unrecognised frames in a row")
+        check(rt.mode == "running",
+              f"a looping task keeps running after a setback ({rt.mode})")
+        check(rt._setbacks == 1, f"and counts it ({rt._setbacks})")
+        check(len(rt.relogs) == 1, "and relogs to try to clear it")
+
+        # --- until the budget runs out ------------------------------------
+        rt = fresh("farm_missions")
+        for i in range(R.MAX_SETBACKS):
+            rt._setback(f"setback {i + 1}")
+            check(rt.mode == "running",
+                  f"still running at setback {i + 1}/{R.MAX_SETBACKS}")
+        rt._setback("one too many")
+        check(rt.mode == "paused",
+              f"past the budget it hands back ({rt.mode})")
+        check("setbacks in a row" in rt.note,
+              f"and says why: {rt.note[:60]!r}")
+
+        # --- a DETERMINISTIC failure must reach the cap -------------------
+        # The live loop was: crash -> relog -> lobby -> crash, identically,
+        # forever. Nothing between the setbacks clears the budget now, so the
+        # same failure repeated must terminate.
+        rt = fresh("farm_missions")
+        for _ in range(R.MAX_SETBACKS + 1):
+            rt._setback("task error: ModuleNotFoundError: No module named 'bot'")
+        check(rt.mode == "paused",
+              f"the same failure repeated stops the bot ({rt.mode})")
+        check(any("SAME failure" in l for l in rt.log.lines),
+              "and the log says it is the same failure, not just a count")
+
+        # --- a ONE-SHOT pauses at once ------------------------------------
+        rt = fresh("tp_training")
+        rt._setback("TP pass blew up")
+        check(rt.mode == "paused",
+              f"a one-shot pauses on its first setback ({rt.mode})")
+        check(not rt.relogs, "and does not relog - it was asked to do it once")
+
+        # --- fatal is fatal even for a loop -------------------------------
+        rt = fresh("farm_missions")
+        rt._setback("signed out", fatal=True)
+        check(rt.mode == "paused",
+              f"a fatal setback pauses a looping task too ({rt.mode})")
+        check(not rt.relogs,
+              "and never relogs, because only a human can sign in")
+    finally:
+        app_mod.time.sleep = real_sleep
+
+    # --- ONLY COMPLETED WORK clears the budget ----------------------------
+    #
+    # This is the bug the first version of this policy shipped with, found in a
+    # live log. The reset sat at the ladder-arrival point, and a relog ALWAYS
+    # reaches the lobby - so a deterministic failure (a mission-start crash)
+    # reset the counter every lap and relogged forever. The log read
+    # "setback 1/6" over and over and never once reached 2/6, which is exactly
+    # the silent spinning the cap exists to prevent.
+    step_src = inspect.getsource(R.step)
+    i_reset = step_src.find("self._setbacks = 0")
+    i_run = step_src.find("task.run(self)")
+    i_arrived = step_src.find("self._relogs = 0")
+    check(i_reset != -1, "the budget is cleared somewhere in step()")
+    check(i_reset > i_run,
+          "and only AFTER a task cycle completed - not on ladder arrival")
+    check(i_arrived < i_run and not (i_arrived < i_reset < i_run),
+          "there is no reset at the arrival point, which a relog always hits")
+    check(step_src.count("self._setbacks = 0") == 1,
+          "and exactly one place clears it, so the two cannot drift")
+
+    # --- HALT stays fatal --------------------------------------------------
+    i_halt = step_src.find("resume.HALT")
+    check(i_halt != -1 and 'self.mode = "paused"' in step_src[i_halt:i_halt + 400],
+          "a HALT still pauses outright rather than recovering")
+
+    # --- the reconnect bug -------------------------------------------------
+    loop_src = inspect.getsource(R.loop)
+    i_disc = loop_src.find("except Disconnected")
+    window = loop_src[i_disc:]
+    check('was = self.mode' in window or 'was == "running"' in window,
+          "a successful reconnect restores the mode it interrupted")
+    check(window.find('was == "running"') > window.find("self.reconnect()"),
+          "and does so only AFTER the reconnect actually succeeded")
+
+
+def test_the_games_render_bug_is_recognised_not_walked_through():
+    """A mission the GAME failed to draw must be abandoned fast, by name.
+
+    Sometimes the map renders but the character sprite never does, so no
+    encounter can trigger and the mission is unplayable. Left to the generic
+    guards it costs ~150s of visible wandering (25 identical repeats at ~6s per
+    gate timeout) and fills the log with "dead end / turning left" - which
+    blames navigation for a defect in the game client.
+
+    The signature is specific: traversal runs climbing, ZERO battles, and no
+    character on the map. `run_00..run_10` are that mission; the `traverse_*`
+    frames are healthy maps.
+    """
+    print("\nthe game's render bug is recognised, not walked through")
+    import mission as mission_mod
+
+    R = mission_mod.MissionRunner
+
+    # The stalled mission: eleven frames, character never drawn.
+    stalled = sorted(glob.glob(os.path.join(
+        ROOT, "ref/auto/mission/run_*.png")))
+    check(len(stalled) >= 8,
+          f"the render-stalled mission's frames are committed ({len(stalled)})")
+    misses = 0
+    for path in stalled:
+        f = cv2.imread(path)
+        if f is None:
+            continue
+        if R.find_character(f) is None:
+            misses += 1
+    check(misses == len(stalled),
+          f"no character is found on ANY of them ({misses}/{len(stalled)})")
+
+    # Healthy traversal maps must NOT look like the bug, or a good mission
+    # would be thrown away after eight runs.
+    for name in ("traverse_char_left", "traverse_char_right",
+                 "traverse_at_left_edge", "traverse_shrub_decoy"):
+        f = cv2.imread(os.path.join(ROOT, f"ref/auto/mission/{name}.png"))
+        if f is None:
+            continue
+        check(R.find_character(f) is not None,
+              f"{name} finds its character, so the bug does not fire there")
+
+    # The threshold has to clear normal play: the recorded stalled run reached
+    # ten traversal runs, and a healthy mission meets its first fight in a few.
+    check(R.RENDER_STALL_RUNS >= 6,
+          f"the run threshold is not trigger-happy ({R.RENDER_STALL_RUNS})")
+
+    # And all three conditions must be required together - runs alone, or a
+    # missing character alone, is not the bug.
+    src = inspect.getsource(R.run)
+    i = src.find("RENDER_STALL_RUNS")
+    check(i != -1, "the check lives in the mission loop")
+    window = src[i:i + 900]
+    check('battles"] == 0' in window,
+          "zero battles is part of the signature")
+    check("find_character" in window,
+          "and so is the absent character")
+    check("render_stalled" in window,
+          "and the outcome is recorded in the stats for the caller")
+
+
+def test_the_search_band_and_prefilter_change_nothing():
+    """Speed work must be invisible in the OUTPUT. 7.55x, same answers.
+
+    `matchTemplate` costs time linear in frame area, and this is the hottest
+    path in the bot. Two changes compound: search only the game rect (the rest
+    of the capture is wallpaper and the bot's own panel), and reject negatives
+    at half resolution before paying full price. Verified over 6018
+    template/frame comparisons: ZERO decision changes, ZERO coordinate changes,
+    7.55x faster. This test guards the properties that made that safe, on a
+    subset small enough to belong in a suite.
+    """
+    print("\nthe search band and prefilter change nothing")
+    import json
+    import perceive as p
+    from perceive import find
+
+    tpls = p.load_templates(
+        json.load(open(os.path.join(ROOT, "Configs/mission.json"))), _Log())
+
+    # --- FAIL SAFE: an unmeasurable game means search EVERYTHING -----------
+    # Searching the whole frame is merely slower; searching the wrong strip is
+    # wrong. Same rule as game_offset returning (0, 0) rather than a guess.
+    p.set_search_band(760, 2680)
+    check(p.get_search_band() == (760, 2680), "a band can be set")
+    p.clear_search_band()
+    check(p.get_search_band() is None,
+          "and cleared, which means the full frame is searched")
+
+    # --- THE lobby_logo LESSON --------------------------------------------
+    # matchTemplate needs the template ENTIRELY inside the searched region, so
+    # a match straddling the band edge is annihilated, not degraded. lobby_logo
+    # is 216px wide and matches with its centre at x=862 - inside a band
+    # starting at 760 - but its left edge is at 754. Cropping to the bare band
+    # took it 0.998 -> 0.299 and the lobby stopped being recognised at all.
+    frames = ["lobby/lb0.png", "lobby/village_lv66.png",
+              "mission/combat_dark_map.png"]
+    names = [n for n in ("lobby_logo", "lobby_rail_fortune", "nav_jutsu",
+                         "play_btn", "grade_tab", "mission_room",
+                         "page_next", "mission_start") if n in tpls]
+    decisions = centres = 0
+    for rel in frames:
+        img = cv2.imread(os.path.join(ROOT, "ref/auto", rel))
+        if img is None:
+            continue
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        for n in names:
+            tp = tpls[n]
+            p.clear_search_band()
+            base, cb = find(g, tp, coarse=False)
+            p.set_search_band(760, 2680)
+            fast, cf = find(g, tp, coarse=True)
+            if bool(base.found) != bool(fast.found):
+                decisions += 1
+                print(f"      {n} on {rel}: {cb:.3f} vs {cf:.3f}")
+            elif base.found and fast.found and base.center != fast.center:
+                centres += 1
+                print(f"      {n} on {rel}: {base.center} vs {fast.center}")
+    p.clear_search_band()
+    check(decisions == 0, f"no decision changed ({decisions})")
+    check(centres == 0,
+          f"and no COORDINATE changed - one coordinate space, or none "
+          f"({centres})")
+
+    # --- the prefilter is conservative BY CONSTRUCTION ---------------------
+    check(p.COARSE_RELAX >= 0.15,
+          f"the cheap gate sits well below the real threshold "
+          f"({p.COARSE_RELAX}) - 0.10 was measured to lose a real match")
+    tp = tpls["lobby_rail_fortune"]
+    check(tp.halved(1.0) is not None, "a normal template has a halved twin")
+    check(tp.halved(1.0)[0].shape[0] < tp.h, "which is genuinely smaller")
+
+    # A masked template must SKIP the prefilter: masks score with
+    # TM_CCORR_NORMED, whose values are not comparable, and RELAX was
+    # calibrated only on the unmasked set.
+    src = inspect.getsource(p._coarse_reject)
+    i_mask = src.find("masked")
+    check(i_mask != -1 and "return False" in src[i_mask:i_mask + 120],
+          "a masked template skips the prefilter rather than guessing")
+
+    # --- the frame is halved ONCE per frame, not once per template ---------
+    check("weakref" in inspect.getsource(p._halved),
+          "the halved frame is cached by weak reference, not by id() - a "
+          "recycled id would hand back another array's pixels")
+
+
+def test_opencv_threads_are_capped_from_the_core_count():
+    """18 threads per match was most of the heat, and bought nothing.
+
+    Measured on a clean machine, a full 59-template sweep: 1.265s at one
+    thread, 1.281s at eighteen. The geometry sweep matched that shape (0.87s
+    vs 0.91s). These operations are memory-bandwidth bound, so the cap is free.
+    """
+    print("\nopencv threads are capped from the core count")
+    import app as app_mod
+
+    had = cv2.getNumThreads()
+    try:
+        got = app_mod._cap_cv_threads()
+        cores = os.cpu_count() or 4
+        check(got is not None, "the cap applies")
+        check(1 <= got <= 4, f"and lands in a sane range ({got})")
+        check(got <= max(1, cores),
+              f"never more threads than cores ({got} <= {cores})")
+        src = inspect.getsource(app_mod._cap_cv_threads)
+        check("cpu_count" in src, "derived from the core count, not hardcoded")
+        # DO NOT assert cv2 took the value. This wheel's parallel framework is
+        # GCD, where setNumThreads is a NO-OP - getNumThreads stays at the core
+        # count whatever is passed. An earlier version of this test asserted
+        # the cap applied, and an earlier thread-count "measurement" compared
+        # seven identical configurations without noticing.
+        frame = cv2.getBuildInformation()
+        gcd = "GCD" in frame
+        if gcd:
+            check(cv2.getNumThreads() >= got,
+                  "under GCD the cap is inert, and that is recorded rather "
+                  "than asserted away")
+        else:
+            check(cv2.getNumThreads() == got,
+                  "where the build honours it, cv2 takes the cap")
+        check("only come down by doing less work" in src
+              or "ignores setNumThreads" in src,
+              "and the code says why it may be inert")
+    finally:
+        cv2.setNumThreads(had)
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -2867,7 +3523,16 @@ def main():
                test_kekkai_panel_is_located_not_assumed,
                test_game_drift_is_tracked_and_corrected,
                test_ladder_acknowledges_a_lone_green_check,
-               test_level_up_panel_is_acknowledged):
+               test_level_up_panel_is_acknowledged,
+               test_sleep_is_told_apart_from_a_slow_iteration,
+               test_tp_pass_is_bounded_by_the_list_not_by_a_count,
+               test_a_task_is_declared_in_exactly_one_place,
+               test_attach_with_no_browser_fails_fast,
+               test_in_mission_asks_the_cheap_questions_first,
+               test_a_looping_task_recovers_instead_of_pausing,
+               test_the_games_render_bug_is_recognised_not_walked_through,
+               test_the_search_band_and_prefilter_change_nothing,
+               test_opencv_threads_are_capped_from_the_core_count):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
