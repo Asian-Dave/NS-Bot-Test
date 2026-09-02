@@ -2529,3 +2529,88 @@ never had them. So every timing conclusion had to come from durations the code
 happened to print itself, and "why did that take so long" was unanswerable from
 the record. `Log._emit` stamps the stream too, and distinguishes levels, since
 `warning = error = info` made a crash and a routine step look identical.
+
+## COOLDOWNS: learn the LENGTH, do not read the icon
+
+The operator's report was that skills on cooldown still get clicked, the click
+does nothing, and the bot waits before falling through to Attack. Both halves
+of the fix are in; one is live, one is dormant awaiting a single frame.
+
+**READING THE ICON IS THE WRONG TOOL, and this file already measured why.**
+Slot saturation ran **56.2 .. 190.8 continuously with no bimodal split**, and a
+pale-pink slot reads 56 while perfectly usable. So there is no threshold, and
+`SlotBaseline` stays a cross-check only.
+
+**THE LENGTHS WERE ALWAYS TRACKABLE, AND NOBODY EVER TRACKED THEM.** The game's
+own battle processor decrements cooldowns once per round (`nextRound()` ->
+`reduceSkillCooldown(1)`), so a cooldown is an exact small integer, and
+`CooldownTracker` has existed for that all along. But the lengths live in a
+server-fed `SKILL_DATA`, so the config said to measure each slot by hand -
+which never happened for a single one. `rounds_per_slot` is still `{}`, so
+`ready()` always returned None and the rotation always fell back to
+rotate-on-resolve: click a cooling skill, wait out ~6 s, try the next thing.
+
+**So bracket it from outcomes already recorded** - no new perception at all:
+
+    used at U, fired again at R   ->  cooldown <= R - U
+    used at U, FAILED at R        ->  cooldown >  R - U
+
+Squeeze until they meet. Same shape as the kekkai Mastermind: keep everything
+consistent with the evidence and wait for one survivor. Simulated against true
+lengths of 1, 2, 3, 5 and 7, it converges after **one full cycle** (a 3-round
+cooldown is known by round 4). Once known, the slot is WITHHELD instead of
+clicked - strictly better than reacting to a refusal, because the wasted click
+never happens.
+
+**A COOLDOWN IS AT LEAST ONE ROUND, and that bound is not optional.** Without
+it a 1-round cooldown can never be learned: it is ready again the next round,
+so it never fails, so no failure-derived bound is ever recorded and the bracket
+sits at `(None, 1)` for ever. Measured exactly that way - 2, 3, 5 and 7 all
+converged while 1 stayed unknown.
+
+**THE FAILURE SIDE IS THE DANGEROUS HALF.** A skill can fail because it is
+cooling, because we are stunned, because CP ran out, or because the click
+missed - and only the first says anything about a cooldown. A lower bound
+invented from a stun would **disable a working skill**, which is far worse than
+learning nothing. So a failure is admitted only when the turn was otherwise
+healthy, which means *something else resolved* - and that is not known until
+the turn is over. Failures are therefore collected and flushed by
+`SkillRotation.turn_ended(something_resolved)`:
+
+    a skill resolved            -> healthy, failures are usable evidence
+    the closing attack resolved -> healthy (an attack landing rules out a stun)
+    only Dodge resolved         -> STUN, so the turn teaches nothing
+    nothing resolved            -> teaches nothing
+
+Every exit from `_take_action` flushes, because failures left pending would be
+attributed to the NEXT turn's round number - a silent off-by-one in the one
+place a wrong number disables a good skill. A bracket that closes on something
+implausible (> `MAX_PLAUSIBLE`) is thrown away rather than acted on.
+
+**AN API WHERE THE CALL ORDER FAILS SILENTLY IS A BAD API.** The first version
+had `observe_success` / `observe_failure` beside `use()`, and `use()` overwrote
+the last-used round - so calling it first made the gap zero and the upper bound
+was never taken. A simulated 3-round cooldown ran eleven rounds and learned
+nothing, bracket stuck at `(3, None)`. Now `record(slot, fired, healthy)` is
+the single entry point and does the bookkeeping where the order cannot be got
+wrong.
+
+### The refusal message: implemented, dormant, and waiting for one frame
+
+When a skill is on cooldown the game says so at the top of the screen and
+nothing else happens - so waiting for the command bar to vanish means waiting
+out the full `action_timeout` (~6 s) to learn what the game said immediately.
+Two failures in a turn is 12 s of standing still.
+
+`_wait_resolved` now watches for that refusal ALONGSIDE the success conditions,
+losing the race deliberately: whichever fires first ends the wait, and a
+refusal returns not-resolved at once.
+
+**It self-activates when `tpl/skill_cooldown.png` exists, and is skipped until
+then.** The template has to be cut from a real frame, and nobody has looked at
+that message yet - inventing a crop for it would be exactly the eyeball mistake
+this file keeps paying for. So `_keep_failed_frame` saves the screen that
+refused us (bounded to 3 per process, and it stops entirely once the template
+exists), which is the same trick that eventually solved the mission list, the
+between-turns battle, the seal-broken dialog and the Level Up panel: the hard
+part was always CATCHING the frame.

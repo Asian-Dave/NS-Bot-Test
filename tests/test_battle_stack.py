@@ -3487,6 +3487,385 @@ def test_opencv_threads_are_capped_from_the_core_count():
     finally:
         cv2.setNumThreads(had)
 
+
+def test_the_level_ceiling_is_remembered_but_verified():
+    """Stop re-walking seven pages to reach the same answer every mission.
+
+    Measured live on Grade A: the page TURN is 0.18-0.20s, but the per-page
+    scan and settle is ~3.7s, so `pick_highest` spent 30s of a 178s mission
+    cycle - 17% - rediscovering `page 6, y=818`. (This was first dismissed as
+    "not the bottleneck" on the strength of the 0.19s turns. The turn was never
+    the cost.)
+
+    The memo must be VERIFIED rather than obeyed: a level-up moves the ceiling,
+    and a stale memo that got retried would wedge the farm on a padlocked row.
+    """
+    print("\nthe level ceiling is remembered but verified")
+    import farm
+
+    farm._CEILING.clear()
+    check(farm._CEILING == {}, "nothing is remembered to begin with")
+
+    real = farm._start_remembered
+    calls = []
+    try:
+        # --- a memo that HOLDS short-circuits the whole walk ----------------
+        farm._start_remembered = lambda a, c, l, memo, settle=2.4: (
+            calls.append(memo) or True)
+        farm._CEILING["A"] = (5, 818)
+        got = farm.pick_highest(None, None, _Log(), grade="A")
+        check(got is True, "a memo that holds starts the mission directly")
+        check(calls == [(5, 818)], f"using the remembered page/row ({calls})")
+        check(farm._CEILING.get("A") == (5, 818), "and it is kept for next time")
+
+        # --- a memo that has GONE STALE is dropped, not retried -------------
+        farm._start_remembered = lambda a, c, l, memo, settle=2.4: None
+        farm._CEILING["A"] = (5, 818)
+
+        class _Cap:
+            """Serves one real list frame, so the fallback walk can run."""
+            def __init__(self):
+                self.img = cv2.imread(os.path.join(
+                    ROOT, "ref/auto/mission/list_all_locked.png"))
+            def frame(self, gray=False):
+                return self.img.copy()
+            def fix(self, x, y):
+                return (x, y)
+
+        class _Actor:
+            def __init__(self):
+                self.clicks = []
+                self.no_click_zones = []
+            def click_pixel(self, x, y, why=""):
+                self.clicks.append((x, y))
+
+        try:
+            farm.pick_highest(_Actor(), _Cap(), _Log(), grade="A")
+        except Exception:
+            pass          # the walk may not complete on one static frame
+        check("A" not in farm._CEILING,
+              "a stale memo is FORGOTTEN, so a level-up cannot wedge the farm")
+    finally:
+        farm._start_remembered = real
+        farm._CEILING.clear()
+
+    # --- the memo is consulted BEFORE the walk, or it saves nothing --------
+    src = inspect.getsource(farm.pick_highest)
+    i_memo = src.find("_start_remembered")
+    i_walk = src.find("while page < max_pages")
+    check(-1 < i_memo < i_walk, "the memo is tried before the page walk")
+    check("forget_ceiling(grade)" in src,
+          "and dropped when it does not hold (via forget_ceiling, which also "
+          "clears the re-check counter - popping the dict alone left the "
+          "counter behind)")
+
+    # It must be keyed by GRADE - Grade A and Grade C have different ceilings
+    # and different page counts (7 vs 11).
+    check("grade" in str(inspect.signature(farm.pick_highest)),
+          "pick_highest takes the grade, so the memo is per grade")
+    check("grade=g" in inspect.getsource(farm.start_best),
+          "and start_best passes the grade it actually picked")
+
+    # The fast path must NOT scan every page for padlocks - that is the cost.
+    fast = inspect.getsource(farm._start_remembered)
+    check(fast.count("locked_rows") == 1,
+          "the fast path checks padlocks ONCE, on the target page only")
+
+
+def test_cooldowns_are_learned_from_play_not_guessed():
+    """The lengths are not in the game's client, so measure them by playing.
+
+    The game's own battle processor decrements cooldowns once per round
+    (nextRound -> reduceSkillCooldown(1)), so a cooldown is an exact small
+    integer. But the LENGTHS live in a server-fed SKILL_DATA, so this project
+    said each slot had to be measured by hand and written into
+    `combat.cooldowns.rounds_per_slot` - which never happened for a single
+    slot. It is still {}, so ready() always returned None and the rotation
+    always fell back to rotate-on-resolve: click a cooling skill, wait out the
+    full ~6s timeout, then try something else.
+
+    The length can be bracketed from outcomes already recorded, with no new
+    perception at all:
+
+        used at U, fired again at R   -> cooldown <= R - U
+        used at U, FAILED at R        -> cooldown >  R - U
+
+    Squeeze until they meet. Same shape as the kekkai Mastermind: keep what is
+    consistent with the evidence and wait for one survivor.
+    """
+    print("\ncooldowns are learned from play, not guessed")
+    from combat import CooldownTracker
+
+    # --- it converges, and to the RIGHT number ----------------------------
+    for true_cd in (1, 2, 3, 5, 7):
+        t = CooldownTracker()
+        for _ in range(4 * true_cd + 8):
+            t.next_round()
+            if t.ready("S1") is False:
+                continue                     # withheld, so never clicked
+            used = t.used_at.get("S1")
+            fired = used is None or (t.round - used) >= true_cd
+            t.record("S1", fired, turn_was_healthy=True)
+        check(t.learned.get("S1") == true_cd,
+              f"a {true_cd}-round cooldown is learned as "
+              f"{t.learned.get('S1')}")
+
+    # --- and once learned, the slot is WITHHELD rather than clicked -------
+    t = CooldownTracker()
+    t.next_round()
+    t.record("S1", True)
+    t.learned["S1"] = 3
+    seen = []
+    for _ in range(4):
+        t.next_round()
+        seen.append(t.ready("S1"))
+    check(seen == [False, False, True, True],
+          f"withheld while cooling, offered when ready ({seen})")
+
+    # --- A STUN MUST TEACH NOTHING ----------------------------------------
+    # This is the dangerous half. A skill can fail because it is cooling, or
+    # because we are stunned, or CP ran out, or the click missed - and only the
+    # first says anything about a cooldown. A lower bound invented from a stun
+    # would DISABLE A WORKING SKILL, which is far worse than learning nothing.
+    t = CooldownTracker()
+    t.next_round(); t.record("S2", True)
+    t.next_round()
+    check(t.record("S2", False, turn_was_healthy=False) is None,
+          "a failure on a stunned turn learns nothing")
+    check(t.bracket("S2") == (None, None),
+          f"and records no bound at all ({t.bracket('S2')})")
+    check(t.ready("S2") is None,
+          "so the slot is still offered - nothing was disabled")
+
+    # --- a slot never used cannot be blamed for a failure -----------------
+    t = CooldownTracker()
+    t.next_round()
+    check(t.record("S4", False, turn_was_healthy=True) is None,
+          "an unused slot's failure is not a cooldown")
+    check(t.bracket("S4") == (None, None), "nothing inferred from it")
+
+    # --- absurd or contradictory evidence is discarded, not acted on ------
+    t = CooldownTracker()
+    t._lo["S3"] = t._hi["S3"] = t.MAX_PLAUSIBLE + 5
+    check(t._settle("S3") is None,
+          "an implausible length is refused")
+    check(t.bracket("S3") == (None, None),
+          "and the polluted bracket is thrown away rather than kept")
+
+    # --- a configured length still wins over a learned one ---------------
+    t = CooldownTracker({"S5": 4})
+    t.learned["S5"] = 99
+    t.next_round(); t.record("S5", True)
+    t.next_round()
+    check(t.ready("S5") is False, "configured cooldowns are still honoured")
+
+    # --- the API has ONE entry point, because order used to matter -------
+    # The first version had observe_success/observe_failure beside use(), and
+    # calling use() first zeroed the gap so the upper bound was never taken: a
+    # simulated 3-round cooldown ran eleven rounds and learned nothing, stuck
+    # at bracket (3, None).
+    check(not hasattr(CooldownTracker, "observe_success"),
+          "the order-dependent two-call API is gone")
+    src = inspect.getsource(CooldownTracker.record)
+    check("used_at[slot] = self.round" in src,
+          "record() advances the last-used round itself, and only on a fire")
+
+
+def test_a_cooldown_refusal_ends_the_wait_immediately():
+    """A refusal is an answer, and a much faster one than a timeout.
+
+    When a skill is on cooldown the game says so and nothing else happens, so
+    waiting for the command bar to vanish means waiting out the whole
+    action_timeout (~6s) to learn what the game said at once. Two failures in a
+    turn is 12s of standing still.
+    """
+    print("\na cooldown refusal ends the wait immediately")
+    import battle as battle_mod
+
+    B = battle_mod.BattleRunner
+    src = inspect.getsource(B._wait_resolved)
+
+    # It must be watched for ALONGSIDE the success conditions and lose the race.
+    check("COOLDOWN_TPL" in src, "the refusal is part of the wait")
+    check("return False" in src, "and returns not-resolved when it wins")
+
+    # SELF-ACTIVATING: no code change when the template is finally cut.
+    check(".get(self.COOLDOWN_TPL)" in src,
+          "the condition is added only when the template exists")
+    tpl_path = os.path.join(ROOT, f"tpl/{B.COOLDOWN_TPL}.png")
+    if not os.path.exists(tpl_path):
+        check(True, f"tpl/{B.COOLDOWN_TPL}.png is not cut yet, so the "
+                    f"early-out is dormant rather than guessed at")
+
+    # And the frame that refused us is KEPT, which is how the template gets cut.
+    keep = inspect.getsource(B._keep_failed_frame)
+    check("imwrite" in keep, "a timed-out action saves its frame")
+    check("KEEP_FAILED_FRAMES" in keep,
+          "bounded, so a bad night cannot fill the disk")
+    check("is not None" in keep and "return" in keep,
+          "and stops saving once the template exists")
+
+    # EVERY exit from _take_action must close the turn's books exactly once. A
+    # turn whose failures are never flushed leaves them pending, and they would
+    # be attributed to the NEXT turn's round number - a silent off-by-one in
+    # the one place a wrong number disables a working skill.
+    take = inspect.getsource(B._take_action)
+    returns = len(re.findall(r"^\s+return ", take, re.M))
+    flushes = take.count("turn_ended(")
+    check(flushes >= returns - 1,
+          f"each exit flushes the turn ({flushes} flushes, {returns} returns)")
+    # A stun must flush as UNHEALTHY, or it invents bounds for every skill.
+    # Anchor on the RESTRICTED CLICK, not the first mention of
+    # `restricted_action` - that first mention is the RESTRICTED_AFTER guard
+    # far higher up, and a window measured from there never reaches the branch.
+    i_restricted = take.find('why=f"restricted ->')
+    check(i_restricted != -1, "the restricted branch is found")
+    check("turn_ended(False)" in take[i_restricted:i_restricted + 700],
+          "the stun path flushes as unhealthy, so it invents no bounds")
+
+
+def test_a_greyed_skill_is_never_clicked():
+    """The game says which skills are cooling. Read it instead of probing.
+
+    CORRECTION to a standing rule. This project recorded "do not use icon
+    saturation as the primary cooldown signal" because mean saturation across
+    the eight slots ran 56.2 .. 190.8 continuously, with a pale-pink slot
+    reading 56 while usable. That mean covered the WHOLE TILE, including the
+    metal border, which never desaturates and drags a cooling tile up into the
+    usable range.
+
+    Measured on the tile INTERIOR, on real frames saved by the bot itself when
+    three skills failed: cooling slots read saturation 0.0, the ready one
+    164.0. True greyscale, not merely dull.
+    """
+    print("\na greyed skill is never clicked")
+    import combat
+    import battle as battle_mod
+
+    frames = sorted(glob.glob(os.path.join(
+        ROOT, "ref/auto/battle/cooldown_msg_*.png")))
+    check(bool(frames), f"the refusal frames are committed ({len(frames)})")
+
+    # S2 was the only coloured tile; S1, S3 and S4 were grey with 7, 22 and 10
+    # printed on them.
+    expect = {"S1": True, "S2": False, "S3": True, "S4": True}
+    centres = {"S1": 1232, "S2": 1340, "S3": 1445, "S4": 1552}
+    for path in frames:
+        img = cv2.imread(path)
+        if img is None:
+            continue
+        for slot, want in expect.items():
+            got = combat.slot_cooling(img, (centres[slot], 964))
+            check(got is want,
+                  f"{os.path.basename(path)[:22]} {slot}: "
+                  f"{'cooling' if got else 'ready'} (wanted "
+                  f"{'cooling' if want else 'ready'})")
+
+    # FAIL SAFE TO UNKNOWN, never to a decision.
+    img = cv2.imread(frames[0])
+    check(combat.slot_cooling(img, (99999, 964)) is None,
+          "an off-frame tile reads UNKNOWN, not ready and not cooling")
+    check(combat.slot_cooling(None, (100, 100)) is None,
+          "and so does a missing frame")
+
+    # The gate must sit clear of both measurements, not hug one.
+    check(0.0 < combat.COOLING_FRAC < 0.9,
+          f"the gate is between the two measurements ({combat.COOLING_FRAC})")
+
+    # And the runner must SKIP rather than click - the whole point. A click
+    # that does nothing costs a full resolve timeout (~6s), twice a turn.
+    src = inspect.getsource(battle_mod.BattleRunner._take_action)
+    i_cool = src.find("slot_cooling")
+    check(i_cool != -1, "the runner consults the icon")
+    check("continue" in src[i_cool:i_cool + 400],
+          "and skips the slot instead of clicking and waiting")
+    i_click = src.find("click_pixel", i_cool)
+    check(i_cool < i_click,
+          "the check happens BEFORE the click, or it saves nothing")
+    # Only skills are greyed; the fallback attack must never be withheld.
+    check('startswith("S")' in src[i_cool - 200:i_cool],
+          "only S-slots are checked, so Attack is never withheld")
+
+
+def test_the_ceiling_memo_survives_neither_a_level_up_nor_a_short_list():
+    """Two ways the remembered ceiling goes wrong, both raised by the operator.
+
+    1. A LEVEL-UP MOVES THE CEILING UPWARDS, and verification cannot see that.
+       The remembered row is still present and still unlocked afterwards, so
+       the check passes - and the bot keeps farming the mission it was playing
+       before it levelled, never discovering the harder one that just opened.
+       Verification catches a memo that became INVALID, never one that became
+       SUBOPTIMAL.
+
+    2. A GRADE MAY RUN OUT OF PAGES BEFORE IT SHOWS A PADLOCK, so "page until
+       you meet a locked row" cannot be the only stopping rule. With no padlock
+       anywhere the walk has to stop on the last page and take what is there.
+    """
+    print("\nthe ceiling memo survives neither a level-up nor a short list")
+    import farm
+
+    farm.forget_ceiling()
+    check(farm._CEILING == {} and farm._CEILING_USES == {},
+          "forget_ceiling clears both the memo and its counter")
+
+    # --- a level-up must forget it, and app.py must call that -------------
+    farm._CEILING["A"] = (5, 818)
+    farm._CEILING_USES["A"] = 2
+    farm.forget_ceiling("A")
+    check("A" not in farm._CEILING and "A" not in farm._CEILING_USES,
+          "a single grade can be forgotten on its own")
+
+    import app as app_mod
+    step_src = inspect.getsource(app_mod.Runner.step)
+    check("forget_ceiling" in step_src,
+          "the runner forgets the ceiling on a level-up")
+    i_lvl = step_src.find('"level_up"')
+    check(i_lvl != -1, "keyed on the ladder's level_up step")
+    check("forget_ceiling" in step_src[i_lvl:i_lvl + 900],
+          "and the two are actually connected, not merely both present")
+
+    # --- and a MISSED level-up is bounded by re-walking -------------------
+    check(farm.RECHECK_EVERY >= 2,
+          f"the memo is re-checked periodically ({farm.RECHECK_EVERY})")
+    real = farm._start_remembered
+    try:
+        calls = []
+        farm._start_remembered = lambda a, c, l, memo, settle=2.4: (
+            calls.append(memo) or True)
+        farm._CEILING["A"] = (5, 818)
+        farm._CEILING_USES["A"] = 0
+        for _ in range(farm.RECHECK_EVERY):
+            farm.pick_highest(None, None, _Log(), grade="A")
+        check(len(calls) == farm.RECHECK_EVERY,
+              f"the memo serves {farm.RECHECK_EVERY} missions ({len(calls)})")
+        check(farm._CEILING_USES.get("A") == farm.RECHECK_EVERY,
+              "and counts each use")
+        # The next one must NOT use the memo - it is due a re-read.
+        log = _Log()
+        try:
+            farm.pick_highest(None, None, log, grade="A")
+        except Exception:
+            pass          # the real walk needs a screen; we only care that it tried
+        check(len(calls) == farm.RECHECK_EVERY,
+              "the memo is NOT used once it is due a re-read")
+        check(any("re-reading the mission list" in l for l in log.lines),
+              "and it says why it is re-reading")
+    finally:
+        farm._start_remembered = real
+        farm.forget_ceiling()
+
+    # --- a list with no padlock must stop on its LAST page ----------------
+    walk = inspect.getsource(farm.pick_highest)
+    check("that was the last page" in walk,
+          "running out of pages is a stopping condition in its own right")
+    check("no next-page arrow at all" in walk,
+          "so is the arrow being absent")
+    # `best` is whatever the last page with free rows offered, so a grade that
+    # never shows a padlock still starts something.
+    i_best = walk.rfind("best is None")
+    check(i_best != -1 and "every row is locked" in walk[i_best:i_best + 300],
+          "and only a genuinely all-locked grade gives up")
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -3532,7 +3911,12 @@ def main():
                test_a_looping_task_recovers_instead_of_pausing,
                test_the_games_render_bug_is_recognised_not_walked_through,
                test_the_search_band_and_prefilter_change_nothing,
-               test_opencv_threads_are_capped_from_the_core_count):
+               test_opencv_threads_are_capped_from_the_core_count,
+               test_the_level_ceiling_is_remembered_but_verified,
+               test_the_ceiling_memo_survives_neither_a_level_up_nor_a_short_list,
+               test_cooldowns_are_learned_from_play_not_guessed,
+               test_a_cooldown_refusal_ends_the_wait_immediately,
+               test_a_greyed_skill_is_never_clicked):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
