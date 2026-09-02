@@ -63,6 +63,9 @@ an earlier reading of red=enemy / yellow=ally was wrong.
 """
 import cv2
 
+# A leaf module, so this cannot cycle: `perceive` imports nothing internal.
+import perceive
+
 # --- offsets in template units, relative to the charge_btn centre -----------
 # Derived from the measurement described above. Regularised where the raw
 # measurement was within noise of an exact figure: the command bar is a true
@@ -443,8 +446,36 @@ class BattleGeometry:
 
 
 def _best(frame_gray, tpl, scales):
-    """Best (confidence, scale, centre) for one template over a scale sweep."""
+    """Best (confidence, scale, centre) for one template over a scale sweep.
+
+    THE X BAND APPLIES HERE TOO, and this is where it matters most. This
+    function calls `cv2.matchTemplate` directly rather than going through
+    `perceive.find`, so it saw none of the search-band work - and it is the
+    single most expensive operation left in the bot. Measured: a cold 90-scale
+    sweep on a traversal frame cost 12.8 s, unchanged by banding `find`,
+    because the sweep never touches `find`.
+
+    The command bar is drawn INSIDE the game canvas, and the vertical band
+    above already crops the frame's top off, so restricting x is the same kind
+    of move for the same reason.
+
+    Coordinates handed back stay in the space of the frame that was passed in:
+    the crop offset is added back, exactly as `perceive.find` does. And the
+    band is padded by the template's widest scaled width, because
+    `matchTemplate` needs the template ENTIRELY inside the searched region - an
+    unpadded band silently annihilated `lobby_logo`, whose left edge fell six
+    pixels outside it.
+    """
     best = None
+    dx = 0
+    band = perceive.get_search_band()
+    if band is not None:
+        pad = int(tpl.w * max(scales)) + 2
+        x0 = max(0, band[0] - pad)
+        x1 = min(frame_gray.shape[1], band[1] + pad)
+        if x1 - x0 < frame_gray.shape[1] and x1 > x0:
+            frame_gray = frame_gray[:, x0:x1]
+            dx = x0
     fh, fw = frame_gray.shape[:2]
     for s in scales:
         th, tw = int(tpl.h * s), int(tpl.w * s)
@@ -472,5 +503,5 @@ def _best(frame_gray, tpl, scales):
             # ROUND TO AN INT: these centres are used to SLICE frames further
             # down, and numpy will not take a float index.
             cy = int(round(loc[1] + th // 2 - CMD_ANCHOR_DY * s))
-            best = (float(mx), s, (loc[0] + tw // 2, cy))
+            best = (float(mx), s, (loc[0] + tw // 2 + dx, cy))
     return best

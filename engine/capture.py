@@ -14,6 +14,9 @@ import time
 import cv2
 import numpy as np
 
+# A LEAF MODULE, so this cannot cycle: `perceive` imports nothing internal.
+import perceive
+
 
 class Capture:
     def __init__(self, cdp):
@@ -50,6 +53,16 @@ class Capture:
                  scale 1 and 2400x1808 at scale 2. Use `clip_for` and leave this
                  alone.
         """
+        # Keep the template matcher aimed at the live game rect. Only for
+        # FULL frames: a clipped or region frame has its own pixel origin, so a
+        # full-frame band would be meaningless there (and `find` additionally
+        # refuses to band a frame narrower than the band itself).
+        if clip is None and region is None:
+            try:
+                self.apply_search_band()
+            except Exception:
+                perceive.clear_search_band()
+
         if self.on_activity is not None:
             try:
                 self.on_activity()
@@ -109,7 +122,13 @@ class Capture:
                 "if(!f)return '';const r=f.getBoundingClientRect();"
                 "return JSON.stringify({x:r.x,y:r.y,w:r.width});})()")
             if not raw:
+                # NO GAME ELEMENT. Distinguished from "measured, and it is
+                # exactly at the reference" because those return the same
+                # numbers and must NOT be treated alike: a consumer that
+                # narrows a search to where the game *should* be needs to know
+                # the difference between a measurement and a shrug.
                 self._off = (0, 0, 1.0)
+                self._off_ok = False
                 return self._off
             import json as _json
             r = _json.loads(raw)
@@ -118,9 +137,48 @@ class Capture:
             w = r["w"] * self.dpr
             scale = (w / self.REFERENCE_CANVAS_W) if w > 0 else 1.0
             self._off = (ox, oy, scale)
+            self._off_ok = True
         except Exception:
             self._off = (0, 0, 1.0)
+            self._off_ok = False
         return self._off
+
+    def game_metrics_ok(self):
+        """Did the last `game_metrics` actually measure, or fall back?"""
+        return bool(getattr(self, "_off_ok", False))
+
+    def apply_search_band(self, ttl=1.0):
+        """Point the template matcher at where the game IS, right now.
+
+        `matchTemplate` costs time linear in frame AREA, and the game occupies
+        just over half the capture width - the rest is desktop wallpaper and
+        the bot's own panel. Restricting the search measured **7.55x** end to
+        end (with the half-resolution prefilter), over 6018 template/frame
+        comparisons with ZERO changes to any decision or coordinate.
+
+        Called per frame rather than per cycle, because a mission blocks for
+        minutes and this project's rule is to ASK THE PAGE rather than
+        remember - a band that describes where the game used to be would lose
+        every anchor at once. `game_metrics` is TTL-cached, so the real cost is
+        at most one CDP round trip per second.
+
+        IF IT CANNOT BE MEASURED THE BAND IS CLEARED, not guessed: searching
+        the whole frame is merely slower, while searching the wrong strip is
+        wrong. Same rule as `game_offset` returning (0, 0) rather than a guess.
+        """
+        try:
+            ox, _, scale = self.game_metrics(ttl)
+            w = self.REFERENCE_CANVAS_W * scale
+            if not self.game_metrics_ok() or w <= 0:
+                perceive.clear_search_band()
+                return None
+            x0 = self.REFERENCE_ORIGIN[0] + ox
+            band = (max(0, int(round(x0))), int(round(x0 + w)))
+            perceive.set_search_band(*band)
+            return band
+        except Exception:
+            perceive.clear_search_band()
+            return None
 
     def game_scale(self, ttl=1.0):
         """How much bigger/smaller the game is than the reference layout."""
