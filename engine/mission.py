@@ -923,9 +923,38 @@ class MissionRunner:
     # enemy, i.e. the same object. That is the confirmation the LEAD note in
     # CLAUDE.md was waiting for before wiring it up.
     ARROW_RADIUS = 130          # a candidate this close to the badge IS the badge
+    # Within this of the badge we have ARRIVED, and "walk toward it" stops
+    # being useful advice. Measured at 71 px when the reversal happened, so
+    # this has to be comfortably above that.
+    ARROW_REACHED = 260
 
     def find_go_arrow(self, frame_gray):
-        """The game's "Go!" badge, or None. (x, y) in frame coordinates."""
+        """The game's "Go!" badge, or None. (x, y) in frame coordinates.
+
+        THE BADGE BLINKS, so a per-frame match is not good enough and a cache
+        is not an optimisation here - it is the difference between the veto
+        working and not.
+
+        Measured across seven frames 0.35 s apart on one map: **0.845 on two of
+        them and 0.326 on the other five.** That spread is far too large for
+        animation jitter; at 0.326 the badge is simply NOT DRAWN. So the
+        template matches on roughly two frames in seven.
+
+        Live consequence, nine seconds apart in one log:
+
+            10:55:44  the thing moving at (2472, 522) is the game's own Go!
+                      badge at (2531, 497), not a unit - ignoring it
+            10:55:53  something MOVED at (2472, 522) - that is alive
+
+        Same pixel, opposite verdict, because the second frame was a blink-off
+        one and the veto had nothing to compare against. And a BLINKING thing
+        is the strongest movement signal there is - appearing and vanishing
+        outright beats any walking sprite - so the badge is reliably seen as
+        alive and only intermittently recognised as furniture.
+
+        Its position does not change within a map, so the last sighting stays
+        valid until the map does. `forget_go_arrow` is called on a transition.
+        """
         from perceive import find          # imported locally, as elsewhere here
         tpl = (self.templates or {}).get("go_arrow")
         if tpl is None:
@@ -933,8 +962,17 @@ class MissionRunner:
         try:
             m, _ = find(frame_gray, tpl)
         except Exception:
-            return None
-        return m.center if m.found else None
+            m = None
+        if m is not None and m.found:
+            self._arrow_at = m.center
+            return m.center
+        # Not drawn on THIS frame. Fall back to where it was last seen on this
+        # map, which is where it still is.
+        return getattr(self, "_arrow_at", None)
+
+    def forget_go_arrow(self):
+        """A new map has its own badge, or none. Called on a transition."""
+        self._arrow_at = None
 
     def _traverse(self, frame_bgr):
         """Walk. Encounters trigger on MOVEMENT, so standing still stalls a
@@ -999,10 +1037,26 @@ class MissionRunner:
         # it degrades to the spawn rule whenever the badge is absent.
         arrow_heading = None
         if arrow is not None and pos is not None:
-            arrow_heading = "right" if arrow[0] > pos[0] else "left"
-            self.log.info("mission: the game's Go! badge is at x=%d and we are "
-                          "at x=%d - it says %s", arrow[0], pos[0],
-                          arrow_heading)
+            gap = abs(arrow[0] - pos[0])
+            if gap <= self.ARROW_REACHED:
+                # ALREADY AT THE BADGE, so "walk toward it" has nothing left to
+                # say and saying it anyway sends us backwards.
+                #
+                # Measured: the character ran right to the map edge at x=2629,
+                # which put the badge at x=2531 on its LEFT - so the rule
+                # reversed the heading and ran all the way back to x=789. The
+                # badge marks the way ON, not a destination to stand on, so at
+                # this range the useful move is to keep pushing the way we were
+                # already going. Continuing right is what produced "moved on"
+                # about thirty-five seconds later.
+                self.log.info("mission: we are at the Go! badge (x=%d vs %d) - "
+                              "keeping our heading rather than turning back",
+                              pos[0], arrow[0])
+            else:
+                arrow_heading = "right" if arrow[0] > pos[0] else "left"
+                self.log.info("mission: the game's Go! badge is at x=%d and we "
+                              "are at x=%d - it says %s", arrow[0], pos[0],
+                              arrow_heading)
 
         # CLEAR THE MAP BEFORE LEAVING IT. An enemy standing on this map has to
         # be killed first; running to the edge past it is what made a mission
@@ -1221,6 +1275,8 @@ class MissionRunner:
             # nothing here, and keeping them would blacklist innocent parts of a
             # map the bot has never seen.
             self._dud_targets = set()
+            # The badge belongs to the map we just left.
+            self.forget_go_arrow()
             foe2 = self.find_moving_figure()
             if foe2 is not None:
                 self.log.info("mission: new area has something MOVING at %s - "
