@@ -2806,14 +2806,27 @@ def test_movement_finds_the_enemy_colour_misses():
     # `self.capture`; so the detector returned None on every live frame while
     # this test, which set `inst.cap` too, stayed green. Assert instead that
     # every capture lookup in mission.py names something __init__ really sets.
+    # THE INVARIANT IS "a name read off self must be a name set on self",
+    # not "every getattr is the capture".
+    #
+    # The bug this guards against was `getattr(self, "cap", None)` where the
+    # constructor assigns `self.capture` - a typo that `getattr`'s default
+    # turned into a permanent silent None. The first version of this check
+    # assumed every such lookup referred to the capture object, which was true
+    # when it was written and is not an invariant: `_mover_fails` is read the
+    # same way and has nothing to do with capture, so the guard false-fired on
+    # correct code. A guard that fires on correct code gets deleted, and then
+    # the real bug comes back.
     import mission as _mission_mod
     _src = inspect.getsource(_mission_mod)
-    _assigned = set(re.findall(r"self\.(\w+)\s*=\s*[^=\n]*\bcapture\b", _src))
-    _looked_up = set(re.findall(r'getattr\(self,\s*"(\w+)",\s*None\)', _src))
-    _looked_up |= set(re.findall(r'\bcap\s*=\s*cap\s+or\s+getattr\(self,\s*"(\w+)"', _src))
-    check(bool(_assigned) and bool(_looked_up) and _looked_up <= _assigned,
-          f"every capture lookup uses the name __init__ assigns "
-          f"(assigns {sorted(_assigned)}, looks up {sorted(_looked_up)})")
+    _assigned = set(re.findall(r"self\.(\w+)\s*=", _src))
+    _looked_up = set(re.findall(r'getattr\(self,\s*"(\w+)"', _src))
+    _unknown = sorted(n for n in _looked_up if n not in _assigned)
+    check(bool(_looked_up) and not _unknown,
+          f"every attribute read off self is also assigned somewhere "
+          f"(never assigned: {_unknown or 'none'})")
+    check("capture" in _assigned and "cap" not in _assigned,
+          "the capture is still called `capture`, as __init__ assigns it")
 
     # The colour pass on the same frame: only scenery, and no enemy at all.
     f0 = cv2.imread(paths[0])
@@ -2955,12 +2968,17 @@ def test_tp_pass_is_bounded_by_the_list_not_by_a_count():
         tp_mod.run_one = lambda *a, **k: True
 
         # EIGHT startable rows - comfortably past the old cap of 6.
-        rows = [(0, 300 + 90 * i) for i in range(8)]
+        # `pick_any` hands back (page, y, FINGERPRINT) - a row is identified
+        # by what it says, because a completed mission greys out and the
+        # survivors reflow into its slot.
+        rows = [(0, 300 + 90 * i,
+                 np.full((8, 48), 20 + 25 * i, dtype=np.uint8))
+                for i in range(8)]
         pending = list(rows)
 
         def pick(actor, cap, lg, skip=(), max_pages=3, done=None):
             for r in list(pending):
-                if r in skip:
+                if any(tp_mod.same_row(r[2], sk) for sk in skip):
                     continue
                 pending.remove(r)
                 return r
@@ -2987,7 +3005,8 @@ def test_tp_pass_is_bounded_by_the_list_not_by_a_count():
 
         # A pick_any that never reports None must not loop forever - the
         # tripwire exists so a broken termination check is loud, not silent.
-        tp_mod.pick_any = lambda *a, **k: (0, 300)
+        tp_mod.pick_any = lambda *a, **k: (
+            0, 300, np.full((8, 48), 77, dtype=np.uint8))
         log.lines = []
         played, _ = tp_mod.run_all(None, None, log)
         check(played <= tp_mod.SWEEP_TRIPWIRE,
@@ -3866,6 +3885,389 @@ def test_the_ceiling_memo_survives_neither_a_level_up_nor_a_short_list():
     check(i_best != -1 and "every row is locked" in walk[i_best:i_best + 300],
           "and only a genuinely all-locked grade gives up")
 
+
+def test_stop_comes_back_attached_by_itself():
+    """Stop must not cost a trip to the terminal.
+
+    Stop means "start again from nothing", and killing the process is most of
+    that reset for free - the cycle counter, the unknown streak, the relog
+    budget, cached geometry and remembered dud targets all live in memory. But
+    the PANEL is injected into the page, so it outlives the process it was
+    talking to: the operator was left with a live-looking panel whose buttons
+    had no receiver, reading "no bot attached", and had to relaunch by hand
+    every time. A reset that costs a manual relaunch is a chore, not a reset.
+    """
+    print("\nstop comes back attached by itself")
+    import app as app_mod
+    import subprocess as sp
+
+    # --- a pid probe that is not fooled by a ZOMBIE -----------------------
+    # os.kill(pid, 0) succeeding does not mean anything is RUNNING: a pid
+    # lingers in the process table until reaped, and kill(0) succeeds against
+    # one. Measured before this was handled: a helper that lived 3s was still
+    # reported alive 20s later, because the poller was its parent and had not
+    # reaped it. Same trap this project recorded for the pid lock.
+    check(app_mod._dead(999999) is True,
+          "a pid that never existed reads as dead")
+    check(app_mod._dead(os.getpid()) is False,
+          "our own live pid reads as alive")
+
+    victim = sp.Popen([sys.executable, "-c", "import time; time.sleep(2)"])
+    t0 = time.time()
+    went = app_mod._wait_for_exit(victim.pid, timeout=15)
+    waited = time.time() - t0
+    victim.wait()
+    check(went, "a finished process is noticed")
+    check(waited < 8,
+          f"and noticed PROMPTLY, not after the timeout ({waited:.1f}s) - a "
+          f"zombie must not read as alive")
+
+    # --- the respawn's ORDER is the whole trick ---------------------------
+    src = inspect.getsource(app_mod.Runner._respawn)
+    i_unlink = src.find("os.unlink(lock)")
+    i_spawn = src.find("subprocess.Popen")
+    check(-1 < i_unlink < i_spawn,
+          "the pid lock is released BEFORE the replacement is spawned, or the "
+          "guard against duplicates refuses the replacement")
+    check('"--attach"' in src,
+          "the replacement attaches rather than launching a browser - the "
+          "session cookie is a browser-session cookie, so relaunching Chrome "
+          "would cost a manual sign-in")
+    check('"--wait-for-pid"' in src,
+          "and is handed our pid so it waits for us to be gone")
+    check("os.getpid()" in src, "our real pid, not a guess")
+    check('a == "--attach"' in src or "--attach" in src,
+          "the original invocation is carried forward")
+
+    # Only ever release a lock we hold.
+    check("_lock_holder(lock) == os.getpid()" in src,
+          "and only our OWN lock is released")
+
+    # --- Stop respawns; Quit still leaves for good ------------------------
+    apply_src = inspect.getsource(app_mod.Runner._apply)
+    i_stop = apply_src.find('operator: STOP')
+    check(i_stop != -1, "the STOP branch is found")
+    window = apply_src[i_stop:i_stop + 700]
+    check("_respawn()" in window, "Stop relaunches")
+    check("_reset_task_state()" in window, "after clearing task progress")
+    i_quit = apply_src.find('operator: QUIT')
+    check(i_quit != -1, "the QUIT branch is found")
+    check("_hard_exit()" in apply_src[i_quit:i_quit + 700],
+          "Quit still exits for good - the two buttons must stay different")
+
+    # --- the hidden flag stays hidden -------------------------------------
+    helptext = sp.run([sys.executable, os.path.join(ROOT, "engine/app.py"),
+                       "--help"], capture_output=True, text=True).stdout
+    check("--wait-for-pid" not in helptext,
+          "the relaunch flag is suppressed from --help; it is not for humans")
+
+
+def test_a_completed_tp_row_reflows_and_must_not_poison_its_slot():
+    """A TP pass stopped with a mission still startable. Position was to blame.
+
+    A completed TP mission greys out, and `find_mission_rows` keys on the brown
+    title bar - so a finished mission stops being DETECTED and the survivors
+    reflow upward into the slots it vacated. Position is therefore not an
+    identity: it names a HOLE in the list, and the next mission to fall into
+    that hole inherits whatever was remembered about the last one.
+
+    Measured live, four played and one still listed:
+
+        TP list page 1: 1 row(s) at y=[462]
+        TP list page 2: 1 row(s) at y=[462]
+        every TP row is now played or greyed out (4 played, 0 already done)
+
+    Both survivors had reflowed to y=462 - the top slot, which a played mission
+    had occupied - so both matched the skip list and the pass declared itself
+    finished. Note `0 already done`: nothing was ever measured as exhausted, so
+    this was purely the skip list refusing rows it had no business refusing.
+    """
+    print("\na completed TP row reflows and must not poison its slot")
+    import tp as tp_mod
+
+    # --- a fingerprint identifies the MISSION, not the slot ---------------
+    a = np.full((8, 48), 100, dtype=np.uint8)
+    b = np.full((8, 48), 100, dtype=np.uint8)
+    c = np.full((8, 48), 180, dtype=np.uint8)
+    check(tp_mod.same_row(a, b), "identical rows match")
+    check(not tp_mod.same_row(a, c), "different rows do not")
+    check(not tp_mod.same_row(a, None), "a missing fingerprint never matches")
+    check(not tp_mod.same_row(a, np.full((4, 4), 100, dtype=np.uint8)),
+          "nor does one of the wrong shape")
+
+    # --- the whole pass, with the reflow modelled -------------------------
+    SLOT_Y = [462, 640, 818]
+    missions = [f"m{i}" for i in range(5)]
+    done_names = []
+
+    def fake_pick(actor, cap, log, skip=(), max_pages=3, done=None):
+        remaining = [m for m in missions if m not in done_names]
+        for page in range(2):
+            for i, name in enumerate(remaining[page * 3:(page + 1) * 3]):
+                fp = np.full((8, 48), 20 + missions.index(name) * 30,
+                             dtype=np.uint8)
+                if any(tp_mod.same_row(fp, sk) for sk in skip):
+                    continue
+                return (page, SLOT_Y[i], fp)
+        return None
+
+    real = (tp_mod.to_tp_list, tp_mod.pick_any, tp_mod.run_one,
+            tp_mod._recover_to_lobby)
+    try:
+        tp_mod.to_tp_list = lambda *a, **k: True
+        tp_mod._recover_to_lobby = lambda *a, **k: None
+        tp_mod.pick_any = fake_pick
+
+        def run_one(cap, actor, log):
+            done_names.append([m for m in missions if m not in done_names][0])
+            return True
+        tp_mod.run_one = run_one
+
+        played, banked = tp_mod.run_all(None, None, _Log())
+        check(played == 5,
+              f"every mission is played despite the reflow ({played} of 5)")
+        check(banked == 5, f"and all of them bank ({banked})")
+
+        # --- a FAILED mission is different: it stays listed and startable,
+        # so it must be remembered or the sweep picks it straight back up.
+        done_names.clear()
+        attempts = []
+
+        def run_one_fail(cap, actor, log):
+            attempts.append(1)
+            return False              # never completes, never consumed
+        tp_mod.run_one = run_one_fail
+        log = _Log()
+        played, banked = tp_mod.run_all(None, None, log)
+        check(banked == 0, f"a mission that never completes banks nothing")
+        check(len(attempts) == 5,
+              f"each mission is tried ONCE, not retried forever "
+              f"({len(attempts)} attempts for 5 missions)")
+        check(played <= tp_mod.SWEEP_TRIPWIRE,
+              "and the pass terminates rather than looping")
+    finally:
+        (tp_mod.to_tp_list, tp_mod.pick_any, tp_mod.run_one,
+         tp_mod._recover_to_lobby) = real
+
+    # --- a SUCCESS must not be remembered at all --------------------------
+    # Scope this to the SUCCESS branch only. A character-count window runs
+    # straight past the `else:` into the failure branch, which legitimately
+    # does append - so the window has to end where the branch does.
+    src = inspect.getsource(tp_mod.run_all)
+    i_ok = src.find("banked += 1")
+    i_else = src.find("        else:", i_ok)
+    success_branch = src[i_ok:i_else if i_else != -1 else i_ok + 300]
+    check("failed.append" not in success_branch,
+          "a successful mission is NOT added to the skip list - it greys out "
+          "and cannot be offered again, so remembering it only poisons the "
+          "slot it vacated")
+    i_bad = src.find("mission did not complete")
+    check("failed.append" in src[max(0, i_bad - 300):i_bad + 100],
+          "only a FAILED mission is remembered")
+
+    # And skipping is by fingerprint, never by position.
+    pick = inspect.getsource(tp_mod.pick_any)
+    check("same_row" in pick, "rows are skipped by fingerprint")
+    check("abs(y - sy)" not in pick,
+          "and never by y position, which a reflow invalidates")
+
+
+def test_the_games_go_badge_is_not_an_enemy_and_names_the_heading():
+    """A live infinite loop: the bot tried to walk to a UI hint.
+
+    The game draws an ANIMATED orange "Go!" badge pointing the way on. It
+    animates, so the movement detector calls it alive - "something MOVED at
+    (2472, 522) - that is alive" - and it sits above FIG_MIN_Y so the
+    walkable-ground filter passes it too. But it is UI painted over the scene:
+    clicking it does nothing.
+
+    Combined with the rule that a moving target is exempt from the dud list
+    ("a thing that MOVES is alive"), that produced seven identical runs -
+    engage the badge, time out, run to the WRONG edge, come back - with no
+    enemy on the map at all.
+
+    Two things come out of the same template, which this project had already
+    cut and shelved as a lead pending exactly this confirmation.
+    """
+    print("\nthe game's Go! badge is not an enemy, and names the heading")
+    import json
+    import mission as mission_mod
+    import perceive as tpl_mod
+
+    R = mission_mod.MissionRunner
+    frame = cv2.imread(os.path.join(ROOT, "ref/auto/mission/go_arrow_decoy.png"))
+    check(frame is not None, "the stuck frame is committed as evidence")
+    if frame is None:
+        return
+    tpl_mod.clear_search_band()
+    tpls = tpl_mod.load_templates(
+        json.load(open(os.path.join(ROOT, "Configs/mission.json"))), _Log())
+    check("go_arrow" in tpls,
+          "the badge template is loaded (it was shelved behind a leading "
+          "underscore, which means 'not loaded')")
+
+    inst = R.__new__(R)
+    inst.templates, inst.log, inst._dud_targets = tpls, _Log(), set()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    arrow = inst.find_go_arrow(gray)
+    check(arrow is not None, f"the badge is found ({arrow})")
+    if arrow is None:
+        return
+
+    # 1. IT MUST NOT BE MISTAKEN FOR A UNIT. The phantom enemy the runner
+    #    engaged seven times was 84px from the badge centre - the same object.
+    d = abs(2472 - arrow[0]) + abs(522 - arrow[1])
+    check(d <= R.ARROW_RADIUS,
+          f"the phantom enemy at (2472,522) is inside the veto radius "
+          f"({d} <= {R.ARROW_RADIUS})")
+
+    # 2. IT NAMES THE HEADING, and it disagrees with the spawn rule here.
+    pos = R.find_character(frame)
+    check(pos is not None, f"the character is found ({pos})")
+    spawn = "right" if pos[0] < 1720 else "left"
+    badge = "right" if arrow[0] > pos[0] else "left"
+    check(spawn == "left",
+          f"the spawn rule says {spawn} - which ran into a dead end 7 times")
+    check(badge == "right",
+          f"the badge says {badge}, toward the way on")
+    check(spawn != badge,
+          "so this frame is a real disagreement, not a coincidence that would "
+          "pass whatever the code did")
+
+    # Read by POSITION, not by the glyph's direction - no assumption about what
+    # a leftward map draws, which CLAUDE.md flagged as unknown and still is.
+    src = inspect.getsource(R._traverse)
+    check("arrow[0] > pos[0]" in src,
+          "the heading compares the badge's x to ours, rather than assuming "
+          "the arrow points right")
+    i_arrow = src.find("arrow_heading is not None")
+    i_spawn = src.find('pos[0] < centre')
+    check(-1 < i_arrow < i_spawn,
+          "and the badge is consulted BEFORE the spawn guess")
+
+    # 3. A MOVER THAT KEEPS FAILING IS EVENTUALLY SCENERY ANYWAY. Neither
+    #    extreme worked: dudding on the first failure retired a real enemy
+    #    after one 6s timeout, and never dudding spun on the badge for ever.
+    check(R.MOVING_DUD_AFTER >= 2,
+          f"a mover gets more than one chance ({R.MOVING_DUD_AFTER})")
+    check(R.MOVING_DUD_AFTER <= 5,
+          f"but not unlimited chances ({R.MOVING_DUD_AFTER})")
+    check("_mover_fails" in src, "repeated failures per mover are counted")
+    i_mover = src.find("_mover_fails")
+    check("_dud_targets" in src[i_mover:i_mover + 700],
+          "and a mover that exhausts them joins the dud list")
+
+
+def test_traverse_actually_runs_on_a_real_frame():
+    """EXECUTE the traversal, do not merely inspect it.
+
+    749 checks passed while `_traverse` crashed on its very first real call
+    with `UnboundLocalError: local variable 'arrow' referenced before
+    assignment`. The Go!-badge tests asserted source-level properties and
+    exercised the detectors individually - and never RAN the function, so a
+    plain ordering mistake sailed straight through into a live session, where
+    every mission died the moment it reached the map and the bot relogged for
+    ever.
+
+    A test that reads code cannot catch code that does not run. This one wires
+    up fakes and calls it.
+    """
+    print("\ntraverse actually runs on a real frame")
+    import json
+    import mission as mission_mod
+    import perceive as tpl_mod
+
+    R = mission_mod.MissionRunner
+    frame = cv2.imread(os.path.join(ROOT, "ref/auto/mission/go_arrow_decoy.png"))
+    if frame is None:
+        check(False, "the traversal fixture is committed")
+        return
+
+    tpl_mod.clear_search_band()
+    tpls = tpl_mod.load_templates(
+        json.load(open(os.path.join(ROOT, "Configs/mission.json"))), _Log())
+
+    class _Cap:
+        def frame(self, gray=False):
+            return frame.copy()
+        def fix(self, x, y):
+            return (x, y)
+
+    class _Actor:
+        def __init__(self):
+            self.clicks = []
+        def click_pixel(self, x, y, why=""):
+            self.clicks.append((x, y, why))
+
+    class _Gate:
+        def wait_for_any(self, conds, timeout=0, why=""):
+            return None                     # nothing ever resolves
+
+    inst = R.__new__(R)
+    inst.templates, inst.log = tpls, _Log()
+    inst.capture, inst.actor, inst.gate = _Cap(), _Actor(), _Gate()
+    inst.conditions, inst.cfg = {}, {}
+    inst._dud_targets = set()
+    inst.traverse_settle = 0.01
+    inst.MOVE_GAP = 0.0
+
+    raised = None
+    try:
+        inst._traverse(frame)
+    except Exception as e:
+        raised = f"{type(e).__name__}: {e}"
+    check(raised is None, f"_traverse runs without raising ({raised})")
+    if raised:
+        return
+
+    check(bool(inst.actor.clicks), "and it actually did something")
+
+    # It must walk toward the badge (right), not into the dead end (left).
+    xs = [c[0] for c in inst.actor.clicks]
+    check(max(xs) > 2400,
+          f"it runs to the RIGHT edge, toward the badge ({xs})")
+
+    # And it must NOT have clicked the badge itself, at about (2531, 497).
+    for x, y, why in inst.actor.clicks:
+        check(not (abs(x - 2531) < 130 and abs(y - 497) < 130),
+              f"the badge itself is never clicked ({x},{y} - {why})")
+
+
+def test_a_lap_that_banks_nothing_is_not_progress():
+    """"The task returned" is not the same as "the task achieved something".
+
+    A mission-runner crash is caught INSIDE farm.farm, which logs it and
+    breaks - so the task returns normally having banked nothing. That cleared
+    the setback budget on every cycle, so a hard repeating fault relogged for
+    ever while the log read "setback 1/6" and never counted past one. Measured
+    live: 13 relogs, 8 "SAME failure" warnings, and one banked mission.
+    """
+    print("\na lap that banks nothing is not progress")
+    import app as app_mod
+    import tasks as tasks_mod
+
+    step_src = inspect.getsource(app_mod.Runner.step)
+    i_run = step_src.find("task.run(self)")
+    i_reset = step_src.find("self._setbacks = 0")
+    check(-1 < i_run < i_reset, "the budget is cleared after the task runs")
+    check("_progress" in step_src[i_run:i_reset + 120],
+          "but only when the cycle reported progress")
+
+    farm_src = inspect.getsource(tasks_mod.FarmMissions.run)
+    check("_progress" in farm_src,
+          "farming reports whether the lap achieved anything")
+    check("banked > 0" in farm_src,
+          "and BANKED is the measure - starting a mission is not achieving one")
+
+    # A task that says nothing must behave as before, or every other task
+    # silently starts accumulating setbacks.
+    tp_src = inspect.getsource(tasks_mod.TpTraining.run)
+    check("_progress" not in tp_src,
+          "a task that does not report progress is assumed to have made it")
+    check('self._progress = True' in step_src,
+          "which is why the default is set before each run")
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -3886,6 +4288,9 @@ def main():
                test_one_character_finder_shared_by_both_runners,
                test_never_runs_into_an_edge_it_is_already_at,
                test_movement_finds_the_enemy_colour_misses,
+               test_the_games_go_badge_is_not_an_enemy_and_names_the_heading,
+               test_traverse_actually_runs_on_a_real_frame,
+               test_a_lap_that_banks_nothing_is_not_progress,
                test_map_is_cleared_before_leaving,
                test_closed_window_shuts_the_bot_down,
                test_panel_stays_alive_during_a_mission,
@@ -3905,8 +4310,10 @@ def main():
                test_level_up_panel_is_acknowledged,
                test_sleep_is_told_apart_from_a_slow_iteration,
                test_tp_pass_is_bounded_by_the_list_not_by_a_count,
+               test_a_completed_tp_row_reflows_and_must_not_poison_its_slot,
                test_a_task_is_declared_in_exactly_one_place,
                test_attach_with_no_browser_fails_fast,
+               test_stop_comes_back_attached_by_itself,
                test_in_mission_asks_the_cheap_questions_first,
                test_a_looping_task_recovers_instead_of_pausing,
                test_the_games_render_bug_is_recognised_not_walked_through,

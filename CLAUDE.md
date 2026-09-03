@@ -2614,3 +2614,173 @@ refused us (bounded to 3 per process, and it stops entirely once the template
 exists), which is the same trick that eventually solved the mission list, the
 between-turns battle, the seal-broken dialog and the Level Up panel: the hard
 part was always CATCHING the frame.
+
+## STOP RESTARTS ITSELF — a reset that costs a terminal trip is a chore
+
+Stop means START AGAIN FROM NOTHING here, and killing the process is most of
+that reset for free: the cycle counter, the unknown streak, the relog budget,
+cached battle geometry and remembered dud targets all live in memory and die
+with it.
+
+But **the panel is injected into the PAGE, so it outlives the process it was
+talking to.** The operator was left with a live-looking panel whose buttons had
+no receiver - it read "no bot attached", printed a relaunch command, and every
+single Stop meant going to a terminal. This file already recorded that as the
+reason Stop was once changed back to a cooperative abort; the real fix is for
+Stop to bring the bot back itself.
+
+`Runner._respawn` launches the replacement BEFORE exiting, and **attaches** to
+the browser that is already running. Attaching is not a detail: the game's
+session cookie is a browser-session cookie, so relaunching Chrome would cost a
+manual sign-in that only a human can perform.
+
+**THE ORDER IS THE WHOLE TRICK**, and getting it wrong means two bots clicking
+one game:
+
+    1. release the pid lock - or the replacement is refused by the very guard
+       that exists to prevent the duplicate we are about to create
+    2. hand the child OUR pid, so it waits for us to be gone
+    3. exit
+
+Note the parent performs NO game interaction between releasing the lock and
+exiting - it spawns, prints and goes - so the child's wait is defence in depth
+rather than the thing that makes this safe.
+
+### `os.kill(pid, 0)` IS NOT A LIVENESS TEST — a zombie passes it
+
+The child's wait was first written as a plain `os.kill(pid, 0)` poll, and a
+test caught it immediately: **a helper that lived three seconds was still
+reported alive twenty seconds later.** A finished pid lingers in the process
+table until its parent reaps it, and `kill(0)` succeeds against a zombie quite
+happily.
+
+This is the same trap this file already records for the pid lock - *a bare pid
+proves something exists, never that it is alive and ours* - reached from a
+different direction. `_dead()` therefore asks the OS for the process STATE and
+treats `Z` as gone. Measured after the fix: 3.1 s instead of 20.2 s.
+
+`--wait-for-pid` is `argparse.SUPPRESS`ed. It is set by Stop's own relaunch and
+is not something a human should be typing.
+
+**Stop and Quit must stay different**, and the suite asserts it: Stop relaunches
+attached, Quit removes the panel and leaves for good.
+
+## THE "Go!" BADGE IS NOT AN ENEMY — and it is the heading
+
+A live infinite loop, and the bot was trying to walk to a piece of UI.
+
+The game draws an **animated orange "Go!" badge** pointing the way on. It
+animates, so `find_moving_figure` calls it alive - *"something MOVED at
+(2472, 522) - that is alive"* - and it sits above `FIG_MIN_Y`, so the
+walkable-ground filter passes it too. But it is painted OVER the scene:
+clicking it does nothing at all.
+
+Combined with the exemption that a moving target never joins the dud list ("a
+thing that MOVES is alive"), that produced seven identical runs - engage the
+badge, time out, run to the WRONG edge, come back - on a map with **no enemy on
+it whatsoever**. The tell was in the log and was the one this file already
+records for static objects: *byte-identical coordinates every pass*, both for
+the character (2220, 704) and the "enemy" (2472, 522).
+
+**This is the confirmation the LEAD note was waiting for.** That note kept
+`tpl/_lead_go_arrow.png` behind a leading underscore (so `load_templates`
+skips it) and said: *"Before using it: confirm it appears on several NORMAL
+traversal maps."* Measured on the stuck frame against every traversal frame
+held:
+
+    the stuck frame            0.845   (centre 2531, 497)
+    eight other traversal      0.309
+                               ------
+    margin                     0.536
+
+and its centre is 60 px from the phantom enemy - the same object. It is now
+`tpl/go_arrow.png`, registered at threshold 0.75.
+
+**Two things fall out of one template.**
+
+1. **It is vetoed as a unit.** A candidate within `ARROW_RADIUS` of the badge is
+   the badge. This is the same shape of fix this file keeps arriving at: a
+   detector defined by "something changed" needs something that says *yes, but
+   not that*.
+
+2. **It names the heading, and it beats the spawn rule.** The spawn heuristic
+   ("you came in through an edge, so head away from it") is a good guess and
+   was wrong here: the character stood at x=2220, right of the 1720 centre, so
+   it said *left* and the runner ran left into a dead end seven times - while
+   the badge sat to its RIGHT at x=2531.
+
+   Read by **position, not by the glyph's direction**: walk toward where the
+   badge IS. That needs no assumption about whether a leftward map mirrors the
+   arrow - still unknown - and it degrades to the spawn rule when absent.
+
+### "A thing that moves is alive" was too absolute
+
+Both extremes were measured, and both cost a real failure:
+
+    dud a mover on its FIRST failure  -> retired the only real enemy on the map
+                                         after one 6 s timeout
+    never dud a mover                 -> spun on the Go! badge for ever
+
+So `MOVING_DUD_AFTER = 3`: enough attempts for a walk that genuinely needs
+longer, after which a thing that moves but stays unreachable is accepted as
+animated scenery. Torches, water and flags would have done the same eventually;
+the badge just got there first.
+
+### A guard that fires on correct code gets deleted
+
+The attribute-name check added after the `self.cap` / `self.capture` bug
+asserted that every `getattr(self, X, None)` names something assigned FROM the
+capture. That was true when written and is not an invariant - `_mover_fails` is
+read the same way and has nothing to do with capture - so it failed on correct
+code the moment this change landed.
+
+The real invariant is narrower and more useful: **a name read off `self` must
+be a name set on `self`.** Verified that it still catches the original bug -
+reintroducing the typo reports `never-assigned: ['cap']` - while passing on
+every legitimate lookup.
+
+## A TEST THAT READS CODE CANNOT CATCH CODE THAT DOES NOT RUN
+
+The Go! badge work shipped with **749 checks passing** and `_traverse` crashing
+on its very first real call:
+
+    ERROR mission runner error: UnboundLocalError: local variable 'arrow'
+                                referenced before assignment
+
+The badge answers two separate questions - *is that moving thing a unit?* and
+*which way do we walk?* - and the second is asked FIRST in the function. The
+assignment went in next to the enemy search, below both, so it was referenced
+before it existed. Every mission died the instant it reached the map, the farm
+caught it, and the bot relogged and tried again.
+
+**The tests could not have caught it.** They asserted source-level properties
+(`"arrow[0] > pos[0]" in src`, ordering of two `find` offsets) and exercised
+`find_go_arrow` and `find_character` individually - all of which passed against
+a function that could not execute. `test_traverse_actually_runs_on_a_real_frame`
+now wires up fakes for the capture, actor and gate and CALLS it, asserting it
+does not raise, that it walks toward the badge, and that it never clicks the
+badge itself. Source inspection is a supplement to execution, never a
+substitute.
+
+## "THE TASK RETURNED" IS NOT "THE TASK ACHIEVED SOMETHING"
+
+The same live loop exposed a hole in the setback budget. `farm.farm` CATCHES a
+mission-runner crash, logs it and breaks - so the task returned normally,
+having banked nothing, and `step()` cleared the budget on every cycle. Measured
+over one session: **13 relogs, 8 "SAME failure" warnings, 1 banked mission**,
+with every line reading `setback 1/6` and never counting past one.
+
+This is the second time this budget has been defeated by resetting it on the
+wrong signal. First it reset on reaching the lobby, which a relog always
+achieves. Now it reset on a task returning, which a swallowed crash also
+achieves. The measure has to be the thing actually wanted:
+
+    farm  ->  banked > 0        starting a mission is not completing one
+
+A task that reports nothing is assumed to have made progress, so nothing else
+changes behaviour; `_progress` defaults to True before each run.
+
+**General shape, and it has now bitten three times:** a guard bounded by a
+counter is only as good as the event that clears the counter. Ask what the
+counter is protecting against, then clear it on evidence that the protection is
+no longer needed - never on something merely correlated with progress.
