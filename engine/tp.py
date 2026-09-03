@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 import cv2
+import numpy as np
 
 import kekkai_play as kp
 import minigame as mg
@@ -279,6 +280,51 @@ def _save_frame(frame, log, tag):
     except Exception as e:
         log.warning("could not save the frame: %s", e)
 
+
+# IDENTIFY A ROW BY WHAT IT SAYS, NOT WHERE IT SITS.
+#
+# A completed TP mission greys out, and `find_mission_rows` keys on the brown
+# title bar - so a finished mission stops being DETECTED and the survivors
+# reflow upwards into the slots it vacated. Position is therefore not an
+# identity: it names a hole in the list, and the next mission to fall into that
+# hole inherits whatever was remembered about the last one.
+#
+# Measured live. Four TP missions played, one still on the list:
+#
+#     TP list page 1: 1 row(s) at y=[462]
+#     TP list page 2: 1 row(s) at y=[462]
+#     every TP row is now played or greyed out (4 played, 0 already done)
+#
+# Both survivors had reflowed to y=462 - the TOP slot, which a played mission
+# had occupied - so both matched the skip list by position and the pass
+# declared itself finished with a mission still startable. Note `0 already
+# done`: nothing was ever measured as exhausted, so this was purely the skip
+# list refusing rows it had no business refusing.
+#
+# Same lesson `rows_signature` already records for page turns: the rows sit at
+# identical y on every page, so only the CONTENT distinguishes them.
+ROW_FP_TOL = 6.0
+
+
+def row_fingerprint(frame, y, w=48, h=8):
+    """A cheap fingerprint of the row at `y`. None if it cannot be sampled."""
+    fh, fw = frame.shape[:2]
+    y0, y1 = max(0, y - 18), min(fh, y + 18)
+    x0, x1 = max(0, 1700), min(fw, 2500)
+    band = frame[y0:y1, x0:x1]
+    if band.size == 0:
+        return None
+    g = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
+    return cv2.resize(g, (w, h), interpolation=cv2.INTER_AREA)
+
+
+def same_row(a, b, tol=ROW_FP_TOL):
+    """Are these two fingerprints the same mission?"""
+    if a is None or b is None or a.shape != b.shape:
+        return False
+    return float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean()) <= tol
+
+
 def start_row(actor, cap, log, y, x=2195, settle=2.6):
     """Open the mission whose title bar is at `y`, and press its green check.
 
@@ -337,21 +383,23 @@ def pick_any(actor, cap, log, skip=(), max_pages=3, done=None):
     """
     done = done if done is not None else []
     nxt = _tpl("page_next", 0.85)
+    skip = list(skip or [])
     for page in range(max_pages):
         f = cap.frame(gray=False)
         rows = find_mission_rows(f)
         log.info("TP list page %d: %d row(s) at y=%s", page + 1, len(rows), rows)
         for y in rows:
-            if any(abs(y - sy) < 40 and page == sp for sp, sy in skip):
+            fp = row_fingerprint(f, y)
+            if any(same_row(fp, s_fp) for s_fp in skip):
                 continue
             started, why = start_row(actor, cap, log, y)
             if started:
-                return (page, y)
+                return (page, y, fp)
             # An exhausted row is not worth revisiting on a later sweep, so it
             # joins the skip list the caller passed in. A transient miss is
             # left alone deliberately - the next sweep should try it again.
             if why == "exhausted":
-                done.append((page, y))
+                done.append(fp)
             log.info("row at y=%d would not start (%s); trying the next", y, why)
         g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
         nm, nc = find(g, nxt)
@@ -556,8 +604,24 @@ def run_all(cap, actor, log, relog=None, max_missions=None):
     Returns (played, banked).
     """
     played = banked = 0
-    tried = []        # rows started this pass: played, or failed and set aside
-    exhausted = []    # rows measured to be finished - greyed out or unstartable
+    # ONLY FAILURES ARE REMEMBERED, and this is the fix for a pass that stopped
+    # with a mission still on the list.
+    #
+    # A completed TP mission greys out and stops being detected at all, so a
+    # mission that was successfully played can never be offered again - there
+    # is nothing to remember. Recording it was not merely redundant, it was
+    # HARMFUL: the survivors reflow upward into the vacated slots, so a
+    # remembered position matches an entirely different mission. Measured: four
+    # played, one still listed, and both remaining rows had reflowed to y=462 -
+    # a slot a played mission had occupied - so both were skipped and the pass
+    # reported the day's list finished.
+    #
+    # A FAILED mission is different: this file already records that a failed TP
+    # mission is NOT consumed, so it stays listed and startable and would be
+    # retried forever. Those are remembered - by FINGERPRINT, so a reflow
+    # cannot make one stand in for another.
+    failed = []       # fingerprints of missions that would not complete
+    exhausted = []    # fingerprints measured to be finished or unstartable
     sweeps = 0
     while True:
         sweeps += 1
@@ -569,26 +633,30 @@ def run_all(cap, actor, log, relog=None, max_missions=None):
             log.error("TP: %d sweeps without exhausting the list - the "
                       "termination check is not working; stopping to avoid "
                       "looping. %d played, %d rows set aside",
-                      sweeps, played, len(tried) + len(exhausted))
+                      sweeps, played, len(failed) + len(exhausted))
             break
         if not to_tp_list(actor, cap, log):
             log.info("could not reach the TP list")
             break
-        spot = pick_any(actor, cap, log, skip=tried + exhausted,
+        spot = pick_any(actor, cap, log, skip=failed + exhausted,
                         done=exhausted)
         if spot is None:
             log.info("every TP row is now played or greyed out - the day's "
-                     "list is finished (%d played, %d already done)",
-                     played, len(exhausted))
+                     "list is finished (%d played, %d already done, %d set "
+                     "aside after failing)",
+                     played, len(exhausted), len(failed))
             break
-        tried.append(spot)
+        page, y, fp = spot
         played += 1
         log.info("started the mission at page %d y=%d - identifying it from the "
-                 "screen", spot[0] + 1, spot[1])
+                 "screen", page + 1, y)
         if run_one(cap, actor, log):
             banked += 1
             log.info("mission banked (%d of %d played)", banked, played)
         else:
+            # It stays listed and startable, so it must be remembered or the
+            # next sweep picks it straight back up.
+            failed.append(fp)
             log.info("mission did not complete; it stays in the list and will "
                      "not be retried this pass")
             _recover_to_lobby(cap, actor, log, relog=relog)
