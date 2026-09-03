@@ -4268,6 +4268,180 @@ def test_a_lap_that_banks_nothing_is_not_progress():
     check('self._progress = True' in step_src,
           "which is why the default is set before each run")
 
+
+def test_any_chromium_browser_will_do():
+    """The requirement is CDP, not Chrome - so find the binary, not the brand.
+
+    Nothing in this project is Chrome-specific: `--remote-debugging-port`,
+    `--app=`, `Input.dispatchMouseEvent`, `Runtime.addBinding` and
+    `Page.addScriptToEvaluateOnNewDocument` are Chromium features. Verified
+    live against Microsoft Edge (Edg/152) through this module's own `launch()`:
+    evaluate returned 2, the device-metrics override reported [1720, 720, 2],
+    a screenshot came back at 61166 bytes, and the binding became a function.
+
+    Firefox and Safari are a different matter and must not be implied to work:
+    Firefox's CDP shim was always partial and is being replaced by WebDriver
+    BiDi, and Safari speaks the WebKit Inspector Protocol. Either needs a
+    second transport written, not a path added.
+    """
+    print("\nany chromium browser will do")
+    import browser as br
+
+    # --- the candidate tables are (name, path) so the log can say WHICH ----
+    for plat, entries in br.CANDIDATES.items():
+        for entry in entries:
+            check(isinstance(entry, tuple) and len(entry) == 2,
+                  f"{plat} candidates are (name, path) pairs")
+            break
+
+    families = " ".join(n for e in br.CANDIDATES.values() for n, _ in e)
+    families += " " + " ".join(n for n, _ in br.PATH_NAMES)
+    for fork in ("Chrome", "Chromium", "Edge", "Brave", "Vivaldi", "Opera"):
+        check(fork in families, f"{fork} is looked for")
+
+    # Per-user install locations matter: a machine without admin rights has
+    # the browser under the user's own directory, not Program Files.
+    #
+    # Asserted against the SOURCE, not the evaluated paths. %LOCALAPPDATA% is
+    # empty on anything but Windows, so those entries collapse to bare
+    # relative strings at import time and the intent becomes invisible - which
+    # is how this check first failed against perfectly correct code.
+    br_src = inspect.getsource(br)
+    check("LOCALAPPDATA" in br_src,
+          "Windows per-user installs are covered")
+    # And a relative candidate must never be accepted: with %LOCALAPPDATA%
+    # unset those entries ARE relative, and a launcher cd's into the bot's own
+    # folder, so os.path.exists would happily resolve one against it.
+    find_src = inspect.getsource(br.find_browser)
+    check("isabs" in find_src,
+          "a relative candidate path is rejected rather than resolved against "
+          "the working directory")
+
+    # --- naming, for the log ----------------------------------------------
+    check(br.browser_name("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+          == "Microsoft Edge", "a known path is named")
+    check(br.browser_name("/usr/bin/brave-browser") == "Brave",
+          "so is a PATH binary")
+    check(br.browser_name("/opt/weird/thing") == "thing",
+          "and an unknown one falls back to its filename rather than lying")
+    check(br.browser_name(None) == "unknown", "None does not crash it")
+
+    # --- the failure message has to teach, not just fail ------------------
+    src = inspect.getsource(br.find_browser)
+    for needed in ("Edge", "Brave", "Firefox", "Safari", "--browser"):
+        check(needed in src,
+              f"the not-found message mentions {needed}")
+    check("BiDi" in src or "WebKit" in src,
+          "and says WHY Firefox/Safari cannot work, so nobody tries to add a "
+          "path for them")
+
+    # --- an explicit choice must be possible and must win -----------------
+    main_src = inspect.getsource(__import__("app").main)
+    check("a.browser" in main_src, "--browser is honoured")
+    i = main_src.find("a.browser")
+    check("target" in main_src[i:i + 160],
+          "with a config fallback behind it")
+    check("browser_name" in main_src,
+          "and the log says which browser was actually used - unguessable "
+          "from outside once several are installed")
+
+    # An explicit path that does not exist must fail loudly, not fall back to
+    # autodetection and silently use a browser the operator did not choose.
+    try:
+        br.find_browser("/definitely/not/here")
+        check(False, "a bad --browser path is refused")
+    except FileNotFoundError:
+        check(True, "a bad --browser path is refused")
+
+
+def test_the_go_badge_blinks_so_its_position_is_remembered():
+    """The badge is not always drawn, so a per-frame match is not enough.
+
+    Measured across seven frames 0.35s apart on one map: 0.845 on two of them
+    and 0.326 on the other five. That spread is far too large for animation
+    jitter - at 0.326 the badge is simply NOT DRAWN. So the template matches on
+    roughly two frames in seven.
+
+    Live consequence, nine seconds apart in one log:
+
+        10:55:44  the thing moving at (2472, 522) is the game's own Go! badge
+                  at (2531, 497), not a unit - ignoring it
+        10:55:53  something MOVED at (2472, 522) - that is alive
+
+    Same pixel, opposite verdict, because the second was a blink-off frame and
+    the veto had nothing to compare against. And a BLINKING thing is the
+    strongest movement signal there is, so the badge is reliably seen as alive
+    and only intermittently recognised as furniture.
+    """
+    print("\nthe Go! badge blinks, so its position is remembered")
+    import json
+    import mission as mission_mod
+    import perceive as tpl_mod
+    from perceive import find
+
+    R = mission_mod.MissionRunner
+    on = cv2.imread(os.path.join(ROOT, "ref/auto/mission/go_arrow_decoy.png"))
+    off = cv2.imread(os.path.join(ROOT, "ref/auto/mission/go_arrow_blink_off.png"))
+    check(on is not None and off is not None,
+          "both a badge-visible and a blink-off frame are committed")
+    if on is None or off is None:
+        return
+
+    tpl_mod.clear_search_band()
+    tpls = tpl_mod.load_templates(
+        json.load(open(os.path.join(ROOT, "Configs/mission.json"))), _Log())
+    tpl = tpls["go_arrow"]
+
+    # The blink is real, and large.
+    _, s_on = find(cv2.cvtColor(on, cv2.COLOR_BGR2GRAY), tpl)
+    _, s_off = find(cv2.cvtColor(off, cv2.COLOR_BGR2GRAY), tpl)
+    check(s_on >= tpl.threshold, f"the badge matches when drawn ({s_on:.3f})")
+    check(s_off < tpl.threshold,
+          f"and does NOT when it blinks off ({s_off:.3f}) - so a per-frame "
+          f"veto fails on this frame")
+    check(s_on - s_off > 0.3,
+          f"the gap is far too big to be jitter ({s_on - s_off:.3f}) - the "
+          f"badge is absent, not dimmer")
+
+    # The cache carries the veto across the gap.
+    inst = R.__new__(R)
+    inst.templates, inst.log = tpls, _Log()
+    seen = inst.find_go_arrow(cv2.cvtColor(on, cv2.COLOR_BGR2GRAY))
+    check(seen is not None, f"the badge is located while drawn ({seen})")
+    remembered = inst.find_go_arrow(cv2.cvtColor(off, cv2.COLOR_BGR2GRAY))
+    check(remembered == seen,
+          f"and is still reported on a blink-off frame ({remembered})")
+    d = abs(2472 - remembered[0]) + abs(522 - remembered[1])
+    check(d <= R.ARROW_RADIUS,
+          f"so the phantom enemy is vetoed on EVERY frame now ({d})")
+
+    # A new map has its own badge, or none - the memory must not leak across.
+    inst.forget_go_arrow()
+    check(inst.find_go_arrow(cv2.cvtColor(off, cv2.COLOR_BGR2GRAY)) is None,
+          "a map transition forgets it, rather than vetoing a real enemy that "
+          "happens to stand where the last map's badge was")
+    # Anchor on the transition's own LOG LINE, not on the words "moved on" -
+    # those appear in two comments hundreds of lines earlier, so a window
+    # measured from the first match never reaches the code and the check fails
+    # against a correct implementation.
+    src = inspect.getsource(R._traverse)
+    i_moved = src.find('"mission: moved on (run %d)')
+    check(i_moved != -1, "the transition's log line is found")
+    check("forget_go_arrow" in src[i_moved:i_moved + 1400],
+          "and the transition actually calls forget_go_arrow")
+
+    # --- ARRIVING at the badge must not reverse the heading ---------------
+    # The character ran right to the edge at x=2629, which put the badge at
+    # x=2531 on its LEFT - so "walk toward it" ran all the way back to x=789.
+    check(R.ARROW_REACHED > 71,
+          f"the arrival range covers the 71px case that reversed "
+          f"({R.ARROW_REACHED})")
+    check("ARROW_REACHED" in src, "the arrival guard is in the traversal")
+    i_reach = src.find("ARROW_REACHED")
+    check("arrow_heading" not in src[i_reach:i_reach + 200]
+          or "keeping our heading" in src[i_reach:i_reach + 600],
+          "and at that range it keeps the heading instead of turning back")
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -4289,6 +4463,7 @@ def main():
                test_never_runs_into_an_edge_it_is_already_at,
                test_movement_finds_the_enemy_colour_misses,
                test_the_games_go_badge_is_not_an_enemy_and_names_the_heading,
+               test_the_go_badge_blinks_so_its_position_is_remembered,
                test_traverse_actually_runs_on_a_real_frame,
                test_a_lap_that_banks_nothing_is_not_progress,
                test_map_is_cleared_before_leaving,
@@ -4314,6 +4489,7 @@ def main():
                test_a_task_is_declared_in_exactly_one_place,
                test_attach_with_no_browser_fails_fast,
                test_stop_comes_back_attached_by_itself,
+               test_any_chromium_browser_will_do,
                test_in_mission_asks_the_cheap_questions_first,
                test_a_looping_task_recovers_instead_of_pausing,
                test_the_games_render_bug_is_recognised_not_walked_through,

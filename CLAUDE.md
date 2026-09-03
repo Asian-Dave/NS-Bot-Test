@@ -2784,3 +2784,150 @@ changes behaviour; `_progress` defaults to True before each run.
 counter is only as good as the event that clears the counter. Ask what the
 counter is protecting against, then clear it on evidence that the protection is
 no longer needed - never on something merely correlated with progress.
+
+## DOUBLE-CLICK LAUNCHERS — the failure modes are all in the shell, not Python
+
+`Start NS Bot.command` (macOS), `Start NS Bot.bat` (Windows) and
+`start-ns-bot.sh` + `NS Bot.desktop` (Linux). No build step and no packaging:
+the point is that someone who will not open a terminal can start the bot, and a
+readable script does that as well as a binary would while staying fixable by
+whoever has to fix it.
+
+Four things each launcher has to get right, and every one of them is a way a
+launcher fails silently:
+
+**THE WINDOW MUST NOT VANISH.** A double-clicked script that fails and closes
+instantly is worse than no launcher: there is nothing to read, and no way to
+tell a crash from a clean exit. The shells `trap ... EXIT` and the batch file
+routes every failure through a `pause`.
+
+**NEVER ASSUME THE WORKING DIRECTORY.** Finder and Explorer start scripts from
+somewhere arbitrary, so each one cd's to its own location first (`dirname
+$BASH_SOURCE`, `%~dp0`, `readlink -f` on Linux for the symlink case).
+
+**APPEND TO THE LOG, NEVER TRUNCATE.** `tee run/app.log` would wipe a RUNNING
+instance's log on a second double-click, before `app.py` even got as far as
+refusing to start - destroying the record of the session actually doing the
+work. Verified live: with an instance running, the launcher refused cleanly and
+the log grew (3200 -> 3201 lines) instead of being emptied.
+
+**BATCH PARSES A WHOLE PARENTHESISED BLOCK BEFORE RUNNING IT**, so `if
+errorlevel` inside one reads its value from BEFORE the block, and a batch file
+written with `||` blocks silently ignores its own failures. The `.bat` uses
+plain `if errorlevel` plus `goto` throughout, and re-checks the thing it wanted
+(`does .venv\\Scripts\\python.exe exist now?`, `does cv2 import now?`) rather
+than trusting an exit code it may have mis-read.
+
+No launcher passes `--attach`. `browser.launch(reuse=True)` already attaches to
+a browser serving CDP and starts one only when nothing is, so guessing is not
+needed - and guessing wrong is how an operator ends up staring at "no page
+target after 40s".
+
+The Linux `.desktop` needs an absolute `Exec` path, because a .desktop file is
+not run from the folder it lives in. `start-ns-bot.sh` substitutes it on first
+run: telling someone who is "not comfortable using a script" to hand-edit a
+config file hands back the problem the launcher exists to remove.
+
+## ANY CHROMIUM BROWSER WILL DO — the requirement is CDP, not Chrome
+
+"Not everyone has Chrome" turned out to be a smaller problem than it sounds,
+because nothing in this project is Chrome-specific. `--remote-debugging-port`,
+`--app=`, `Input.dispatchMouseEvent`, `Runtime.addBinding` and
+`Page.addScriptToEvaluateOnNewDocument` are all **Chromium** features, and CDP
+is Chromium's own protocol - so every fork speaks it. Supporting Edge or Brave
+was a matter of finding the binary, not of writing code.
+
+**Verified live against Microsoft Edge (Edg/152)** through this project's own
+`browser.launch()`, exercising exactly the operations the bot depends on:
+
+    Runtime.evaluate                       -> 2
+    Emulation.setDeviceMetricsOverride     -> [1720, 720, 2]
+    Page.captureScreenshot                 -> 61166 bytes
+    Page.addScriptToEvaluateOnNewDocument  -> accepted
+    Runtime.addBinding                     -> function
+    Input.dispatchMouseEvent               -> accepted
+
+So the detection list covers Chrome, Chromium, Edge, Brave, Vivaldi, Opera and
+Arc, on all three platforms, including **per-user install locations** - a
+machine without admin rights has its browser under the user's own directory,
+not Program Files - and snap/flatpak paths on Linux. `--browser` overrides it
+(the error message had promised that flag for a while before it existed), a
+config `target.browser` sits behind that, and the log names the browser it
+actually used, which is unguessable from outside once several are installed.
+
+**FIREFOX AND SAFARI CANNOT BE ADDED BY PUTTING A PATH IN THE LIST**, and the
+not-found message says so, because otherwise someone will try:
+
+| | protocol |
+|---|---|
+| Chromium forks | CDP - what this bot speaks |
+| Firefox | WebDriver BiDi; its CDP shim was always partial and is being removed |
+| Safari | WebKit Inspector Protocol, driven through `safaridriver` |
+
+Either needs a second transport for capture, input and script injection - a
+rewrite of `cdp.py`, `act.py` and `capture.py`.
+
+### A relative candidate path must never be accepted
+
+Several Windows entries are built from `%LOCALAPPDATA%`, and when that is unset
+`os.path.join("", ...)` yields a RELATIVE path - which `os.path.exists` then
+resolves against the current working directory. The launchers cd into the bot's
+own folder, so a stray `Google\Chrome\Application\chrome.exe` sitting there
+would have been picked up as an installed browser. `find_browser` requires
+`os.path.isabs`.
+
+That gap surfaced from a test that FAILED AGAINST CORRECT CODE: it asserted the
+per-user paths by inspecting the evaluated candidate strings, and on macOS
+`%LOCALAPPDATA%` is empty, so the intent had already collapsed to a bare
+relative string and was invisible. The assertion now reads the module source
+instead - the right move whenever a platform-specific value cannot exist on the
+platform running the test.
+
+## THE "Go!" BADGE BLINKS — which is why one veto worked and the next did not
+
+The badge veto shipped and then failed intermittently. Nine seconds apart in
+one live log, on the same pixel:
+
+    10:55:44  the thing moving at (2472, 522) is the game's own Go! badge at
+              (2531, 497), not a unit - ignoring it
+    10:55:53  something MOVED at (2472, 522) - that is alive
+
+Measured across seven frames 0.35 s apart on one map: **0.845 on two of them
+and 0.326 on the other five.** A spread of 0.519 is far too large for animation
+jitter - at 0.326 the badge is **not drawn at all**. It blinks, and the template
+therefore matches on roughly two frames in seven.
+
+**And that is exactly why the movement detector locks onto it so reliably.** A
+thing that appears and vanishes outright is a stronger frame-to-frame signal
+than any walking sprite. So the badge is seen as alive on nearly every pass and
+recognised as furniture on barely a third of them - the worst possible
+combination, and one no amount of threshold tuning fixes, because on a blink-off
+frame there is nothing to match.
+
+**A badge does not move within a map, so the last sighting is remembered** and
+used on the frames where it is not drawn. Replaying the real blink sequence: the
+veto now holds on 6 of 6 frames where it previously held on 1. `forget_go_arrow`
+clears it on a map transition, so the memory cannot veto a genuine enemy that
+happens to stand where the previous map's badge was.
+
+**A general note on template thresholds.** A single positive sample tells you
+nothing about a template's VARIANCE. `go_arrow` was calibrated from one frame at
+0.845 with a worst negative of 0.309, which looked like an enormous margin - and
+the true distribution turned out to be bimodal, with most frames at 0.326.
+Prefer several frames spread over time before trusting a threshold, especially
+for anything the game animates.
+
+### Arriving at the badge must not reverse the heading
+
+Second fault in the same log. "Walk toward the badge" has nothing useful to say
+once you are standing on it, and saying it anyway sends you backwards:
+
+    ran right to the map edge at x=2629
+    badge at x=2531 is now on our LEFT
+    -> heading reversed, ran all the way back to x=789
+
+The badge marks the way ON, not a destination to stand on. Within
+`ARROW_REACHED` (260 px, against the 71 px gap that caused the reversal) the
+heading is KEPT rather than recomputed. Continuing right is what produced
+`moved on` about thirty-five seconds later, so the guard would have saved that
+whole excursion.

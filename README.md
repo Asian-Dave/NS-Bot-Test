@@ -13,12 +13,33 @@ and all three TP minigames are solved end to end. Measured over one session:
 
 ## Quick start
 
+**Double-click a launcher.** It creates the virtual environment and installs the
+one dependency on first run, then starts the bot.
+
+| | |
+|---|---|
+| macOS | `Start NS Bot.command` |
+| Windows | `Start NS Bot.bat` |
+| Linux | `NS Bot.desktop` — run `start-ns-bot.sh` once first and it fills in its own path |
+
+The launchers keep their window open on exit, including a failure, so a
+double-click that goes wrong leaves something to read rather than a window that
+flashes and vanishes. They append to `run/app.log` rather than overwriting it,
+so double-clicking while an instance is already running cannot destroy the log
+of the one doing the work.
+
+Or from a shell:
+
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python engine/app.py            # launches the browser
-.venv/bin/python engine/app.py --attach   # or attaches to one already open
+.venv/bin/python engine/app.py            # launches, or reuses a live browser
+.venv/bin/python engine/app.py --attach   # refuse to launch; attach or fail fast
 ```
+
+Neither the launchers nor a bare `app.py` need to be told which case they are
+in: `browser.launch(reuse=True)` attaches to a browser already serving CDP and
+starts one only when nothing is.
 
 That opens a window with the game on the left and a control panel on the right.
 Sign in once — the browser profile keeps the session.
@@ -29,9 +50,32 @@ cookie is a browser-session cookie, so quitting Chrome signs you out.
 Only one dependency: `opencv-python-headless`. The DevTools client, browser
 launcher and control plane are standard library.
 
+## Which browser
+
+**Any Chromium-based browser works** — Chrome, Chromium, Edge, Brave, Vivaldi,
+Opera, Arc. The requirement was never Chrome; it is CDP, which is Chromium's own
+protocol, and nothing here is Chrome-specific. Verified live against Microsoft
+Edge (Edg/152): evaluate, the device-metrics override, screenshot capture, the
+injected binding and mouse dispatch all behaved identically. The first one
+installed is found automatically; `--browser /path/to/binary` (or `target.browser`
+in the config) overrides it, and the log says which was used.
+
+On Windows this is close to free — Edge is preinstalled.
+
+**Firefox and Safari do not work**, and this is not something a path can fix:
+
+| | protocol | why not |
+|---|---|---|
+| Chromium forks | CDP | what the bot speaks |
+| Firefox | WebDriver BiDi | its CDP shim was always partial and is being removed |
+| Safari | WebKit Inspector Protocol | different protocol, driven through `safaridriver` |
+
+Either would mean writing a second transport for capture, input and script
+injection — a rewrite of `cdp.py`, `act.py` and `capture.py`, not a setting.
+
 ## The bot window
 
-Chrome is launched with `--app=`, which drops the tab strip, omnibox and
+The browser is launched with `--app=`, which drops the tab strip, omnibox and
 bookmarks bar (measured: window chrome 274px → 90px). The panel is injected into
 the game's own page, in the ~385px of wallpaper gutter beside the canvas, so the
 game renders natively — there is no streaming anywhere in the viewing path.
@@ -166,6 +210,7 @@ pausing, bounded so a deterministic fault still stops and says so.
 | `engine/farm.py` | grade and mission selection |
 | `engine/resume.py` | the ladder that gets back to the lobby from anywhere |
 | `engine/kekkai*.py`, `cards.py`, `seals.py` | the three TP minigames |
+| `Start NS Bot.command`, `.bat`, `start-ns-bot.sh` | double-click launchers |
 | `Configs/` | thresholds, geometry, rotation — no logic in code |
 | `tpl/` | templates |
 | `CLAUDE.md` | measured constants, corrections, and why each one is there |
