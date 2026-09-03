@@ -1551,6 +1551,12 @@ def main():
                          "instead of launching an app window")
     ap.add_argument("--no-dock", action="store_true",
                     help="skip the panel (headless-ish; controls via run/bot.control)")
+    ap.add_argument("--browser", default=None,
+                    help="path to a Chromium-based browser binary. Any fork "
+                         "works (Chrome, Chromium, Edge, Brave, Vivaldi, "
+                         "Opera, Arc) because the bot needs CDP, not Chrome. "
+                         "Firefox and Safari do not - they speak different "
+                         "protocols. Default: the first one found installed.")
     ap.add_argument("--wait-for-pid", type=int, default=0,
                     help=argparse.SUPPRESS)   # set by Stop's own relaunch
     ap.add_argument("--no-keep-awake", action="store_true",
@@ -1643,7 +1649,23 @@ def main():
         # browser and relaunching it landed on the logged-out page with only
         # `_ga` and `cf_clearance` left. So never restart the browser to "get a
         # clean window"; attach to the one that is already open.
+        # An explicit --browser beats the config, which beats autodetection.
+        # Someone with four Chromium forks installed should be able to say
+        # which, and the log then says which was actually used - guessing from
+        # the outside is impossible once four are on the machine.
+        want = a.browser or cfg.get("target", {}).get("browser") or None
+        try:
+            exe = browser.find_browser(want)
+        except FileNotFoundError as e:
+            log_early = Log()
+            for line in str(e).splitlines():
+                log_early.error("%s", line)
+            if _lock_holder(lock) == os.getpid():
+                _drop_lock(lock)
+            return 2
+        Log().info("browser: %s (%s)", browser.browser_name(exe), exe)
         browser.launch(url, profile, port=a.port, app_mode=True,
+                       browser=exe,
                        window=(VIEWPORT[0] + 8, VIEWPORT[1] + 90))
 
     log = Log()
