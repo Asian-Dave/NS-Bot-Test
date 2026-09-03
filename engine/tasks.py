@@ -172,6 +172,12 @@ class FarmMissions(Task):
         started, banked = farm_mod.farm(rt.cap, rt.actor, rt.log,
                                         rt.battle_cfg(), rt.controls,
                                         repeat=1)
+        # STARTING A MISSION AND BANKING NOTHING IS NOT PROGRESS. `farm.farm`
+        # catches a mission-runner crash, logs it and breaks - so a hard,
+        # repeating fault still returns normally from here. Saying so lets the
+        # supervisor's setback budget actually accumulate instead of being
+        # cleared on every cycle by a lap that achieved nothing.
+        rt._progress = banked > 0
         return f"farm: {started} started, {banked} banked"
 
 

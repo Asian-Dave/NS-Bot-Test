@@ -48,6 +48,7 @@ of the engine already honours, so a task checks it at its own gates.
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -397,7 +398,7 @@ class Runner:
             _write_control("stop")
             self.mode = "stopped"
             self._reset_task_state()
-            self._hard_exit()
+            self._respawn()
         elif c == "skill":
             k = cmd.get("arg")
             if k in SKILL_SLOTS:
@@ -556,6 +557,97 @@ class Runner:
             pass
         print("  stopped by the operator", flush=True)
         os._exit(code)
+
+    def _respawn(self):
+        """Stop, reset, and come straight back attached. Does not return.
+
+        WHY STOP RESTARTS RATHER THAN JUST DYING. Stop means "start again from
+        nothing" here - the operator asked for that explicitly, and killing the
+        process is most of the reset for free, since the cycle counter, the
+        unknown streak, the relog budget, cached battle geometry and remembered
+        dud targets all live in memory and die with it.
+
+        But the PANEL is injected into the page, so it survives the process it
+        was talking to. The result was a live-looking panel whose buttons had no
+        receiver: it read "no bot attached", printed a relaunch command, and the
+        operator had to go to a terminal every single time. A reset that costs a
+        manual relaunch is not a reset, it is a chore.
+
+        So the replacement is launched BEFORE we go, and it attaches to the
+        Chrome that is already running - which matters more than it looks,
+        because the game's session cookie is a browser-session cookie and
+        relaunching the browser would cost a manual sign-in that only a human
+        can do.
+
+        ORDER IS THE WHOLE TRICK, and getting it wrong means two bots clicking
+        one game:
+
+          1. release the pid lock, or the replacement is refused by the guard
+             that exists to prevent exactly the duplicate we are creating;
+          2. hand the child OUR pid, so it waits for us to actually be gone
+             before it touches anything;
+          3. exit.
+
+        The child's wait is what makes this safe, rather than a sleep chosen by
+        guesswork on either side.
+        """
+        try:
+            self.push()              # let the panel show 'stopped' first
+        except Exception:
+            pass
+        try:
+            self.cdp.close()
+        except Exception:
+            pass
+
+        argv = [sys.executable, os.path.join(ROOT, "engine/app.py")]
+        # Carry the original invocation forward, minus anything we must
+        # override. `--attach` is forced because the browser is already up.
+        skip_next = False
+        for a in sys.argv[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if a == "--wait-for-pid":
+                skip_next = True
+                continue
+            if a == "--attach":
+                continue
+            argv.append(a)
+        argv += ["--attach", "--wait-for-pid", str(os.getpid())]
+
+        # Release the lock BEFORE spawning - see the docstring.
+        try:
+            lock = os.path.join(ROOT, "run/app.lock")
+            if _lock_holder(lock) == os.getpid():
+                os.unlink(lock)
+        except Exception:
+            pass
+
+        started = False
+        try:
+            log_path = os.path.join(ROOT, "run/app.log")
+            # APPEND, so the restart does not erase the record of whatever the
+            # operator pressed Stop about.
+            fh = open(log_path, "a")
+            kwargs = {"stdout": fh, "stderr": subprocess.STDOUT,
+                      "stdin": subprocess.DEVNULL, "cwd": ROOT}
+            if hasattr(os, "setsid"):
+                kwargs["start_new_session"] = True      # POSIX: outlive us
+            else:                                        # Windows
+                kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0)
+            subprocess.Popen(argv, **kwargs)
+            started = True
+        except Exception as e:
+            print(f"  could not relaunch: {e}", flush=True)
+
+        if started:
+            print("  stopped and cleared - relaunching attached "
+                  "(the panel comes back on its own)", flush=True)
+        else:
+            print("  stopped by the operator - relaunch failed, so run: "
+                  ".venv/bin/python engine/app.py --attach", flush=True)
+        os._exit(0)
 
     def pump(self, poll=0.25):
         for cmd in self.dock.commands(poll=poll):
@@ -910,11 +1002,21 @@ class Runner:
         # clears it; see the reset after `task.run` below.
         self.note = ""
 
+        # Tasks may report that a cycle achieved NOTHING. Default to progress,
+        # so a task that says nothing behaves as it always did.
+        self._progress = True
         note = task.run(self)
-        # A COMPLETED CYCLE IS THE ONLY THING THAT COUNTS AS PROGRESS. If
-        # `run` raised we never get here, so a repeating failure accumulates
-        # and the cap can actually be reached.
-        self._setbacks = 0
+        # A CYCLE THAT ACHIEVED SOMETHING IS THE ONLY THING THAT COUNTS.
+        #
+        # "The task returned without raising" is not enough, and a live loop
+        # proved it. A mission runner crash is caught INSIDE `farm.farm`, which
+        # logs it and breaks - so the task returned normally, having banked
+        # nothing, and this cleared the setback budget every cycle. The log read
+        # "setback 1/6" over and over while the same UnboundLocalError repeated
+        # for ever, and the cap that exists to stop exactly that never counted
+        # past one.
+        if getattr(self, "_progress", True):
+            self._setbacks = 0
         if note:
             # SET the note, do not LOG it. Every task already logs its own
             # summary through the module doing the work (`farm: 1 started, 1
@@ -1402,6 +1504,44 @@ def _write_control(value):
         f.write(value)
 
 
+def _dead(pid):
+    """Is `pid` really gone? Treats a ZOMBIE as gone, because it is.
+
+    `os.kill(pid, 0)` succeeding does NOT mean anything is running - a pid
+    lingers in the process table as a zombie until its parent reaps it, and
+    `kill(0)` happily succeeds against one. Measured: a helper that lived three
+    seconds was still reported alive twenty seconds later, because the poller
+    was its parent and had not reaped it.
+
+    This is the same trap this project already recorded for the pid lock: a
+    bare pid proves something exists, never that it is alive and ours.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True                       # no such process
+    except Exception:
+        return False
+    # It exists. A zombie is finished, so ask the OS for its state. No `ps` on
+    # Windows, where a finished process's handle simply goes away instead.
+    try:
+        out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout
+        return out.strip().upper().startswith("Z")
+    except Exception:
+        return False
+
+
+def _wait_for_exit(pid, timeout=10.0, step=0.2):
+    """Block until `pid` is gone. True if it went, False on timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _dead(pid):
+            return True
+        time.sleep(step)
+    return _dead(pid)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=9222)
@@ -1411,6 +1551,8 @@ def main():
                          "instead of launching an app window")
     ap.add_argument("--no-dock", action="store_true",
                     help="skip the panel (headless-ish; controls via run/bot.control)")
+    ap.add_argument("--wait-for-pid", type=int, default=0,
+                    help=argparse.SUPPRESS)   # set by Stop's own relaunch
     ap.add_argument("--no-keep-awake", action="store_true",
                     help="let the machine idle normally while the bot runs "
                          "(screen sleeps and locks, Teams presence goes Away)")
@@ -1445,6 +1587,22 @@ def main():
     cfg = json.load(open(a.config))
     url = cfg.get("target", {}).get("game_url", "")
     profile = os.path.join(ROOT, "run/chrome-profile")
+
+    # WAIT FOR THE PROCESS WE ARE REPLACING to actually be gone.
+    #
+    # Set only by Stop's own relaunch. Without it the incoming and outgoing
+    # bots overlap for a moment and BOTH click the same game - the precise
+    # duplicate the pid lock exists to prevent, created by the reset that
+    # releases that lock on purpose. Polling the pid is exact, where a sleep on
+    # either side would be a guess.
+    if a.wait_for_pid:
+        if _wait_for_exit(a.wait_for_pid, timeout=10):
+            pass
+        else:
+            print(f"  pid {a.wait_for_pid} has not gone after 10s; continuing "
+                  f"anyway (it releases the lock before spawning us and does "
+                  f"not act afterwards, so this is belt and braces)",
+                  flush=True)
 
     # FAIL FAST AND SAY WHAT TO DO. `--attach` with no browser on the port
     # used to poll `find_page_target` for 30-40 s and then raise "no page
