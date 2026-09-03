@@ -118,5 +118,11 @@
   "logging": {
     "redact_urls": true,
     "_redact_note": "The /emulator URL carries a live session token (fb_at, fb_sig) and is time-signed. Never log it, never persist it, never commit it."
+  },
+  "templates": {
+    "go_arrow": {
+      "path": "tpl/go_arrow.png",
+      "threshold": 0.75
+    }
   }
 }

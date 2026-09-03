@@ -772,6 +772,10 @@ class MissionRunner:
     # How many approach clicks a LIVE target gets. Walking across a map takes
     # longer than one settle, and a moving thing is worth the patience.
     ENGAGE_TRIES = 3
+    # Failed approaches before a MOVING target is accepted as animated scenery.
+    # Three, because one was measured to retire a real enemy after a single
+    # timeout, and never was measured to spin on the Go! badge for ever.
+    MOVING_DUD_AFTER = 3
     MOVE_BAND = (200, 1150)      # deeper than FIG_BAND: enemies stand at y~991
 
     def find_moving_figure(self, cap=None):
@@ -901,6 +905,37 @@ class MissionRunner:
             return True
         return float((before != after).mean()) >= thr
 
+    # THE GAME'S OWN "Go!" BADGE. Both a false enemy and the answer to which
+    # way to walk, and it caused a live infinite loop before it was handled.
+    #
+    # It is an ANIMATED orange badge, so the movement detector picks it up and
+    # calls it alive: "something MOVED at (2472, 522) - that is alive". It sits
+    # at y=522, above FIG_MIN_Y, so the walkable-ground filter passes it too.
+    # But it is UI drawn over the scene - clicking it does nothing at all - and
+    # because a moving target was exempt from the dud list on the grounds that
+    # "a thing that MOVES is alive", it was retried for ever. Observed: seven
+    # identical runs, each engaging (2472, 522), failing, running to the wrong
+    # edge and coming back.
+    #
+    # Measured with the template this project had already cut and shelved as a
+    # lead: 0.845 on the stuck frame against 0.309 on eight other traversal
+    # frames - a margin of 0.536 - with its centre 60 px from the phantom
+    # enemy, i.e. the same object. That is the confirmation the LEAD note in
+    # CLAUDE.md was waiting for before wiring it up.
+    ARROW_RADIUS = 130          # a candidate this close to the badge IS the badge
+
+    def find_go_arrow(self, frame_gray):
+        """The game's "Go!" badge, or None. (x, y) in frame coordinates."""
+        from perceive import find          # imported locally, as elsewhere here
+        tpl = (self.templates or {}).get("go_arrow")
+        if tpl is None:
+            return None
+        try:
+            m, _ = find(frame_gray, tpl)
+        except Exception:
+            return None
+        return m.center if m.found else None
+
     def _traverse(self, frame_bgr):
         """Walk. Encounters trigger on MOVEMENT, so standing still stalls a
         mission with no error at all - which is exactly what was happening: the
@@ -937,9 +972,37 @@ class MissionRunner:
         # Corroborated on the entry map: the detector put the character at
         # x=911 (left of centre) and said "right", and the game itself drew a
         # right-pointing "Go!" arrow on that very frame.
+        # LOCATED ONCE, BEFORE EITHER USE. The badge answers two separate
+        # questions below - "is that moving thing a unit?" and "which way do we
+        # walk?" - and the second is asked first. Assigning it next to the
+        # enemy search left the heading block referencing it beforehand, which
+        # is an UnboundLocalError on the very first traversal frame: every
+        # mission died the moment it reached the map, the farm caught it, and
+        # the bot relogged and tried again for ever.
+        arrow = self.find_go_arrow(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY))
+
         pos = self.find_character(frame_bgr, getattr(self, "capture", None))
         cx0, cx1 = self.canvas_x(getattr(self, "capture", None))
         centre = (cx0 + cx1) // 2
+
+        # THE BADGE ALSO TELLS US WHICH WAY TO GO, and it beats the spawn rule.
+        #
+        # The spawn heuristic ("you entered through an edge, so head away from
+        # it") is a good guess, and on this map it was wrong: the character
+        # stood at x=2220, right of the 1720 centre, so it said "head left" and
+        # the runner ran left into a dead end seven times while the badge sat
+        # to its RIGHT at x=2531, pointing at the way on.
+        #
+        # Read by POSITION rather than by the glyph's direction: walk toward
+        # where the badge IS. That needs no assumption about mirroring for a
+        # leftward map - which CLAUDE.md flagged as unknown and still is - and
+        # it degrades to the spawn rule whenever the badge is absent.
+        arrow_heading = None
+        if arrow is not None and pos is not None:
+            arrow_heading = "right" if arrow[0] > pos[0] else "left"
+            self.log.info("mission: the game's Go! badge is at x=%d and we are "
+                          "at x=%d - it says %s", arrow[0], pos[0],
+                          arrow_heading)
 
         # CLEAR THE MAP BEFORE LEAVING IT. An enemy standing on this map has to
         # be killed first; running to the edge past it is what made a mission
@@ -960,6 +1023,17 @@ class MissionRunner:
         # second on purpose.
         foe = self.find_moving_figure()
         moving = foe is not None
+
+        # THE BADGE IS NOT A UNIT. A positive veto, which is the pattern this
+        # file keeps arriving at: a detector defined by "something changed" needs
+        # something that says "yes, but not that".
+        if foe is not None and arrow is not None:
+            if (abs(foe[0] - arrow[0]) + abs(foe[1] - arrow[1])
+                    <= self.ARROW_RADIUS):
+                self.log.info("mission: the thing moving at %s is the game's "
+                              "own Go! badge at %s, not a unit - ignoring it",
+                              foe, arrow)
+                foe, moving = None, False
         if moving:
             self.log.info("mission: something MOVED at %s - that is alive", foe)
         else:
@@ -1025,15 +1099,47 @@ class MissionRunner:
                 frame_bgr = after_f
             # It was not an enemy, or we did not reach it. Do not keep clicking
             # the same pixel every cycle.
-            # Only remember SCENERY as a dud. A moving target that we failed
-            # to reach is still alive and still worth another pass.
+            # SCENERY IS DUDDED AT ONCE; A MOVER GETS SEVERAL CHANCES, THEN
+            # THE SAME TREATMENT.
+            #
+            # "A thing that MOVES is alive" was too absolute, and it cost a live
+            # infinite loop. Animated SCENERY exists - the game's Go! badge is
+            # the case that bit us, and torches, water and flags would do the
+            # same - so a mover exempt from the dud list for ever is a guarantee
+            # of spinning on one, which is what happened: seven identical runs
+            # engaging the same pixel.
+            #
+            # But dudding a mover on its FIRST failure was the original bug in
+            # the other direction: it retired the only real enemy on the map
+            # after one 6 s timeout. So a mover is given MOVING_DUD_AFTER
+            # attempts - enough for a walk that genuinely needs longer - and is
+            # then treated like any other scenery.
+            self._dud_targets = set(getattr(self, "_dud_targets", set()))
             if not moving:
-                self._dud_targets = set(getattr(self, "_dud_targets", set()))
                 self._dud_targets.add(foe)
+            else:
+                key = (foe[0] // self.DUD_RADIUS, foe[1] // self.DUD_RADIUS)
+                fails = getattr(self, "_mover_fails", None)
+                if fails is None:
+                    fails = self._mover_fails = {}
+                fails[key] = fails.get(key, 0) + 1
+                if fails[key] >= self.MOVING_DUD_AFTER:
+                    self._dud_targets.add(foe)
+                    self.log.info("mission: %s has moved but stayed "
+                                  "unreachable %d times - it is animated "
+                                  "scenery, not a unit", foe, fails[key])
+                else:
+                    self.log.info("mission: %s moves but did not fight (%d/%d) "
+                                  "- it gets another chance", foe, fails[key],
+                                  self.MOVING_DUD_AFTER)
             self.log.info("mission: %s did not start a fight; treating it as "
                           "scenery and running on", foe)
 
-        if pos is not None:
+        if arrow_heading is not None:
+            # THE GAME'S OWN HINT WINS over our guess about where we came in.
+            heading = arrow_heading
+            self._heading = heading
+        elif pos is not None:
             heading = "right" if pos[0] < centre else "left"
             self._heading = heading
         else:
