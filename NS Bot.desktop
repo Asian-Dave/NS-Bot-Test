@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=NS Bot
+Comment=Ninja Saga UI automation - opens the game with the control panel beside it
+# Terminal=true is the point of this file. Most desktops refuse to run a bare
+# .sh from a double-click, and those that offer to do it run it WITHOUT a
+# terminal - so every message, including "Python is not installed", goes
+# nowhere and the launcher looks like it did nothing at all.
+Terminal=true
+# A .desktop file is not run from the folder it lives in, so the path cannot be
+# relative. Point this at your own checkout: either edit the line below, or run
+#   sed -i "s|__DIR__|$PWD|" "NS Bot.desktop"
+# from inside the bot's folder, once.
+Exec=__DIR__/start-ns-bot.sh
+Path=__DIR__
+Icon=applications-games
+Categories=Game;
