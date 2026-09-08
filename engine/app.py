@@ -116,6 +116,25 @@ VIEWPORTS = [
 ]
 VIEWPORT_PATH = "run/viewport.json"
 
+# THE GAME'S OWN RENDER SETTING. These are the values the SITE uses, not
+# Ruffle's full backend list: its emulator page reads `localStorage.renderMode`
+# on every load and defaults to `wgpu-webgl` on desktop (`webgl` on iOS).
+#
+# Offered because the operator reports wgpu/WebGL is the lightest but shows
+# graphical glitches, so switching and comparing is the prerequisite for
+# chasing those. Labels say what each one costs, since that is why anyone
+# picks one.
+#
+# NOTHING IS CACHED ON OUR SIDE. The site stores and reuses the choice itself,
+# so a second copy here would be a stale duplicate of the truth - a mistake
+# this project has already made with cached page state.
+RENDERERS = [
+    {"key": "wgpu-webgl", "label": "wgpu/WebGL (default)"},
+    {"key": "webgl",      "label": "WebGL"},
+    {"key": "webgpu",     "label": "WebGPU"},
+    {"key": "canvas",     "label": "Canvas2D (slow)"},
+]
+
 # The panel's task list comes from the registry, so a task is declared in
 # exactly one place - see engine/tasks.py. It used to be declared here AND
 # handled in two separate branches of `step`.
@@ -245,6 +264,10 @@ class Runner:
         self._last_beat = 0.0
         self.viewport = _read_json(VIEWPORT_PATH, {}).get(
             "key", VIEWPORTS[0]["key"])
+        # Read from the game, never remembered here. The site is the single
+        # source of truth for these.
+        self._game = {}          # {settings, servers, selected_server, ...}
+        self._renderer_live = None
         # Every capture is both evidence the bot is alive AND our chance to read
         # the operator's buttons - see `on_capture`.
         self.cap.on_activity = self.on_capture
@@ -297,6 +320,56 @@ class Runner:
         s = int(time.time() - self.t0)
         return f"{s//3600}h {s%3600//60}m" if s >= 3600 else f"{s//60}m {s%60}s"
 
+    def _refresh_renderer_live(self):
+        """Read which context Ruffle actually got, for the panel and the log.
+
+        Refreshed only when it can have CHANGED - at startup and after a
+        switch - rather than on every push. It is a CDP round trip and the
+        renderer cannot change while the document stays put.
+        """
+        try:
+            info = browser.renderer_info(self.cdp)
+        except Exception:
+            info = {}
+        self._renderer_live = info.get("live")
+        return info
+
+    def _refresh_game_settings(self):
+        """Re-read the game's own settings and server list from the page."""
+        self._game = browser.read_game_settings(self.cdp) or {}
+        return self._game
+
+    def _apply_game_setting(self, key, value, label):
+        """Write one of the game's settings and reload so it takes effect.
+
+        The write is VERIFIED by reading the key back, and the reload is what
+        makes the site pick it up - it reads these on every load. Anything less
+        than a verified write plus a reload is how the previous attempt at this
+        ended up offering a switch that silently did nothing.
+        """
+        if not browser.write_game_setting(self.cdp, key, value):
+            self.log.error("could not store %s=%s - the setting did NOT change",
+                           key, value)
+            return False
+        self.log.info("stored %s=%s; reloading so the game picks it up",
+                      key, value)
+        self.mode = "stopped"
+        _write_control("stop")
+        self.relog()
+        # A different backend or server redraws everything, so a cached
+        # geometry hint or drift measurement describes the old pixels.
+        self.cap._off_at = 0.0
+        self.focus_aligned = False
+        self._refresh_game_settings()
+        info = self._refresh_renderer_live()
+        msg, warn = browser.describe_renderer(info)
+        (self.log.warning if warn else self.log.info)("%s", msg)
+        got = (self._game.get("settings") or {}).get(key)
+        if str(got) != str(value):
+            self.log.warning("%s reads back as %s after the reload, not %s",
+                             key, got, value)
+        return True
+
     def _refresh_no_click_zone(self):
         """Re-read where the panel actually is, every cycle.
 
@@ -338,6 +411,12 @@ class Runner:
                 "skills": self.skills, "skill_slots": SKILL_SLOTS,
                 "grades": GRADES, "grade": self.grade,
                 "viewports": VIEWPORTS, "viewport": self.viewport,
+                "renderers": RENDERERS,
+                "renderer": (self._game.get("settings") or {}).get("renderMode")
+                            or self._game.get("default_render"),
+                "renderer_live": self._renderer_live,
+                "servers": self._game.get("servers") or [],
+                "server": self._game.get("selected_server"),
                 "viewport_label": next(
                     (v["label"] for v in VIEWPORTS if v["key"] == self.viewport),
                     self.viewport or ""),
@@ -478,6 +557,41 @@ class Runner:
                                   self.task, was)
                 else:
                     self.log.info("operator: task -> %s", self.task)
+        elif c == "renderer":
+            rd = next((r for r in RENDERERS if r["key"] == cmd.get("arg")), None)
+            if rd is None:
+                return
+            # The dock confirms before sending, because this reloads the game
+            # and returns to character select - same as the window size.
+            self.log.info("operator: renderer -> %s", rd["label"])
+            try:
+                self._apply_game_setting("renderMode", rd["key"], rd["label"])
+            except (OSError, CDPError) as e:
+                raise Disconnected(str(e))
+            except Exception as e:
+                self.log.error("could not apply the renderer: %s", e)
+        elif c == "server":
+            try:
+                idx = int(cmd.get("arg"))
+            except (TypeError, ValueError):
+                return
+            servers = self._game.get("servers") or []
+            sv = next((s for s in servers if s.get("index") == idx), None)
+            if sv is None:
+                self.log.info("no server %s in the game's own list", idx)
+                return
+            # A SHARPER WARNING THAN THE OTHERS, and the dock says so too. The
+            # renderer only changes how pixels are drawn; this points the
+            # client at a different game host, and whether that is the same
+            # world is not something this bot can determine from here.
+            self.log.info("operator: server -> %s (index %d) - this reconnects "
+                          "to a different game host", sv.get("name"), idx)
+            try:
+                self._apply_game_setting("ns_server_index", idx, sv.get("name"))
+            except (OSError, CDPError) as e:
+                raise Disconnected(str(e))
+            except Exception as e:
+                self.log.error("could not apply the server: %s", e)
         elif c == "viewport":
             vp = next((v for v in VIEWPORTS if v["key"] == cmd.get("arg")), None)
             if vp is None:
@@ -1688,7 +1802,30 @@ def main():
         log.info("game %s, dock %s", geo.get("game"), geo.get("dock"))
         log.info("dock is a no-click zone for the bot: %s", dock.dock_rect())
 
+    # SAY WHICH RENDERER IS LIVE, every launch.
+    #
+    # Ruffle chooses one at startup and never announces it, and a fall back to
+    # canvas2d is documented in docs/BENCHMARK.md as SILENT. Every template and
+    # colour threshold in this project was calibrated against a GL backend, so
+    # a switch changes the pixels under a perception layer that cannot tell -
+    # and the symptom is "the bot stopped recognising things" with nothing in
+    # the log to explain it. One line at startup turns that into a fact.
+    _msg, _warn = browser.describe_renderer(browser.renderer_info(c))
+    (log.warning if _warn else log.info)("%s", _msg)
+
     r = Runner(c, cap, actor, tpls, cfg, log, controls, dock, port=a.port)
+
+    # READ THE GAME'S OWN SETTINGS. The site stores and reuses these itself,
+    # so there is nothing for us to re-apply at startup - only to report.
+    r._refresh_game_settings()
+    r._refresh_renderer_live()
+    _st = (r._game.get("settings") or {})
+    log.info("game settings: renderMode=%s quality=%s server=%s (of %d)",
+             _st.get("renderMode") or f"unset -> {r._game.get('default_render')}",
+             _st.get("gameQuality") or "unset -> high",
+             _st.get("ns_server_index") or "unset -> 0",
+             len(r._game.get("servers") or []))
+
     try:
         r.loop()
     except KeyboardInterrupt:

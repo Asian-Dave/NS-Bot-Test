@@ -2024,12 +2024,25 @@ point that a coordinate is meaningless without the geometry it was measured at �
 the same ten tiles are 148 CSS px apart in one and 150 captured px apart in the
 other.
 
-## Cross-reference: CMMhero NS Bot (decompiled, `ref/tp/cmmhero`)
+## Cross-reference: CMMhero NS Bot (decompiled) — SOURCE NO LONGER KEPT
 
-Third-party Windows/C#/Adobe-AIR bot for a **different** private-server clone.
-Mechanics reference only - never run the binary (it hardware-fingerprints, plants a
-DPAPI licence file that survives uninstall, and opens a plaintext WebSocket to a
-hardcoded IP). Findings that change our design:
+Third-party Windows/C#/Adobe-AIR bot for a **different** private-server clone,
+used as a mechanics reference. **`ref/tp/cmmhero` has been deleted**; the
+findings below are the whole of what it was worth, the one algorithm worth
+having is ported (`engine/kekkai.py`), and every open question that needed the
+C# has since been answered by measuring our own client - see
+`docs/PORT_FROM_CMMHERO.md` for which and how.
+
+That is the better outcome regardless: their build is a different private
+server, so their code was only ever a hypothesis about ours. Every place we
+took their word for something and later measured it, the measurement won - the
+target ring being the clearest case.
+
+It was also mildly hazardous to keep on disk: it hardware-fingerprints, plants
+a DPAPI licence file that survives uninstall, and opens a plaintext WebSocket to
+a hardcoded IP. It was never run here.
+
+Findings that changed our design, kept because the reasoning still applies:
 
 * **Their symbol matcher is better specified than our sketch**
   (`CardSolver.cs:139-166`): inset each crop by 20% to drop the frame, resize to
@@ -2931,3 +2944,128 @@ The badge marks the way ON, not a destination to stand on. Within
 heading is KEPT rather than recomputed. Continuing right is what produced
 `moved on` about thirty-five seconds later, so the guard would have saved that
 whole excursion.
+
+## THE EXAM RUNE PUZZLE — already supported; only the navigation is missing
+
+The reference bot solved this puzzle for the **Jounin and Sage exams** and never
+for TP; we did the exact opposite. Porting "the exams" turned out to need no new
+solver at all, because every piece of the path was already context-free:
+
+* `minigame.classify` reads the family OFF THE SCREEN rather than from a
+  configured label - the decision recorded above as "the pixels win" - so an
+  exam seal is recognised as a kekkai with nothing added;
+* `kekkai_play` contains no TP assumptions (asserted by the suite, which greps
+  it for `tp_training_row`, `special_tab` and `TP Training`);
+* `hunt_and_solve` **counts the seal's nodes** and uses that as the code length,
+  which is the whole of the difference between an exam and TP - their bot keyed
+  four coordinate tables 2..5, and TP only ever showed 3 and 5;
+* `kekkai.candidates` is a plain product over the six runes, so it is generic in
+  the length.
+
+Verified, since lengths **2 and 4 had never been exercised on this side**:
+
+    length   candidates   secrets tried   solved   avg guesses   worst
+       2             36        36 (all)       36          3.72       6
+       3            216       216 (all)      216          4.07       6
+       4          1,296              80       80          5.28       7
+       5          7,776              80       80          6.06       8
+
+**WHAT IS NOT PORTED IS THE NAVIGATION**, and it cannot be: nobody has captured
+an exam's screens, and inventing templates for a menu nobody has looked at is
+the eyeball mistake this file exists to prevent. Their coordinate tables are for
+their own geometry on a different private-server build, so they would not
+transfer even if kept.
+
+So `tasks.ExamKekkai` divides the labour honestly. `needs_lobby` is False - for
+the same reason the farm can start mid-mission, since the resume ladder
+deliberately cannot name an exam screen and demanding the lobby first would make
+the task unusable. The operator navigates to the exam and presses Run; the bot
+plays the puzzle. When it finds no puzzle it says so precisely and **saves the
+frame**, which is how the navigation gets taught - the same trick that
+eventually solved the mission list, the between-turns battle, the seal-broken
+dialog and the Level Up panel.
+
+## THE GAME'S OWN SETTINGS — and three attempts aimed at the wrong layer
+
+The operator wanted to switch Ruffle's render backend from the panel, because
+wgpu/WebGL is the lightest but shows graphical glitches. Three mechanisms were
+tried and all three failed, each for a different reason, and all three looked
+plausible while doing nothing:
+
+    1. patching `RufflePlayer.config.preferredRenderer`
+       -> lost: a PER-LOAD config overrides the global one
+    2. wrapping the element's `load(options)` to inject the choice
+       -> did nothing: the site calls `player.load(swfUrl)` with a bare STRING
+    3. that prototype wrap
+       -> never applied at all (`__nsbotRendererPatched` stayed false)
+
+Measured throughout, which is what finally named the problem:
+
+    RufflePlayer.config.preferredRenderer  = "webgl"       <- our override
+    player.loadedConfig.preferredRenderer  = "wgpu-webgl"  <- what Ruffle used
+
+So asking for `canvas` still produced a WebGL2 context, and the operator
+correctly reported that the graphics had not changed.
+
+**THE SITE ALREADY HAS A CONTROL FOR ALL OF IT.** A gear icon
+(`button#render-toggle-button`, in `div.menu-controls` beside fullscreen and
+the main menu) offers renderer, graphic quality and server. It was never seen
+because **FOCUS MODE HIDES IT** - focus mode hides the game's siblings, and
+`display:none` is set on the button and a parent. Its emulator page reads, on
+every load:
+
+    const defaultRender   = isIOS ? 'webgl' : 'wgpu-webgl';
+    const savedRender     = localStorage.getItem('renderMode')  || defaultRender;
+    const savedQuality    = localStorage.getItem('gameQuality') || 'high';
+    var   selected_server = parseInt(localStorage.getItem('ns_server_index') || '0', 10);
+    const render          = urlParams.get('render') || savedRender;
+
+So a setting is **one localStorage key plus a reload**. No config patching, no
+race with the site's own assignment. Verified live, and this is the first time
+any attempt actually took:
+
+    before:  loadedConfig wgpu-webgl,  context webgl2
+    after :  loadedConfig canvas,      context 2d
+
+**GENERAL LESSON, and it cost three failed attempts: when a site already has a
+control for something, find ITS control before reverse-engineering the
+runtime.** The operator naming the gear was the fastest step in the whole
+investigation.
+
+**NOTHING IS CACHED ON OUR SIDE.** The site stores and reuses these keys
+itself, so an earlier `run/renderer.json` was deleted: a second copy would be a
+stale duplicate of the truth, which is the same mistake as any other cached
+belief about page state. The panel shows what the GAME has stored.
+
+**A write is VERIFIED by reading the key back**, and after the reload the
+setting is re-read and a mismatch is logged. An unverified write is exactly how
+the previous attempt offered a switch that silently did nothing.
+
+### Two measurement mistakes worth remembering
+
+**The canvas CONTEXT TYPE cannot identify the backend.** Both `wgpu-webgl` and
+`webgl` draw through a WebGL2 context, so it only separates GL from canvas2d.
+The backend actually in use comes from `player.loadedConfig`. An early log line
+read "site asked for webgl" while echoing OUR OWN override back from the global
+config - if it had been trusted, the conclusion would have been that the switch
+worked.
+
+**`iframe.contentWindow.localStorage === window.localStorage` is FALSE for
+same-origin frames** and proves nothing: each window gets its own Storage
+object over the same store. A probe used it as an origin test and reported
+"not same origin" about a frame whose scripts, storage and DOM were all being
+read successfully. Verified properly by writing in one window and reading it in
+the other.
+
+### The server setting deserves a sharper warning than the others
+
+`ns_server_index` is stored the same way, and the list is read from the game's
+own `servers` array rather than hardcoded (measured: two entries, index 0 the
+primary host and index 1 a CDN host). But where the renderer only changes how
+pixels are drawn, this points the client at a different game HOST - and whether
+a character exists there is not something this bot can determine. The panel's
+confirm text says so explicitly, and no switch was ever performed to find out.
+
+`gameQuality` is deliberately NOT offered yet: only its default (`high`) has
+been observed, and offering values the site may not accept would be another
+control that silently does nothing.

@@ -4442,6 +4442,191 @@ def test_the_go_badge_blinks_so_its_position_is_remembered():
           or "keeping our heading" in src[i_reach:i_reach + 600],
           "and at that range it keeps the heading instead of turning back")
 
+
+def test_the_exam_rune_puzzle_needs_no_new_machinery():
+    """Porting "the exams" turned out to be almost nothing, and that is the point.
+
+    The reference bot solved this puzzle for the Jounin and Sage exams and never
+    for TP - the exact opposite of us. Porting it needed no new solver because
+    every piece of the path is already context-free:
+
+      * `minigame.classify` reads the family OFF THE SCREEN, not from a label
+      * `kekkai_play` contains no TP assumptions
+      * `hunt_and_solve` COUNTS the seal's nodes and uses that as the code
+        length, which is the whole of the difference between an exam and TP
+      * `kekkai.candidates` is generic in the length
+
+    What is NOT ported is the navigation to reach an exam, and that cannot be
+    written without seeing the screens. The task therefore plays a puzzle from
+    wherever the operator has got to, and saves the frame when it finds none.
+    """
+    print("\nthe exam rune puzzle needs no new machinery")
+    import random
+    import kekkai as K
+    import tasks as tasks_mod
+    import minigame as mg
+    import kekkai_play as kp
+
+    # --- the solver is generic over the exam's code lengths ---------------
+    # Their bot keyed four coordinate tables 2..5; TP only ever showed 3 and 5,
+    # so 2 and 4 had never been exercised on this side at all.
+    random.seed(7)
+    for length, want in ((2, None), (3, 24), (4, 12), (5, 8)):
+        pool = K.candidates(length)
+        check(len(pool) == 6 ** length,
+              f"length {length} has {6 ** length} candidates ({len(pool)})")
+        secrets = pool if want is None else random.sample(pool, want)
+        unsolved = []
+        for secret in secrets:
+            hist = []
+            for _ in range(14):
+                g = K.next_guess(length, hist)
+                if g is None:
+                    break
+                cp, wp = K.score(g, secret)
+                hist.append((g, cp, wp))
+                if cp == length:
+                    break
+            else:
+                unsolved.append(secret)
+                continue
+            if not hist or hist[-1][1] != length:
+                unsolved.append(secret)
+        check(not unsolved,
+              f"every length-{length} secret solves ({len(secrets)} tried, "
+              f"{len(unsolved)} failed)")
+
+    # --- the code length comes from the SEAL, not from a default ----------
+    # A 3-node triangle is a 3-rune code and a 5-node pentagon is 5; counting
+    # after opening the puzzle returns nothing and silently falls back to the
+    # default, which once had a 5-node seal solved as a 3-rune code.
+    src = inspect.getsource(kp.hunt_and_solve)
+    check("count_nodes" in src, "the node count is read from the seal")
+    i = src.find("count_nodes")
+    window = src[i:i + 400]
+    check("use_len" in window or "nodes if nodes" in window,
+          "and it OVERRIDES the default length rather than being logged only")
+    check("2 <=" in window,
+          "with a sanity range, so a miscount cannot pick an absurd length")
+
+    # --- nothing in the path assumes TP ----------------------------------
+    for mod in (kp, mg):
+        body = inspect.getsource(mod)
+        for marker in ("tp_training_row", "special_tab", "TP Training"):
+            check(marker not in body,
+                  f"{mod.__name__} does not assume TP ({marker})")
+
+    # --- the task plays what is there and teaches what is not -------------
+    t = tasks_mod.get("exam_kekkai")
+    check(t.key == "exam_kekkai", "the exam task is registered")
+    check(t.oneshot, "it is a one-shot - an exam is not a farm loop")
+    check(not t.needs_lobby,
+          "and it does NOT demand the lobby: the resume ladder cannot name an "
+          "exam screen, so requiring it would make the task unusable")
+    pf = inspect.getsource(type(t).preflight)
+    check("classify" in pf, "it identifies the screen rather than assuming")
+    check("_save_for_teaching" in pf,
+          "and saves the frame when there is no puzzle, which is how the "
+          "missing navigation eventually gets taught")
+    check("KEKKAI" in pf, "a recognised rune puzzle is played")
+
+
+def test_the_game_settings_are_chosen_from_the_panel():
+    """Renderer, and server, via the settings the SITE already reads.
+
+    THREE ATTEMPTS AIMED AT THE WRONG LAYER, and the record matters because the
+    wasted work all looked plausible:
+
+      * patching `RufflePlayer.config.preferredRenderer` - lost, because a
+        per-load config overrides the global one
+      * wrapping the element's `load(options)` - did nothing, because the site
+        calls `player.load(swfUrl)` with a bare STRING
+      * that prototype wrap never applied at all
+
+    Measured throughout: the global said "webgl" while `loadedConfig` said
+    "wgpu-webgl", so asking for `canvas` still produced a WebGL2 context and
+    the operator correctly reported that nothing had changed.
+
+    The site has a gear icon for all of it - which FOCUS MODE HIDES, which is
+    why it was never seen - and its emulator page reads three localStorage keys
+    on every load. Writing one and reloading is the whole mechanism. Verified
+    live: renderMode=canvas gave `loadedConfig.preferredRenderer == "canvas"`
+    and a `2d` context, where every previous attempt stayed on webgl2.
+    """
+    print("\nthe game settings are chosen from the panel")
+    import app as app_mod
+    import browser as br
+    import dock as dock_mod
+
+    # --- the keys are the site's, and junk is refused --------------------
+    for k in ("renderMode", "gameQuality", "ns_server_index"):
+        check(k in br.GAME_SETTING_KEYS, f"{k} is a known game setting")
+    try:
+        br.write_game_setting(None, "notAKey", "x")
+        check(False, "an unknown setting key is refused")
+    except ValueError:
+        check(True, "an unknown setting key is refused")
+
+    # --- the offered renderers are the site's values ---------------------
+    keys = [r["key"] for r in app_mod.RENDERERS]
+    check("wgpu-webgl" in keys and "webgl" in keys and "canvas" in keys,
+          f"the site's own render values are offered ({keys})")
+    check(any("default" in r["label"] for r in app_mod.RENDERERS),
+          "and the site's default is labelled as such")
+    check(any("slow" in r["label"].lower() for r in app_mod.RENDERERS),
+          "canvas2d is labelled slow, which is why nobody would pick it blind")
+
+    # --- NOTHING is cached on our side ----------------------------------
+    # The site stores and reuses these itself; a second copy here would be a
+    # stale duplicate of the truth, which this project has been bitten by.
+    app_src = inspect.getsource(app_mod)
+    check("RENDERER_PATH" not in app_src,
+          "we keep no copy of the renderer choice - the site is the source "
+          "of truth and reads it on every load")
+    check("read_game_settings" in app_src,
+          "the panel shows what the GAME has stored")
+
+    # --- a write must be VERIFIED, not assumed ---------------------------
+    w = inspect.getsource(br.write_game_setting)
+    check("getItem" in w,
+          "the write reads the key back - an unverified write is how the last "
+          "attempt offered a switch that silently did nothing")
+
+    # --- applying reloads, and re-reads afterwards ------------------------
+    ap = inspect.getsource(app_mod.Runner._apply_game_setting)
+    check("relog()" in ap, "applying reloads, which is how the site picks it up")
+    check("_off_at" in ap and "focus_aligned" in ap,
+          "and clears the drift cache, since a different backend or host "
+          "redraws everything the hints describe")
+    check("reads back as" in ap,
+          "and warns if the setting did not survive the reload")
+
+    # --- both commands exist, keyed to the right storage -----------------
+    a = inspect.getsource(app_mod.Runner._apply)
+    for cmd, key in (('c == "renderer"', "renderMode"),
+                     ('c == "server"', "ns_server_index")):
+        i = a.find(cmd)
+        check(i != -1, f"the {cmd} command is handled")
+        check(key in a[i:i + 1400], f"and writes {key}")
+
+    # The server list comes from the GAME, not a hardcoded table that could
+    # drift from whatever the site actually offers.
+    check("_game.get(\"servers\")" in a or '_game.get("servers")' in a,
+          "the server list is read from the game's own array")
+
+    # --- the panel: two-press confirm on both, sharper words for server --
+    d = inspect.getsource(dock_mod)
+    for el in ("v_renderers", "v_rend_warn", "v_servers", "v_srv_warn"):
+        check(el in d, f"the panel has {el}")
+    check('send("renderer"' in d and 'send("server"' in d,
+          "and sends both commands")
+    check("armedRend" in d and "armedSrv" in d,
+          "each with its own two-press confirm")
+    i_srv = d.find("armedSrv = v.index")
+    check("different" in d[i_srv:i_srv + 700].lower(),
+          "and the server warning says it reconnects to a different host - "
+          "not just a graphics change")
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -4487,9 +4672,11 @@ def main():
                test_tp_pass_is_bounded_by_the_list_not_by_a_count,
                test_a_completed_tp_row_reflows_and_must_not_poison_its_slot,
                test_a_task_is_declared_in_exactly_one_place,
+               test_the_exam_rune_puzzle_needs_no_new_machinery,
                test_attach_with_no_browser_fails_fast,
                test_stop_comes_back_attached_by_itself,
                test_any_chromium_browser_will_do,
+               test_the_game_settings_are_chosen_from_the_panel,
                test_in_mission_asks_the_cheap_questions_first,
                test_a_looping_task_recovers_instead_of_pausing,
                test_the_games_render_bug_is_recognised_not_walked_through,

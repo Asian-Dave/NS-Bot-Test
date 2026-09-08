@@ -14,6 +14,7 @@ Three things it sets up, each for a measured reason:
   * a PINNED window size. Measured: text templates lose ~0.4 confidence at 8%
     scale error, so drifting geometry silently breaks detection.
 """
+import json
 import os, shutil, subprocess, sys, time, urllib.request
 
 # Chrome first, Chromium as fallback. On Linux both are usually on PATH.
@@ -149,6 +150,231 @@ def find_browser(explicit=None):
         f"  engine/app.py --browser /path/to/the/binary\n"
         f"Looked in: {', '.join(tried) or '(PATH only)'}"
     )
+
+
+
+# ---------------------------------------------------------------------------
+# WHICH RENDERER IS ACTUALLY LIVE — because a fallback is SILENT
+#
+# Ruffle picks a renderer at startup and never announces it. Its ladder is
+# `webgpu` -> `wgpu-webgl` -> `webgl` -> `canvas`, and `docs/BENCHMARK.md`
+# already records the failure that matters: without the right Chrome flags the
+# browser reports "WebGL1 blocklisted", WebGL is unavailable, and **Ruffle
+# drops to canvas2d without a word**.
+#
+# That is not a performance footnote for this bot. EVERY TEMPLATE AND EVERY
+# COLOUR THRESHOLD IN THIS PROJECT WAS CALIBRATED AGAINST ONE RENDERER. A
+# different one draws the same SWF with different filtering and antialiasing,
+# so a silent switch changes the pixels underneath a perception layer that has
+# no idea it happened - and the symptom is "the bot suddenly stopped
+# recognising things", with nothing in the log to explain it. A driver update
+# or a blocklist change is enough to trigger it.
+#
+# So: read it, log it, and say plainly when it is not what was asked for. The
+# probe cannot disturb anything - asking a canvas for a context it does not
+# have returns null rather than creating one.
+#
+# Ruffle 0.2 keeps its canvas inside the custom element's SHADOW ROOT, so a
+# document-level `querySelector('canvas')` finds nothing at all. That is why
+# the first version of this probe reported zero canvases on a perfectly
+# healthy page.
+RENDERER_PROBE = """
+(() => {
+  const out = {requested: null, live: null, where: null};
+  try {
+    const f = document.querySelector('iframe[src*="emulator"], iframe[src*="play"]');
+    const d = f ? f.contentDocument : document;
+    const w = f ? f.contentWindow : window;
+    // REPORT WHAT RUFFLE USED, not what we asked for. `loadedConfig` is the
+    // merged config the player actually loaded with; the global is only a
+    // default and echoing it back reported our own override as though it were
+    // the site's choice.
+    if (w && w.RufflePlayer && w.RufflePlayer.config)
+      out.global_pref = w.RufflePlayer.config.preferredRenderer || null;
+    const p = d && d.querySelector('ruffle-player');
+    if (!p) { out.where = 'no ruffle-player'; return JSON.stringify(out); }
+    const sr = p.shadowRoot;
+    const cv = sr ? sr.querySelector('canvas') : d.querySelector('canvas');
+    if (!cv) { out.where = 'no canvas yet'; return JSON.stringify(out); }
+    out.where = sr ? 'shadow root' : 'document';
+    out.size = [cv.width, cv.height];
+    try {
+      out.requested = (p.loadedConfig && p.loadedConfig.preferredRenderer) || null;
+    } catch (e) {}
+    for (const t of ['webgl2', 'webgl', '2d', 'bitmaprenderer']) {
+      try { if (cv.getContext(t)) { out.live = t; break; } } catch (e) {}
+    }
+  } catch (e) { out.where = 'error: ' + String(e).slice(0, 80); }
+  return JSON.stringify(out);
+})()
+"""
+
+# A live context of "2d" means Ruffle fell back to canvas2d. Everything the
+# perception layer believes was measured on a GL backend.
+GL_CONTEXTS = ("webgl2", "webgl")
+
+
+def renderer_info(cdp):
+    """What Ruffle was asked for and what it actually got. Never raises."""
+    try:
+        raw = cdp.evaluate(RENDERER_PROBE)
+        if not raw:
+            return {}
+        import json as _json
+        return _json.loads(raw)
+    except Exception:
+        return {}
+
+
+def describe_renderer(info):
+    """One log line, and whether it deserves a warning.
+
+    Returns (message, is_warning).
+    """
+    if not info:
+        return "renderer: could not be read", False
+    req, live, where = info.get("requested"), info.get("live"), info.get("where")
+    size = info.get("size")
+    if live is None:
+        return f"renderer: no canvas context yet ({where})", False
+    # The CONTEXT TYPE is a coarse signal: both `wgpu-webgl` and `webgl` draw
+    # through a WebGL2 context, so it separates GL from canvas2d and nothing
+    # finer. The backend actually in use comes from loadedConfig.
+    base = f"renderer: {req or 'unknown'}"
+    if live:
+        base += f" (context {live})"
+    if size:
+        base += f", canvas {size[0]}x{size[1]}"
+    if live not in GL_CONTEXTS:
+        return (base + " - THIS IS THE CANVAS2D FALLBACK. Every template and "
+                       "colour threshold here was calibrated on a GL backend, "
+                       "so matches may be off and the frame rate will be far "
+                       "lower. Check Chrome's WebGL blocklist.", True)
+    return base, False
+
+
+# ---------------------------------------------------------------------------
+# CHOOSING THE RENDERER
+#
+# Ruffle reads `preferredRenderer` when the player is CONSTRUCTED, and the site
+# assigns its own config first (measured: it asks for "wgpu-webgl"). So an
+# override has to be installed with `Page.addScriptToEvaluateOnNewDocument`,
+# which runs before page scripts, AND re-asserted on a short interval - because
+# the site's assignment lands after ours and would otherwise win.
+#
+# It only takes effect on the NEXT document, so switching means a reload. A
+# reload keeps the game session (only quitting the browser signs it out), so
+# this is safe, but it does drop to character select and the resume ladder has
+# to climb back.
+#
+# ASKING IS NOT GETTING. `webgpu` falls back where WebGPU is unavailable, and
+# `docs/BENCHMARK.md` records Chrome blocklisting WebGL and Ruffle dropping to
+# canvas2d silently. So always read `renderer_info` afterwards and report the
+# LIVE context rather than the request.
+RENDERER_BACKENDS = ("webgpu", "wgpu-webgl", "webgl", "canvas")
+
+# ---------------------------------------------------------------------------
+# THE GAME'S OWN SETTINGS — three localStorage keys, read on every load
+#
+# THREE ATTEMPTS AT THIS WERE AIMED AT THE WRONG LAYER, and the record is worth
+# keeping. Patching `RufflePlayer.config.preferredRenderer` lost, because a
+# per-load config overrides the global. Wrapping the element's `load(options)`
+# did nothing, because the site calls `player.load(swfUrl)` with a bare STRING.
+# And that prototype wrap never even applied. Measured throughout:
+#
+#     RufflePlayer.config.preferredRenderer  = "webgl"       <- our override
+#     player.loadedConfig.preferredRenderer  = "wgpu-webgl"  <- what Ruffle used
+#
+# so asking for `canvas` still produced a WebGL2 context and the operator
+# correctly reported that nothing had changed.
+#
+# The site already has a control for all of it - a gear icon beside the game,
+# which FOCUS MODE HIDES, which is why it was never seen. Its emulator page
+# reads, on every load:
+#
+#     const defaultRender  = isIOS ? 'webgl' : 'wgpu-webgl';
+#     const savedRender    = localStorage.getItem('renderMode')  || defaultRender;
+#     const savedQuality    = localStorage.getItem('gameQuality') || 'high';
+#     var   selected_server = parseInt(localStorage.getItem('ns_server_index') || '0', 10);
+#     const render         = urlParams.get('render') || savedRender;
+#
+# So a setting is ONE localStorage key plus a reload. No config patching, no
+# race with the site's own assignment, and the site caches and reuses it for
+# us - which is strictly better than keeping our own copy, because a second
+# copy would be a stale duplicate of the truth. This project has been bitten by
+# exactly that before: a cached belief about page state that a navigation
+# invalidated.
+#
+# GENERAL LESSON, and it cost three failed attempts: when a site already has a
+# control for something, FIND ITS CONTROL before reverse-engineering the
+# runtime. The operator naming the gear was the fastest step in the whole
+# investigation.
+#
+# The keys live in the page's origin and are SHARED with the game iframe.
+# `iframe.contentWindow.localStorage === window.localStorage` is FALSE - each
+# window gets its own Storage object - but the data is the same store, verified
+# by writing in one and reading it in the other. Do not use that identity
+# comparison as an origin test; it proves nothing.
+GAME_SETTING_KEYS = ("renderMode", "gameQuality", "ns_server_index")
+
+
+def read_game_settings(cdp):
+    """The game's stored settings, plus the server list it offers.
+
+    Returns {} on any failure - never a guess, because a wrong value here
+    would be shown to the operator as the current state.
+    """
+    src = """
+    (() => {
+      const out = {settings: {}, servers: [], selected_server: null,
+                   default_render: null};
+      try {
+        for (const k of %s) out.settings[k] = localStorage.getItem(k);
+      } catch (e) {}
+      try {
+        const f = document.querySelector('iframe[src*="emulator"], iframe[src*="play"]');
+        const w = f ? f.contentWindow : window;
+        // The server list is a plain var on the emulator page, so read the
+        // real one rather than hardcoding names that could drift.
+        out.servers = (w.servers || []).map((s, i) => ({
+            index: i, name: s.name || ("Server " + (i + 1)) }));
+        out.selected_server = (typeof w.selected_server === 'number')
+            ? w.selected_server : null;
+        out.default_render = w.isIOS ? 'webgl' : 'wgpu-webgl';
+      } catch (e) {}
+      return JSON.stringify(out);
+    })()
+    """ % json.dumps(list(GAME_SETTING_KEYS))
+    try:
+        raw = cdp.evaluate(src)
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+def write_game_setting(cdp, key, value):
+    """Store one setting the way the site's own gear does. True if it stuck.
+
+    Verified by reading the key back: a write that silently failed would leave
+    the operator believing a switch had been made, which is exactly the failure
+    this replaced.
+    """
+    if key not in GAME_SETTING_KEYS:
+        raise ValueError(f"unknown game setting {key!r}; "
+                         f"expected one of {GAME_SETTING_KEYS}")
+    src = """
+    (() => {
+      try {
+        localStorage.setItem(%s, %s);
+        return String(localStorage.getItem(%s));
+      } catch (e) { return "ERR " + String(e).slice(0, 60); }
+    })()
+    """ % (json.dumps(key), json.dumps(str(value)), json.dumps(key))
+    try:
+        got = cdp.evaluate(src)
+    except Exception:
+        return False
+    return got == str(value)
 
 
 def cdp_ready(port, timeout=1.5):
