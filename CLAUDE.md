@@ -2985,6 +2985,558 @@ frame**, which is how the navigation gets taught - the same trick that
 eventually solved the mission list, the between-turns battle, the seal-broken
 dialog and the Level Up panel.
 
+## THE HAND-SEAL GAME WAS NEVER FAILING TO MEMORISE — it clicked too early
+
+Five TP missions, zero banked, and the board explained it in one glance:
+`Skill : 1 / 4` with **all three hearts** after the bot had "played" a round.
+Nothing had been submitted, right or wrong.
+
+**THE CLICKS WENT OUT DURING THE LOOK PHASE.** The sequence is read while the
+slots display it, and in that phase the tiles are face up but GREYED - a click
+on a greyed tile does nothing. The reader went from "recorded 2 of 2 sign(s)"
+straight to clicking about two seconds later:
+
+    15:05:12  look phase: recorded 2 of 2 sign(s), in order
+    15:05:14  CLICK hand sign 0 = tile 1
+    15:05:15  CLICK hand sign 1 = tile 8
+              board still `Skill : 1 / 4`, three hearts
+
+`wait_input_phase` fixes it, and the size of the wait is the proof: measured
+live it blocks for **9 to 19 seconds** depending on the sequence length. The bot
+had been clicking two seconds in, every time.
+
+**IT CANNOT GATE ON `tiles_live` ALONE, AND THAT IS THE INTERESTING PART.**
+The blue-glove check is the right primary signal on wgpu, where greying drives
+the glove's blue fraction to exactly 0.000. On webgl it returns instantly and
+fixes nothing, because **webgl does not apply the grey-out filter at all** -
+the glove keeps its blue and the tiles read LIVE throughout the look phase.
+Independently measured on the skill slots, where webgl greying left saturation
+at 0.397..0.748 against 0.000 on wgpu. Greying is a COLOUR operation, and
+colour is what this backend renders differently.
+
+So the second signal is the SLOTS, which flip back to NINJA SAGA card backs
+when input opens - a different IMAGE, not a recolour, and therefore
+renderer-independent. Both must hold: on wgpu they agree, on webgl the
+always-true tiles check reduces the condition to the slot signal.
+
+### `d = 0.000` IS AMBIGUOUS, AND BOTH READINGS ARE WRONG ALONE
+
+The old check compared the filled slot against the memorised sign and called
+`d=0.000` a match. This file had already warned that zero means "nothing
+happened". **Both of those are half right, and that is why the HUD had to be
+read instead.** Two opposite outcomes produce exactly 0.000:
+
+    nothing happened   the slot is STILL showing the prompt we memorised, so
+                       we compared a crop with itself
+    a CORRECT pick     the slot now shows that seal drawn as slot art - the
+                       very rendering we memorised - identical for the right
+                       reason
+
+Measured both, in that order. So it is UNKNOWN and never decides a round.
+
+### THE BOARD'S OWN HUD IS THE VERDICT — hearts and the round counter
+
+`seals.hud_state` / `hud_verdict` read two anchor-relative boxes beside the
+"Skill :" HUD and answer the question the slot art cannot:
+
+    hearts dropped     a WRONG answer was submitted -> the clicks DID land
+    counter changed    the round advanced -> they landed and were right
+    neither moved      NOTHING was submitted -> they did not land
+
+**No digit recognition is needed**, which is the point: hearts are counted as
+red blobs (measured 2738..2742 area, 67x56, three of them) and the counter is
+compared as an IMAGE against the pre-answer snapshot. That sidesteps the digit
+exemplar problem entirely - see the kekkai section below for what happens when
+you do depend on reading digits. Verified against synthetic heart-loss and
+counter-change frames, plus a lobby frame for the unknown case.
+
+Only "advanced" counts as a played round now. Our own slot check is not
+allowed to decide it.
+
+## WHY IT SOMETIMES LOST HEARTS — the catalogue was never built
+
+With the clicks landing, the remaining failures correlated perfectly with one
+number. Measured over one mission, with the HUD as the verdict:
+
+| round | thinnest margin | board |
+|---|---|---|
+| 1 | 9.32x | advanced |
+| 2 | **1.01x** | HEART LOST |
+| 3 | 5.78x | advanced |
+| 4 | 3.85x | advanced |
+| 5 | **1.06x** | HEART LOST |
+
+Both failures were ~1.0x; everything at 2.6x or better was accepted. The bot
+memorises the sequence perfectly - what fails is mapping a seal drawn SMALL ON
+A SLOT CARD over animated flames to the same seal drawn LARGE IN A WOODEN
+FRAME. Two of the ten have near-identical blue-glove silhouettes, and on both
+failures the ink tiebreak was consulted and **agreed with the wrong answer**.
+
+`load_catalogue()` exists precisely to remove that guess - and it reads
+`ref/auto/tp/seal_catalogue/`, **a directory that had never been created.
+There was no builder.** So the catalogue was always empty, `identify()` always
+returned None, and every round fell through to the weak cross-rendering path.
+
+`engine/build_seal_catalogue.py` builds it from the 288 crops already on disk,
+by the method `load_catalogue`'s own docstring specifies:
+
+* split by CROP SIZE, not filename - 104x104 is tile art, 140x170 is slot art.
+  Sizes are a property of the thing; the filenames were written by several
+  different code paths and are not uniform.
+* cluster WITHIN each rendering, which is the strong direction. Both distance
+  distributions are bimodal with an EMPTY GAP, so the threshold is a
+  measurement: tile pairs 0.000..0.104 then nothing until 0.156. Tile gives 10
+  clusters for every threshold from 0.05 to 0.15 and slot gives 10 from 0.03 to
+  0.12, so neither balances on a knife edge.
+* link the two renderings ONCE by a one-to-one assignment on mean cross
+  distance. **One-to-one is the whole point**: nine seals link at 2.72x..12.97x,
+  and the tenth links at **0.95x - its runner-up is CLOSER than its
+  assignment** - so it is settled BY ELIMINATION, which is exactly the leverage
+  the live matcher lacks because it decides each sign independently.
+
+Validated: **429 harvested crops, 100% correct, 0 wrong, 0 unknown** from four
+medoid exemplars per seal per rendering. Then live:
+
+    round 1  [8, 0]                    advanced, 3 hearts
+    round 2  [9, 2]                    advanced, 3 hearts
+    round 3  [4, 5, 2, 8]              advanced, 3 hearts
+    round 4  [7, 2, 1, 4, 9, 3]        advanced, 3 hearts
+    round 5  [2, 5, 3, 6, 8, 7, 1, 9]  board closed - 5/5 done
+
+**Zero hearts lost**, where the same mission had been losing two. Catalogue
+margins run 5.72x..70.42x against the old 1.01x. Note round 5 was EIGHT signs:
+the sequence length was never the problem - "recorded 8 of 8 sign(s), in order"
+was already working.
+
+**A UNION-FIND BUG NEARLY HID ALL OF THIS.** The first clustering used path
+halving written as `lab[a] = lab[lab[a]]; a = lab[a]`, which does not settle on
+a single root, and the tell was that the cluster sizes SUMMED TO MORE THAN THE
+INPUT - 220 members from 208 crops. A partition whose parts do not sum to the
+whole is not a partition, and its cluster COUNT cannot be trusted either. It
+reported 9 slot clusters where there are 10.
+
+## A GUARD DEFEATED BY A LABEL — the fourth instance of one bug
+
+The bot span on one screen for about ten minutes: `resume: no anchor matched`
+reaching **streak 634** with no relog and no pause.
+
+`Runner.step` drives `Resumer.advance()`, which has no `max_unknown` of its own
+(only `Resumer.run()` does), so the runner bounds the streak itself - a guard
+added after 52 consecutive unrecognised cycles. It was then defeated by a
+diagnostic label:
+
+    self.state = info.get("step", out)        # "unknown" - the ladder's verdict
+    if self.state == "unknown":
+        self.state = self._name_screen() or "unknown"   # -> "seal_entry"
+    ...
+    if self.state == "unknown": self.unknown += 1 else: self.unknown = 0
+
+`_name_screen` deliberately recognises the TP minigame HUDs, so on a hand-seal
+board - a screen the ladder cannot climb from - the label came back non-unknown
+and **the counter reset to zero on every cycle**.
+
+This file's own rule names it: *a guard bounded by a counter is only as good as
+the event that CLEARS the counter; clear it on evidence of progress, never on
+something merely correlated.* Now the ladder's own verdict is captured BEFORE
+anything relabels it, so naming a screen for the operator can no longer be
+mistaken for making progress on it.
+
+Previous instances, for the pattern: reset on reaching the lobby (a relog
+always does), reset on a task returning (a swallowed crash also does), reset on
+a lap that banked nothing. This is the fourth.
+
+## THE KEKKAI DIGIT READER DEPENDS ON THE MISSING TEXT STROKE
+
+The kekkai stops after guess 1 - "the first 3 choices", i.e. the three rune
+clicks - with:
+
+    could not read row 0 (green 0.410 / gold 0.897)
+      at green=(1997, 292) gold=(2083, 292)
+
+**The geometry is correct.** Overlaid on the saved frame, those coordinates land
+exactly on the green "0" and gold "1" feedback discs. The solver is fine too.
+What fails is reading the digits, and the reason is the same as everything else
+on this backend.
+
+`digit_mask` binarises BRIGHT pixels, because on wgpu the glyph is a dark digit
+with a WHITE OUTLINE and thresholding bright pixels captures that outline.
+**webgl draws no outline**, so:
+
+    green disc (dark)    bright fraction 0.08 - the "0" vanishes entirely and
+                         only the disc's specular highlight survives
+    gold disc (light)    bright fraction 0.375 - the DISC is white and the "1"
+                         is a dark HOLE in it
+
+Measured inside the discs, the ink is cleanly separable - green p1=17 against a
+disc body of 112, gold p1=28 against 198 - so a DARK-INK mask would work on
+both backends, since the ink is dark in both. The obstacle is not the idea:
+
+**every existing exemplar is stored as a white-outline MASK** (bright fractions
+0.24 green / 0.46 gold), so changing the mask function invalidates the whole
+set, and the raw crops they came from were never kept. Re-deriving them needs
+fresh captures of each digit on each disc. Not attempted here rather than
+half-done, and note this file's existing warning that normalising the two forms
+was tried and measured WORSE.
+
+Until then the reader refuses to guess and saves evidence - and it now saves
+**the whole frame plus the coordinates it used**, not just the two 68x68 crops.
+That mattered: the crops alone showed one near-solid black square and one white
+SPIRAL, which is a rune glyph, and nothing in a binarised 68x68 crop says
+whether the reader was misreading a digit or looking in the wrong place. The
+full frame answered it in one look.
+
+## STILL OPEN after all of the above
+
+* **the TP Success panel's check reads 0.609** against `green_check`'s 0.80
+  gate, so a played mission is not acknowledged and nothing banks. The same
+  glyph dismisses the FARM's Mission Success at 0.970 on the same backend, so
+  the template is not broken in general. The panel is transient and escaped
+  capture twice, so `tp.py` now SAVES IT when the check is not located.
+* **the kekkai digit exemplars**, above.
+
+## AN ACCIDENTAL SCROLL MUST NOT MOVE THE GAME — lock it in the PAGE
+
+The operator: "sometimes I accidentally scroll down which causes some kind of
+behaviour bug". It does, and this file already explains why - every minigame's
+geometry is ABSOLUTE, so a displaced game breaks all of them at once and each
+one reports a fault in its own subsystem. Measured previously: scrollY 60 put
+the game at **-236 captured px** and the memory board's rows measured -237 out.
+
+`__nsbotAlign` already put the scroll back, but it is only called from
+`ensure_focus`, which runs BETWEEN CYCLES - and a mission blocks for minutes.
+So an accidental scroll during a mission stood for the whole of it.
+
+**The fix belongs in the page**, for the same reason the panel's heartbeat does:
+Python is not there to notice. `__nsbotScrollLock` layers three mechanisms,
+because each catches what the others miss:
+
+    1. html,body{overflow:hidden !important}   removes the scroll rather than
+                                               reacting to it, and an
+                                               !important stylesheet beats the
+                                               site's inline styles
+    2. a `scroll` listener that snaps to 0     catches whatever still scrolls -
+                                               keyboard, the site's own script,
+                                               a focus() on some element.
+                                               `scroll` cannot be prevented,
+                                               only undone
+    3. wheel/touchmove preventDefault          stops the gesture before it
+                                               scrolls, so there is no visible
+                                               jump-and-snap
+
+Verified live, all four behaviours at once:
+
+    scrollTo(0, 400)                  -> snapped back, scrollY 0, snaps 1
+    a real wheel via Input.dispatch   -> scrollY stayed 0, nothing to undo
+    a five-event flick                -> scrollY stayed 0
+    the dock's own log pane           -> still scrolls (0 -> 40)
+
+**THE PANEL'S LOG PANE MUST STAY SCROLLABLE**, so layer 3 exempts any event
+inside the dock; layer 1 cannot affect it, being `position:fixed` with its own
+scroller. **KEYS ARE DELIBERATELY NOT BLOCKED** - this is a Flash game and the
+SWF may want them; a swallowed keystroke would be a new bug to chase, and
+layer 2 covers a keyboard scroll after the fact.
+
+**IT RIDES WITH FOCUS MODE, and that is a correctness decision rather than a
+convenience.** With focus ON the game is pinned at scrollY 0 and any scroll is
+an accident. With focus OFF the bot SCROLLS ON PURPOSE - `Capture.scroll_game`
+is the documented fallback for reaching an anchor in the hidden 119 px band,
+and the resume ladder alternates the scroll before calling a frame
+unrecognised. Locking there would break the one path that needs it.
+(`scroll_game` already no-ops under focus mode, so nothing else changed.)
+
+`align()` re-asserts the lock every cycle because a reload drops the injected
+style and its listeners - the standing rule that any cached belief about page
+state is invalidated by a navigation. Snaps are COUNTED and the count is read
+from the page, so an accidental wheel becomes a log line -
+`scroll: 1 accidental scroll(s) snapped back (the game did not move)` - instead
+of a mystery drift. It is pure DOM, so it behaves identically on every backend.
+
+## TP UNDER webgl — one variant, and the rest was already fine
+
+Tested end to end on webgl. Only `special_tab` needed recutting (0.795 against
+its 0.88 gate); everything else on the TP path held:
+
+    Special tab       1.000  (the new variant)
+    TP Training row   0.998
+    TP list           3 rows found at y=[462, 638, 818]
+    minigame classify seal_entry {'seal_hud': 0.998}, cards {'cards_hud': 0.986}
+    hand-seal round 1 sign 0 -> tile 2 (margin 6.63x), sign 1 -> tile 1 (10.58x)
+    memory cards      20/20 cells cleared BY THE GAME, 40.1 s
+
+So the blue-glove sign matcher and the mean-HSV card signature both survive the
+backend change - the two hardest pieces of perception in the project, and
+neither needed touching. Note `tp_training_row` measured 0.282 on the Mission
+Room screen, which is a CORRECT NEGATIVE (it lives on the TP list, not there) -
+scoring a template on a screen that does not contain it proves nothing, and
+doing so once already produced five bogus "broken" verdicts in one pass.
+
+Two things stop TP, and NEITHER is a rendering fault:
+
+* **the hand-seal round 2 PARKS** - "no Start, and the tiles are already live".
+  That is the open issue this file already records ("the slot row is both the
+  prompt AND the input"): by the time the bot looks, the round is in its INPUT
+  phase and the sequence is gone. The bot correctly refuses to click at random.
+  Worth noting the timing - round 1 finished at 14:45:17 and the bot looked at
+  14:45:20, which is `play()`'s 2.5 s inter-round sleep. Whether the reveal
+  happens inside that window is UNMEASURED; the experiment is to burst-capture
+  straight through a round transition rather than sleeping and then looking.
+* **the TP Success panel's check read 0.609** against `green_check`'s 0.80 gate,
+  so the reward was not acknowledged ("Success panel cleared but the village
+  did not come back; not calling this a success"). The same `mission_start`
+  glyph dismissed the FARM's Mission Success at 0.970 on the same backend
+  minutes earlier, so the template is not broken in general - this particular
+  panel is either drawing the check outside the 0.95..1.95 sweep or drawing it
+  differently. Unmeasured, because the panel was gone before it could be
+  captured and reaching it again costs a TP mission from the day's list.
+
+### A STALE LOG NEARLY PRODUCED A WRONG DIAGNOSIS, again
+
+While reading the above, `farm` lines appeared to be interleaved with a running
+TP task, which would have been a serious bug - two tasks acting at once. They
+were not. `run/app.log` is APPENDED ACROSS SESSIONS, and the farm lines sat at
+line ~12095 while the session being read started at line 15593: same wall-clock
+times, different days.
+
+This file already warns about exactly this ("check `ls -l run/app.log` against
+the clock before trusting it"). The warning is not enough on its own, because
+the trap is not a stale FILE - it is stale lines inside a live file. **Anchor
+the read to a line number**, e.g. the session's own startup line, and filter
+from there. Timestamps alone cannot separate sessions.
+
+## THE BACKEND CHANGES THE PIXELS — one template set is not enough
+
+The operator switched to `webgl` and the farm could not leave the village.
+Measured live, same session, same screen, minutes apart, only `renderMode`
+changed:
+
+| anchor | wgpu-webgl | webgl | canvas |
+|---|---|---|---|
+| `mission_room_entry` | **0.997** | 0.531 | - |
+| `char_slot_level` | **0.965** | 0.677 | 0.678 |
+| `character_select` | 0.865 | 0.442 | 0.436 |
+| `result_panel` | **1.000** | 0.341 | - |
+| `mission_success` | **1.000** | 0.418 | - |
+| `lobby_logo`, `nav_*` | 0.93..1.00 | 0.95..1.00 | - |
+
+**THE SPLIT IS NOT "LEGACY WEBGL IS BROKEN".** `webgl` and `canvas` agree with
+each other to **0.001** and both disagree with the wgpu backend. wgpu draws
+text WITH its stroke; the other two draw a thinner, unstroked face at a
+different baseline, and shift some element colours (a gold button beside the
+Mission Room plaque renders purple). Everything that is not text is
+**pixel-identical** - mean |diff| 3..7 across the plaque, with the whole
+difference confined to the text rows.
+
+So every template in this project is calibrated against the OUTLIER, and one
+variant set serves both of the others.
+
+    icons survive     nav_*, lobby_logo, the command discs, the green check
+    text does not     any crop whose discriminating content is lettering
+
+**A LOWER THRESHOLD CANNOT FIX IT.** `mission_room_entry` at 0.531 sits INSIDE
+the negative distribution - other anchors read 0.39..0.53 on the same frame -
+so a lower gate buys false positives, not recognition.
+
+### `tpl/<renderer>/<name>.png` overrides the default crop
+
+`perceive.set_renderer(name)` is module state, set once from
+`browser.renderer_info()["requested"]` - **`loadedConfig`, never the canvas
+context type**, which cannot tell `wgpu-webgl` from `webgl` because both draw
+through WebGL2. `load_templates` and `perceive.template` then prefer
+`tpl/<renderer>/`, and the log says which were substituted, because a silently
+swapped template is indistinguishable from a mis-cut one when a match later
+goes wrong.
+
+Six variants take the farm from "cannot leave the village" to a mission banked
+end to end on webgl (3 battles, 2 victories, closed out to the lobby):
+`character_select`, `char_slot_level`, `play_btn`, `mission_room_entry`,
+`result_panel`, `mission_success`. Everything else - `grade_tab`, `page_next`,
+`mission_row`, `mission_start`, `cutscene_continue`, the command bar,
+`action_flag`, the HP bars - held with no variant at all.
+
+**THE MECHANISM WAS INERT AT FIRST, AND THE LOG SAID IT WAS WORKING.**
+`load_templates` was swapping crops correctly and printing "4 recut for
+webgl", while the running bot logged `could not reach the grade panel` on every
+lap - because **nine live sites built `Template(name, "tpl/<name>.png")`
+directly** and never went near `load_templates`:
+
+    farm._tpl   minigame._tpl   tp._tpl   cards._HUD
+    kekkai_play (x3)   seals (x2)
+
+Measured at the time: the variant scored **1.000 on ten fresh lobby frames**
+while the bot could not see it. `perceive.template` is now the only way to
+build a template by name, and the suite greps all nine modules for a bare
+`tpl/` path. This is "one coordinate space, or none" in a new costume - a
+mechanism that covers only some of its call sites is the half-applied
+correction this file already has a rule about.
+
+### Recutting: `engine/recut.py`, and why the naive cut is useless
+
+**Cut the same region out of a webgl frame and you get a template that matches
+its own frame at 1.000 and false-positives everywhere.** `mission_room_entry`:
+self 1.000, worst negative **0.907** against an 0.88 gate. Strip the stroked
+text out of that plaque and what remains is smooth pale pink, and a
+low-variance template correlates with any large smooth region - the same trap
+as `close_popup_x_large` ("flat 0.547 at every scale. Bad crop") and the
+flood-filled digit masks.
+
+The cure is to give the crop back STRUCTURE by expanding into surrounding art,
+and the expansion is measured, never guessed:
+
+    pad     0   self 1.000   worst-neg 0.907    unusable
+    pad    20   self 1.000   worst-neg 0.780    unusable
+    pad    40   self 1.000   worst-neg 0.665    chosen
+    pad   140   self 1.000   worst-neg 0.475
+
+**EXPAND SYMMETRICALLY.** The match centre is what gets CLICKED, so an
+asymmetric crop silently moves every click that anchor drives. The tool
+asserts the centre does not move, and the suite pins the structural invariant:
+a variant is the default's size plus EQUAL, EVEN padding on both axes.
+
+Acceptance is calibrated to the company these anchors keep - every margin in
+this file sits between 0.37 and 0.66 - so negatives must stay at or below
+`threshold - 0.18` with at least 0.30 of separation. **A first version scored
+`self - max(neg, threshold)`, which is a CONSTANT whenever negatives are below
+the gate; every expansion reported "+0.120" and nothing could ever qualify
+while pad 0 was in fact fine.**
+
+### A DETECTOR-ONLY ANCHOR NEED NOT BE SYMMETRIC — but constrain the search
+
+`result_panel` defeated symmetric expansion outright: every pad from 0 to 140
+left its best negative between 0.70 and 0.85, because the banner is a large
+flat parchment strip and expanding only adds more parchment.
+
+Symmetry is only needed because a centre gets clicked, and `result_panel`'s
+does not - `resume.py` uses it as a rung ANCHOR whose clicked target is
+`mission_start`, and this file already records that the panel body is not a hit
+area (a Victory absorbed **eleven** clicks at the canvas centre). So
+`recut.py free` searches sub-windows, behind a required `--no-click-anchor`
+acknowledgement.
+
+**ITS FIRST ANSWER WAS A TRAP, AND THE SCORE LOOKED GREAT.** Searching a band
+around the centre, it picked a window that was **not the panel at all**: the
+team badge reading `0/2` plus sky and cloud art from above the banner, at a
++0.576 separation. Two faults in one crop:
+
+* it contains a **counter**, and an anchor must not contain the thing that
+  varies - the same mistake `tp_seal_hud` was re-cut for;
+* it would match in ANY battle, so it does not detect the state it is named
+  after.
+
+It scored well because **the negatives are all wgpu frames** and that HUD
+renders differently there - a separation earned against the wrong question.
+Candidates are now constrained to sub-rectangles OF THE DEFAULT TEMPLATE, so
+every crop is structurally a piece of the anchor - the property a score cannot
+check for itself. The accepted crop is the letters `tory` from "Victory!",
+self 1.000, worst negative 0.576, separation +0.424.
+
+**General limit, and it bounds everything above: calibrating a variant for
+backend X really wants NEGATIVES rendered by backend X.** The committed `ref/`
+frames are wgpu. For a crop dominated by art that is fine, since the art is
+identical between backends; for anything else the false-positive bound is
+weaker than it looks. `ref/auto/renderer/` holds the webgl fixtures harvested
+so far and is excluded from the negative set, because scoring a positive as a
+negative rejects every crop.
+
+### The cross-check that must never be skipped
+
+A Victory must not bank a success. Measured on webgl frames of both panels,
+both directions:
+
+| webgl templates | webgl Victory | webgl Mission Success |
+|---|---|---|
+| `result_panel` | **1.000** | 0.524 |
+| `mission_success` | 0.244 | **1.000** |
+
+### Mission Success unrecognised = the fifth "negative definition" bug
+
+Before its variant existed, a completed mission left "Mission Success!" on
+screen at 0.418, so `looks_like_mission_scene` found nothing to veto with and
+the runner TRAVERSED on top of the reward panel - 13 dead ends, while
+`find_character` locked onto the panel's red stamina icon at a byte-identical
+`(1567, 699)` every pass. The mission had actually succeeded (3900 gold,
+99892 XP on screen).
+
+That is this file's recurring shape for the fifth time - mission list,
+battle-between-turns, seal-broken dialog, Level Up, and now a result panel
+under a different renderer. **A byte-identical detector coordinate across
+passes is always a static object, never a character.**
+
+### A SATURATION GATE IS PER-RENDERER TOO — and webgl has no calibration
+
+Template variants fix template anchors. They do nothing for the detectors that
+read COLOUR, and `combat.slot_cooling` is one: it asks what fraction of a skill
+tile's interior clears a saturation threshold. Measured on the committed
+refusal frames:
+
+    wgpu-webgl    cooling 0.000  0.000  0.000        ready 0.905
+    webgl         0.397 .. 0.748 (used slots)        0.865 .. 0.904
+
+wgpu is cleanly bimodal, which is what the 0.25 gate was calibrated against.
+On webgl, greying does NOT drive the tile to zero saturation - the readings run
+continuously, exactly as this file already records for the FIRST saturation
+attempt ("56..191 continuously, with a pale slot reading 56 while fully
+ready").
+
+**With the wgpu gate applied, all four webgl tiles read READY - including the
+slot that had just visibly refused.** So the bot clicks a cooling skill and
+pays a full ~6 s resolve timeout for it, twice a turn. Observed live:
+`S1 timed out`, `S3 timed out`, `2 actions did not resolve` inside one turn,
+with turn gaps of 6.7..10.4 s.
+
+So `COOLING_GATES` is keyed by backend, `wgpu-webgl` keeps the measured 0.25,
+and **an uncalibrated backend returns None (UNKNOWN)** rather than a confident
+wrong answer. The caller already offers an UNKNOWN slot anyway, so behaviour is
+unchanged - the difference is that the log stops claiming a greyed slot is
+ready. A renderer of `None` keeps the historical path exactly, so every offline
+tool and test is untouched.
+
+**WHY IT IS NOT SIMPLY RE-CALIBRATED.** It looks like a gate near 0.80 would
+separate the webgl readings, and that is a trap. All EIGHT webgl refusal frames
+harvested over 21 minutes read S1=0.748 S2=0.904 S3=0.397 S4=0.865 - identical
+to three decimals - because the rotation is always S1 S3 S4 S5, so the same
+slots are cooling at the same point of every turn. That is ONE battle state
+sampled eight times, with ~0.05 of margin, and S4's true status is inferred
+rather than known: the filename only names the slot that refused. Calibrating
+from it would repeat the mistake this file records about the OpenCV thread
+sweep - "before trusting a measurement, check that the knob you turned is
+connected to anything", and its cousin, that a suspiciously constant reading is
+usually not data.
+
+To calibrate properly, harvest frames where every slot's state is KNOWN - drive
+a rotation that leaves some slots deliberately unused, and record the expected
+state alongside each frame.
+
+**A TEST THAT PASSED FOR THE WRONG REASON, exposed by this.** The greyed-skill
+test globbed `ref/auto/battle/cooldown_msg_*.png` and applied ONE battle's slot
+expectation to every frame it matched. `_keep_failed_frame` WRITES NEW FRAMES
+DURING LIVE PLAY, so the moment webgl runs harvested six more, the test began
+asserting one battle's states about a different battle on a different backend,
+and failed. A fixture set that grows at runtime cannot carry a hardcoded
+expectation - the two calibrated frames are now named explicitly.
+
+### `webgpu` never came up
+
+Asking for `webgpu` produced no canvas at all on this machine ("shadow root",
+no context), so it is untested rather than broken. `canvas` works and renders
+text like `webgl`, at a 2d context.
+
+### Performance was never the reason to switch
+
+The operator wanted `webgl` because it is the lightest backend. Measured rAF
+in the game's own frame, one clean pass per document:
+
+    webgl        119.7 fps
+    wgpu-webgl   119.9 fps
+
+Both pinned to the display refresh, matching `docs/BENCHMARK.md` (120 fps,
+188x GL headroom, against a 24 fps SWF). There is no render-intensity
+difference to buy here - the bot now works on both, so the choice is free.
+
+**`renderer_ab.measure_fps` IS NOT SAFE TO CALL TWICE on one document.** It
+installs a fresh rAF chain per call without cancelling the previous one and
+they all increment the same counter: three calls read 119.6 / 239.3 / 359.8.
+The A/B harness only escapes it because each backend is preceded by a reload.
+
 ## THE GAME'S OWN SETTINGS — and three attempts aimed at the wrong layer
 
 The operator wanted to switch Ruffle's render backend from the panel, because

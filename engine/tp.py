@@ -67,6 +67,7 @@ from act import Actor, Controls
 from capture import Capture
 from cdp import CDP, find_page_target
 from perceive import Template, find
+import perceive
 
 # Mission name -> family. Kept as substrings so it survives minor renames.
 FAMILIES = {
@@ -105,8 +106,9 @@ class _Log:
 
 
 def _tpl(name, thr=0.88, scales=None):
-    t = Template(name, os.path.join(ROOT, "tpl", f"{name}.png"), threshold=thr)
-    if scales:
+    # See the note in farm._tpl: renderer variants apply here too.
+    t = perceive.template(name, threshold=thr)
+    if t is not None and scales:
         t.scales = scales
     return t
 
@@ -540,6 +542,33 @@ def close_out(actor, cap, log, timeout=45):
                     return True
             else:
                 log.info("Success panel up but its check was not located (%.3f)", c)
+                # SAVE THE FRAME THAT DEFEATED US.
+                #
+                # This is the last thing standing between a played TP mission
+                # and a banked one, and it had already escaped capture twice:
+                # the panel is transient, so by the time an operator or a
+                # second client reacts, the pass has moved on and the screen is
+                # gone. Every unrecognised screen in this project turned out to
+                # be one anchor away from handled - the hard part was always
+                # CATCHING the frame, so catch it here where it is certain.
+                #
+                # Bounded, and it stops once there is something to compare
+                # against: the point is one good frame, not a pile of them.
+                try:
+                    d = os.path.join(ROOT, "ref/auto/tp")
+                    os.makedirs(d, exist_ok=True)
+                    n = len([f for f in os.listdir(d)
+                             if f.startswith("success_check_missing")])
+                    if n < 3:
+                        p2 = os.path.join(
+                            d, f"success_check_missing_{int(time.time())}.png")
+                        cv2.imwrite(p2, cap.frame(gray=False))
+                        log.info("saved the panel to %s - the check glyph needs "
+                                 "measuring on it (green_check sweeps "
+                                 "0.95..1.95 at a 0.80 gate)",
+                                 os.path.relpath(p2, ROOT))
+                except Exception as e:
+                    log.warning("could not save the Success panel: %s", e)
         elif seen:
             # THE PANEL BEING GONE IS NOT THE SAME AS BEING BACK IN THE VILLAGE.
             # CLAUDE.md records the false-success bug this exact shape caused for

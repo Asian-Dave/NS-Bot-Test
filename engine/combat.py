@@ -242,13 +242,56 @@ COOLING_FRAC = 0.25       # ready measured 0.905, cooling 0.000
 COOLING_BOX = (38, 42, 30)   # half-width, up from centre, down from centre
 
 
-def slot_cooling(frame_bgr, centre):
+# THE GATE IS PER-RENDERER, because greying is not the same operation on every
+# Ruffle backend. Measured on the committed refusal frames, `frac(sat > 60)`
+# inside the tile interior:
+#
+#     wgpu-webgl    cooling 0.000 0.000 0.000     ready 0.905
+#     webgl         0.397 .. 0.748 (refusing)     0.865 .. 0.904
+#
+# wgpu is cleanly bimodal, which is what the 0.25 gate was calibrated against.
+# On webgl greying does NOT drive the tile to zero saturation; the values run
+# continuously and overlap the ready ones - precisely the situation this
+# project already recorded for the first saturation attempt ("56..191
+# continuously, with a pale slot reading 56 while fully ready").
+#
+# So webgl is deliberately NOT given a gate. Two cooling samples cannot
+# calibrate a threshold, and the alternative is worse than useless: with the
+# wgpu gate applied, all four webgl tiles read READY - including the slot that
+# had just visibly refused - so the bot clicks a cooling skill and pays a full
+# ~6 s resolve timeout for it, twice a turn. An UNKNOWN sends the caller back
+# to rotate-on-resolve, which is merely slower.
+#
+# `None` for the renderer keeps the historical behaviour exactly, so every
+# offline tool and test is unaffected.
+COOLING_GATES = {"wgpu-webgl": COOLING_FRAC}
+
+
+def cooling_gate(renderer=None):
+    """The gate for this backend, or None when it has not been calibrated."""
+    if renderer is None:
+        try:
+            import perceive
+            renderer = perceive.get_renderer()
+        except Exception:
+            renderer = None
+    if not renderer:
+        return COOLING_FRAC          # unchanged, historical behaviour
+    return COOLING_GATES.get(renderer)
+
+
+def slot_cooling(frame_bgr, centre, renderer=None):
     """Is the skill at `centre` greyed out (cooling)? True / False / None.
 
-    None means the tile could not be sampled - off-frame or degenerate - and a
-    caller must treat that as UNKNOWN, never as ready or cooling.
+    None means UNKNOWN and a caller must never read it as ready or cooling.
+    Three ways to get it: the tile could not be sampled (off-frame or
+    degenerate), no frame was given, or THIS RENDERER HAS NO CALIBRATION - see
+    `COOLING_GATES`.
     """
     if frame_bgr is None or centre is None:
+        return None
+    gate = cooling_gate(renderer)
+    if gate is None:
         return None
     dx, up, down = COOLING_BOX
     cx, cy = int(centre[0]), int(centre[1])
@@ -259,7 +302,7 @@ def slot_cooling(frame_bgr, centre):
         return None
     box = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
     frac = float((box[:, :, 1] > COOLING_SAT).mean())
-    return frac < COOLING_FRAC
+    return frac < gate
 
 
 # ---------------------------------------------------------------------------

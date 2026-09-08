@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import sys
+import textwrap
 import time
 
 import cv2
@@ -3767,18 +3768,54 @@ def test_a_greyed_skill_is_never_clicked():
 
     # S2 was the only coloured tile; S1, S3 and S4 were grey with 7, 22 and 10
     # printed on them.
+    #
+    # THE EXPECTATION BELONGS TO THE FRAMES IT WAS MEASURED ON, not to whatever
+    # the glob happens to match. `_keep_failed_frame` writes new refusal frames
+    # during live play, and once the operator switched to webgl it harvested
+    # six more - so this loop started asserting one battle's slot states about
+    # a different battle on a different renderer, and failed. A fixture set
+    # that GROWS at runtime cannot carry a hardcoded expectation.
     expect = {"S1": True, "S2": False, "S3": True, "S4": True}
     centres = {"S1": 1232, "S2": 1340, "S3": 1445, "S4": 1552}
+    CALIBRATED = ("cooldown_msg_S1_1788358748.png",
+                  "cooldown_msg_S3_1788358754.png")
+    seen = 0
     for path in frames:
+        if os.path.basename(path) not in CALIBRATED:
+            continue
         img = cv2.imread(path)
         if img is None:
             continue
+        seen += 1
         for slot, want in expect.items():
-            got = combat.slot_cooling(img, (centres[slot], 964))
+            got = combat.slot_cooling(img, (centres[slot], 964),
+                                      renderer="wgpu-webgl")
             check(got is want,
                   f"{os.path.basename(path)[:22]} {slot}: "
                   f"{'cooling' if got else 'ready'} (wanted "
                   f"{'cooling' if want else 'ready'})")
+    check(seen == len(CALIBRATED),
+          f"both calibrated wgpu frames are present ({seen}/{len(CALIBRATED)})")
+
+    # AND AN UNCALIBRATED BACKEND MUST SAY UNKNOWN, NOT GUESS.
+    #
+    # Measured on the webgl refusal frames, frac(sat > 60) inside the tile:
+    #
+    #     wgpu    cooling 0.000        ready 0.905      cleanly bimodal
+    #     webgl   0.397, 0.748         0.865, 0.904     continuous
+    #
+    # With the wgpu gate applied, ALL FOUR webgl tiles read READY - including
+    # the slot that had just visibly refused - so the bot clicks a cooling
+    # skill and pays a ~6 s resolve timeout, twice a turn. That is a confident
+    # wrong answer where this project's rule is to fail safe to unknown.
+    img = cv2.imread(frames[0])
+    for slot, cx in centres.items():
+        check(combat.slot_cooling(img, (cx, 964), renderer="webgl") is None,
+              f"webgl is uncalibrated, so {slot} reads UNKNOWN rather than ready")
+    check(combat.cooling_gate("wgpu-webgl") == combat.COOLING_FRAC,
+          "the calibrated backend keeps its measured gate")
+    check(combat.cooling_gate(None) == combat.COOLING_FRAC,
+          "and no renderer at all keeps the historical behaviour exactly")
 
     # FAIL SAFE TO UNKNOWN, never to a decision.
     img = cv2.imread(frames[0])
@@ -4627,6 +4664,381 @@ def test_the_game_settings_are_chosen_from_the_panel():
           "and the server warning says it reconnects to a different host - "
           "not just a graphics change")
 
+
+def test_a_template_is_recut_per_renderer_where_the_backend_differs():
+    """The same SWF does not draw the same pixels on every Ruffle backend.
+
+    Measured live, same session, same screen, minutes apart, only `renderMode`
+    changed:
+
+        mission_room_entry   wgpu-webgl 0.997   webgl 0.531   (gate 0.88)
+        char_slot_level      wgpu-webgl 0.965   webgl 0.677   canvas 0.678
+        character_select     wgpu-webgl 0.865   webgl 0.442   canvas 0.436
+        play_btn             (on Play)  0.878   webgl 0.878   -> variant 1.000
+        result_panel         wgpu       1.000   webgl 0.341
+
+    THE SPLIT IS NOT "LEGACY WEBGL IS BROKEN". webgl and canvas agree with each
+    other to 0.001 and both disagree with wgpu, which draws text WITH its
+    stroke where the other two draw a thinner unstroked face at a different
+    baseline. Every template here was cut against wgpu-webgl, so this project
+    is calibrated against the outlier - and one variant set serves both of the
+    others.
+
+    Under webgl the farm could not leave the village at all: 0.531 sits INSIDE
+    the negative distribution (other anchors read 0.39..0.53 on that frame), so
+    no threshold tuning recovers it.
+    """
+    print("\na template is recut per renderer where the backend differs")
+    import perceive as p
+    import json as _json
+
+    cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
+
+    class _L:
+        def __init__(self):
+            self.lines = []
+
+        def info(self, m, *a):
+            self.lines.append((m % a) if a else m)
+        warning = error = info
+
+    def _paths(renderer):
+        p.clear_renderer()
+        if renderer:
+            p.set_renderer(renderer)
+        log = _L()
+        t = p.load_templates(cfg, log)
+        return {n: os.path.relpath(x.path, ROOT) for n, x in t.items()}, log.lines
+
+    try:
+        base, base_log = _paths(None)
+
+        # --- an unset or unknown renderer changes NOTHING ------------------
+        for r in (None, "no-such-backend"):
+            got, _ = _paths(r)
+            check(got == base,
+                  f"renderer {r!r}: the default crops stand unchanged")
+
+        # --- the variants that exist win, and only for their own name -----
+        var_dir = os.path.join(ROOT, p.VARIANT_DIR, "webgl")
+        have = sorted(f[:-4] for f in os.listdir(var_dir)
+                      if f.endswith(".png")) if os.path.isdir(var_dir) else []
+        check(bool(have), f"webgl variants exist: {have}")
+        got, lines = _paths("webgl")
+        swapped = sorted(n for n in got if got[n] != base.get(n))
+        check(swapped == have,
+              f"exactly the {len(have)} variant(s) are swapped in, nothing else")
+        check(any("recut for webgl" in l for l in lines),
+              "the log SAYS which templates were substituted")
+
+        # A silently substituted template is indistinguishable from a mis-cut
+        # one when a match later goes wrong.
+        for n in have:
+            check(os.path.join("tpl", "webgl", n + ".png") == got[n],
+                  f"{n} loads from tpl/webgl/")
+
+        # --- the variant DIRECTORY is never a template in its own right ---
+        check("webgl" not in got, "tpl/webgl/ is not itself loaded as a template")
+
+        # --- a typo'd variant filename would silently do nothing ----------
+        for n in have:
+            check(os.path.exists(os.path.join(ROOT, "tpl", f"{n}.png")),
+                  f"variant {n} names a real default template")
+
+        # --- A VARIANT MUST NOT MOVE THE CLICK ----------------------------
+        #
+        # The match CENTRE is what gets clicked, so a variant may only differ
+        # from its default by EQUAL, EVEN padding on both axes - that is what
+        # `recut.py` produces and what keeps the centre put. An asymmetric
+        # recut would shift every click that anchor drives, silently, which is
+        # the half-applied coordinate correction this project already paid for.
+        #
+        # A DETECTOR-ONLY anchor is exempt, because nothing clicks its centre -
+        # but the exemption is VERIFIED against resume.py rather than trusted:
+        # such a rung must name a different `target=` to click.
+        rsrc = open(os.path.join(ROOT, "engine", "resume.py")).read()
+        for n in have:
+            d = cv2.imread(os.path.join(ROOT, "tpl", f"{n}.png"))
+            v = cv2.imread(os.path.join(ROOT, "tpl", "webgl", f"{n}.png"))
+            dw, dh = d.shape[1], d.shape[0]
+            vw, vh = v.shape[1], v.shape[0]
+            gx, gy = vw - dw, vh - dh
+            symmetric = gx == gy and gx >= 0 and gx % 2 == 0
+            if symmetric:
+                check(True, f"{n}: variant is the default plus equal even "
+                            f"padding ({dw}x{dh} -> {vw}x{vh})")
+                continue
+            # Asymmetric: prove the centre is never the click target.
+            step = re.search(r'Step\(\s*"[^"]+"\s*,\s*"' + re.escape(n)
+                             + r'"\s*,\s*"click"\s*,\s*target="([^"]+)"', rsrc)
+            check(step is not None and step.group(1) != n,
+                  f"{n}: asymmetric variant is allowed only because its rung "
+                  f"clicks {step.group(1) if step else 'UNKNOWN'}, not itself")
+    finally:
+        p.clear_renderer()
+
+    # --- EVERY TEMPLATE LOAD PATH MUST HONOUR IT ---------------------------
+    #
+    # This is the mistake that made the whole mechanism inert once already.
+    # `load_templates` was taught to swap crops, the log said "4 recut for
+    # webgl", and the farm still could not enter the Mission Room - because
+    # `farm._tpl` built `Template(name, "tpl/<name>.png")` directly and never
+    # went near `load_templates`. Nine live sites did the same. Measured at the
+    # time: the variant scored 1.000 on ten fresh lobby frames while the
+    # running bot logged "could not reach the grade panel" every lap.
+    #
+    # Asserted by READING THE SOURCE, so a new bare path is caught the moment
+    # it is written rather than the next time a backend changes.
+    bare = re.compile(r'Template\(\s*[^,]+,\s*os\.path\.join\(\s*ROOT\s*,\s*["\']tpl')
+    for mod in ("farm", "minigame", "tp", "cards", "seals", "kekkai_play",
+                "resume", "mission", "battle"):
+        src_path = os.path.join(ROOT, "engine", f"{mod}.py")
+        if not os.path.exists(src_path):
+            continue
+        src = open(src_path).read()
+        check(not bare.search(src),
+              f"{mod}.py builds no Template straight from tpl/ - it goes "
+              f"through perceive.template")
+
+    # And the factory really does apply the variant for each of them.
+    import perceive as p
+    import farm as farm_mod
+    import minigame as mg_mod
+    import tp as tp_mod
+    try:
+        p.set_renderer("webgl")
+        for lbl, t in (("farm", farm_mod._tpl("mission_room_entry")),
+                       ("minigame", mg_mod._tpl("mission_room_entry")),
+                       ("tp", tp_mod._tpl("mission_room_entry"))):
+            check("webgl" in os.path.relpath(t.path, ROOT),
+                  f"{lbl}._tpl returns the webgl variant")
+        # a name with no variant still resolves, and scales still pass through
+        check("webgl" not in os.path.relpath(farm_mod._tpl("grade_tab").path, ROOT),
+              "a template with no variant falls through to the default")
+        t = tp_mod._tpl("mission_start", 0.80, [0.95, 1.0])
+        check(t.scales == [0.95, 1.0], "scales survive the factory")
+    finally:
+        p.clear_renderer()
+
+    # --- THE SUPERVISOR WIRES IT, at startup AND after a switch ------------
+    import app as app_mod
+    src = inspect.getsource(app_mod)
+    check("_reload_templates_for_renderer" in src,
+          "app.py has one place that points perceive at the live backend")
+    check(src.count("_reload_templates_for_renderer(") >= 3,
+          "it is called at startup AND after a renderer switch, not just once")
+    fn = inspect.getsource(app_mod._reload_templates_for_renderer)
+    check('"requested"' in fn or "'requested'" in fn,
+          "the backend name comes from loadedConfig, not the canvas context "
+          "type - both wgpu-webgl and webgl draw through WebGL2")
+    check("tpls.clear()" in fn and "tpls.update(" in fn,
+          "the template set is refreshed IN PLACE, since capture, actor and "
+          "runner all hold the same dict by reference")
+
+    # --- SAFETY: Delete sits beside Play ----------------------------------
+    #
+    # The standing rule is that Play is whitelisted BY TEMPLATE and never by
+    # offset. A recut of `play_btn` therefore has to be checked against the
+    # Delete button explicitly, on a real frame.
+    fixture = os.path.join(ROOT, "ref/auto/renderer/webgl_charsel.png")
+    var = os.path.join(ROOT, "tpl/webgl/play_btn.png")
+    if os.path.exists(fixture) and os.path.exists(var):
+        from perceive import find as _find
+        g = cv2.cvtColor(cv2.imread(fixture), cv2.COLOR_BGR2GRAY)
+        pv = Template("play_btn", var, threshold=0.88)
+        dl = Template("delete_btn", os.path.join(ROOT, "tpl/delete_btn.png"),
+                      threshold=0.88)
+        mp, cp = _find(g, pv)
+        md, cd = _find(g, dl)
+        check(cp >= 0.88, f"the webgl Play variant matches Play ({cp:.3f})")
+        check(mp.center != md.center,
+              f"and its centre {mp.center} is NOT Delete's {md.center}")
+        if mp.center and md.center:
+            gap = abs(mp.center[0] - md.center[0]) + abs(mp.center[1] - md.center[1])
+            check(gap > 200, f"Play and Delete are {gap} px apart")
+        # Scored on Delete's OWN button, the Play variant must stay far below.
+        x, y = md.center
+        sub = g[max(0, y - pv.h // 2):y + pv.h // 2,
+                max(0, x - pv.w // 2):x + pv.w // 2]
+        if sub.shape[0] >= pv.h and sub.shape[1] >= pv.w:
+            _, c = _find(sub, pv)
+            check(c < 0.88 - 0.18,
+                  f"the Play variant does not fire on the Delete button ({c:.3f})")
+
+    # --- THE RECUT TOOL REFUSES A FLAT CROP -------------------------------
+    #
+    # Cutting the same region out of a webgl frame gives self 1.000 and a worst
+    # negative of 0.907 against an 0.88 gate, because stripping the stroked
+    # text out of that plaque leaves smooth pink and a low-variance template
+    # correlates with any large smooth region. The tool must reject that rather
+    # than write it - the same trap as `close_popup_x_large` ("flat 0.547 at
+    # every scale. Bad crop").
+    import recut
+    check(recut.NEG_SLACK >= 0.15,
+          f"negatives must clear the gate by {recut.NEG_SLACK} - calibrated to "
+          f"the 0.37..0.66 margins this project's real anchors achieve")
+    check(recut.MIN_SEPARATION >= 0.30,
+          "and a crop needs real separation, not merely a sub-gate negative")
+    check(0 in recut.PADS,
+          "pad 0 is always reported, so the naive cut's badness is on record")
+    src = inspect.getsource(recut.cmd_cut)
+    check("centre MOVED" in src,
+          "a crop that moves the match centre is rejected outright")
+
+
+def test_an_accidental_scroll_cannot_move_the_game():
+    """The page scroll is REMOVED while the bot runs, not corrected later.
+
+    Every minigame's geometry is absolute, so a displaced game breaks all of
+    them at once - measured previously, scrollY 60 put the game at -236
+    captured px and the memory board's rows measured -237 out, and each
+    subsystem then blamed itself. `__nsbotAlign` did put the scroll back, but
+    it is only called from `ensure_focus` BETWEEN CYCLES, and a mission blocks
+    for minutes, so an accidental scroll stood for the whole of it.
+
+    Verified live: `scrollTo(0,400)` snapped back to 0 and was counted, a real
+    wheel event dispatched through the Input domain moved nothing at all, a
+    five-event flick likewise, and the dock's own log pane still scrolled
+    (0 -> 40).
+    """
+    print("\nan accidental scroll cannot move the game")
+    import dock as dock_mod
+
+    src = inspect.getsource(dock_mod)
+
+    # --- all three layers are present -----------------------------------
+    check("__nsbotScrollLock" in src, "the page owns a scroll lock")
+    check("overflow:hidden !important" in src,
+          "layer 1: the scroll is REMOVED by an !important stylesheet, which "
+          "the site's inline styles cannot undo")
+    check('addEventListener("scroll"' in src,
+          "layer 2: a scroll listener snaps back what still gets through")
+    check('addEventListener("wheel"' in src and "preventDefault" in src,
+          "layer 3: the wheel gesture is stopped before it scrolls")
+    check("passive: false" in src,
+          "the wheel listener is non-passive, or preventDefault is ignored")
+
+    # --- THE DOCK'S OWN LOG PANE MUST STILL SCROLL ----------------------
+    check("inDock" in src,
+          "events inside the dock are exempt - the operator reads that log")
+
+    # --- keys are deliberately left alone -------------------------------
+    check('addEventListener("keydown"' not in src,
+          "keys are NOT blocked: this is a Flash game and the SWF may want "
+          "them, and layer 2 covers a keyboard scroll after the fact")
+
+    # --- IT RIDES WITH FOCUS MODE ---------------------------------------
+    #
+    # With focus ON the game is pinned and any scroll is an accident. With
+    # focus OFF the bot scrolls ON PURPOSE - `Capture.scroll_game` is the
+    # documented fallback for the hidden 119 px band and the resume ladder
+    # alternates it. Locking there would break the one path that needs it.
+    i_focus = src.find("window.__nsbotFocusOn = !!on;")
+    i_lock = src.find("window.__nsbotScrollLock(!!on)")
+    check(i_focus > 0 and i_lock > i_focus,
+          "focus mode applies the lock when it turns on and lifts it when off")
+    import capture as cap_mod
+    sg = inspect.getsource(cap_mod.scroll_game) if hasattr(
+        cap_mod, "scroll_game") else inspect.getsource(cap_mod.Capture.scroll_game)
+    check("focus" in sg.lower(),
+          "and scroll_game already no-ops under focus mode, so the deliberate "
+          "scroll path is unaffected")
+
+    # --- a reload drops the listeners, so align() re-asserts it ---------
+    check("__nsbotScrollLocked" in src and "__nsbotAlign" in src,
+          "align() re-asserts the lock, because a navigation drops the "
+          "injected style and its listeners")
+    ali = src[src.find("window.__nsbotAlign"):]
+    ali = ali[:ali.find("window.__nsbotScrollLock") + 40] if \
+        "__nsbotScrollLock" in ali else ali[:2000]
+    check("__nsbotScrollLock" in ali,
+          "the re-assertion is inside align, which runs every cycle")
+
+    # --- snaps are COUNTED, and the count comes FROM THE PAGE ------------
+    check("__nsbotScrollSnaps" in src,
+          "snaps are counted, so an accidental wheel is loggable rather than "
+          "a mystery drift")
+    check(hasattr(dock_mod.Dock, "scroll_lock")
+          and hasattr(dock_mod.Dock, "scroll_state"),
+          "Python can apply and READ the lock (read, never remember)")
+    st = inspect.getsource(dock_mod.Dock.scroll_state)
+    check("evaluate" in st,
+          "scroll_state asks the page rather than trusting a cached flag")
+
+    import app as app_mod
+    ef = inspect.getsource(app_mod.Runner.ensure_focus)
+    check("scroll_state" in ef and "scroll_lock" in ef,
+          "the runner re-applies the lock if the page has lost it")
+    check("snapped back" in ef,
+          "and says so when a scroll was undone")
+
+
+def test_the_unknown_streak_counts_the_ladder_not_our_label():
+    """A guard is only as good as the event that CLEARS it - fourth instance.
+
+    `Runner.step` drives `Resumer.advance()`, which has no `max_unknown` of its
+    own (only `Resumer.run()` does), so the runner bounds the streak itself.
+    That guard was written after 52 consecutive unrecognised cycles, and it was
+    then defeated by a label:
+
+        self.state = info.get("step", out)          # "unknown" from the ladder
+        ...
+        if self.state == "unknown":
+            self.state = self._name_screen() or "unknown"    # -> "seal_entry"
+        ...
+        if self.state == "unknown": self.unknown += 1 else: self.unknown = 0
+
+    `_name_screen` deliberately recognises the TP minigame HUDs, so on a
+    hand-seal board - a screen the ladder cannot climb from - the label came
+    back non-unknown and the counter RESET EVERY CYCLE. Measured live: the
+    Resumer's own `unknown_streak` reached **634** while the runner's counter
+    sat at zero, roughly ten minutes spinning on one screen with no relog and
+    no pause.
+
+    The fix reads the ladder's own verdict before anything relabels it.
+    """
+    print("\nthe unknown streak counts the ladder, not our label")
+    import app as app_mod
+    import ast
+
+    src = inspect.getsource(app_mod.Runner.step)
+    tree = ast.parse(textwrap.dedent(src))
+
+    # --- the verdict is captured, and BEFORE the relabel -----------------
+    assigns = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Assign)
+               and any(getattr(t, "id", "") == "ladder_blind" for t in n.targets)]
+    names = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", "") == "_name_screen"]
+    reads = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Name)
+             and n.id == "ladder_blind" and isinstance(n.ctx, ast.Load)]
+    check(bool(assigns), "step() captures the ladder's own verdict")
+    check(bool(names), "and still labels the screen for the operator")
+    check(bool(reads), "and the guard reads that verdict")
+    if assigns and names and reads:
+        check(assigns[0] < names[0],
+              "the verdict is taken BEFORE _name_screen can overwrite it")
+        check(reads[0] > names[0],
+              "and used after, so the label cannot be mistaken for progress")
+
+    # --- the defeated test must not come back ---------------------------
+    check('self.state in ("unknown",)' not in src,
+          "the counter no longer keys on self.state, which _name_screen "
+          "overwrites")
+
+    # --- and it is derived from what the Resumer actually reports --------
+    import resume as resume_mod
+    rsrc = inspect.getsource(resume_mod.Resumer.advance)
+    check('"step": "unknown"' in rsrc,
+          'the Resumer reports step="unknown" when no rung matched')
+    check("self.unknown_streak = 0" in inspect.getsource(resume_mod.Resumer),
+          "and resets its own streak when a rung IS recognised")
+
+    # --- the bound still exists at all ----------------------------------
+    check("self.unknown += 1" in src, "a blind cycle still counts")
+    check("relog_after_unknown" in src or "self.max_unknown" in src
+          or "max_unknown" in src,
+          "and the count still drives a relog / pause")
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -4686,7 +5098,10 @@ def main():
                test_the_ceiling_memo_survives_neither_a_level_up_nor_a_short_list,
                test_cooldowns_are_learned_from_play_not_guessed,
                test_a_cooldown_refusal_ends_the_wait_immediately,
-               test_a_greyed_skill_is_never_clicked):
+               test_a_greyed_skill_is_never_clicked,
+               test_a_template_is_recut_per_renderer_where_the_backend_differs,
+               test_an_accidental_scroll_cannot_move_the_game,
+               test_the_unknown_streak_counts_the_ladder_not_our_label):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

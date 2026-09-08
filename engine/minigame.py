@@ -65,6 +65,7 @@ import cv2
 
 import kekkai_play as kp
 from perceive import Template, find
+import perceive
 
 KEKKAI = "kekkai"
 SEAL_ENTRY = "seal_entry"
@@ -80,8 +81,8 @@ EXPERIMENTAL = {CARDS}
 
 
 def _tpl(name, thr=0.88):
-    p = os.path.join(ROOT, "tpl", f"{name}.png")
-    return Template(name, p, threshold=thr) if os.path.exists(p) else None
+    # See the note in farm._tpl: renderer variants apply here too.
+    return perceive.template(name, threshold=thr)
 
 
 def classify(frame):

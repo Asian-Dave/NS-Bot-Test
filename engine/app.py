@@ -364,6 +364,12 @@ class Runner:
         info = self._refresh_renderer_live()
         msg, warn = browser.describe_renderer(info)
         (self.log.warning if warn else self.log.info)("%s", msg)
+        # A NEW BACKEND MAY NEED DIFFERENT CROPS, so swap them here too and not
+        # only at startup. Without this, switching the renderer from the panel
+        # left the process matching the previous backend's templates - which is
+        # how "the graphics changed and the bot stopped recognising things"
+        # happens with nothing in the log to explain it.
+        _reload_templates_for_renderer(info, self.tpls, self.cfg, self.log)
         got = (self._game.get("settings") or {}).get(key)
         if str(got) != str(value):
             self.log.warning("%s reads back as %s after the reload, not %s",
@@ -1020,6 +1026,13 @@ class Runner:
 
         gray = cv2.cvtColor(self.cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
         out, info = self.resumer.advance(gray)
+        # THE LADDER'S OWN VERDICT, TAKEN BEFORE ANYTHING RELABELS IT.
+        #
+        # `info["step"]` is "unknown" exactly when no rung matched, and that is
+        # the only honest input to the unknown-streak guard below. It has to be
+        # read HERE because `_name_screen()` overwrites `self.state` a few
+        # lines down with a diagnostic label - and a label is not progress.
+        ladder_blind = info.get("step") == "unknown"
         self.state = info.get("step", out)
 
         # A LEVEL-UP MOVES THE MISSION CEILING, and nothing else can tell the
@@ -1058,7 +1071,26 @@ class Runner:
             # that meant 52 consecutive "no anchor matched" cycles on a screen
             # the ladder could not read - a bot spinning silently is worse than
             # one that stops and says why.
-            if self.state in ("unknown",) or out == "unknown":
+            # COUNT WHAT THE LADDER DID, NOT WHAT WE MANAGED TO CALL IT.
+            #
+            # This guard has now been defeated twice by the same mistake, and
+            # this file's own rule names it: a guard bounded by a counter is
+            # only as good as the event that CLEARS the counter, so clear it on
+            # evidence of progress and never on something merely correlated.
+            #
+            # The previous test was `self.state == "unknown"`, and `self.state`
+            # is overwritten a few lines above by `_name_screen()`, which
+            # deliberately recognises the TP minigame HUDs. So on a hand-seal
+            # board - a screen the ladder cannot climb from - the label came
+            # back "seal_entry", the counter reset to 0 EVERY CYCLE, and the
+            # relog and pause never fired. Measured live: the Resumer's own
+            # `unknown_streak` reached **634** while this counter sat at zero,
+            # about ten minutes of spinning on one screen.
+            #
+            # `ladder_blind` is the Resumer's own answer, captured before the
+            # relabel, so naming a screen for the operator can no longer be
+            # mistaken for making progress on it.
+            if ladder_blind:
                 self.unknown += 1
             else:
                 self.unknown = 0
@@ -1362,6 +1394,35 @@ class Runner:
                 self.focus_aligned = True
             except Exception:
                 pass
+            # SAY WHEN A SCROLL WAS UNDONE.
+            #
+            # The page-side lock snaps the scroll back within a frame, which is
+            # the whole point - but a silent fix teaches nobody anything, and
+            # "sometimes I accidentally scroll and the bot misbehaves" was
+            # exactly the report. Counting the snaps turns an accidental wheel
+            # into a line in the log instead of a mystery drift.
+            #
+            # Only the CHANGE is logged, and only between cycles, because the
+            # count is read from the page and the beat runs several times a
+            # second.
+            try:
+                locked, snaps, y = self.dock.scroll_state()
+                if not locked:
+                    self.dock.scroll_lock(True)
+                    self.log.info("scroll lock re-applied (the page had lost it)")
+                if snaps > getattr(self, "_scroll_snaps", 0):
+                    self.log.info("scroll: %d accidental scroll(s) snapped back "
+                                  "(the game did not move)",
+                                  snaps - getattr(self, "_scroll_snaps", 0))
+                self._scroll_snaps = snaps
+                if y:
+                    self.log.warning("scroll: the page is at y=%d despite the "
+                                     "lock - geometry may be off by %d captured "
+                                     "px", y, y * 2)
+            except (OSError, CDPError) as e:
+                raise Disconnected(str(e))
+            except Exception:
+                pass
             return
         try:
             if not self.dock.game_ready():
@@ -1519,6 +1580,35 @@ class Runner:
         except Exception:
             pass
         self.log.info("quit")
+
+
+def _reload_templates_for_renderer(info, tpls, cfg, log):
+    """Point `perceive` at the live backend and refresh `tpls` IN PLACE.
+
+    The backend name comes from `loadedConfig` (`info["requested"]`), never
+    from the canvas context type - both `wgpu-webgl` and `webgl` draw through
+    WebGL2, so the context cannot tell them apart, and a log line that trusted
+    it once reported our own override back as fact.
+
+    `tpls` is MUTATED rather than replaced: the same dict was already handed to
+    `attach`, the Capture, the Actor and the Runner, so rebinding a local name
+    would leave every one of them holding the old set. One template space, or
+    none.
+
+    Returns the backend name, or None when it could not be read - in which
+    case the default crops stand, which is exactly today's behaviour.
+    """
+    import perceive as _p
+    want = (info or {}).get("requested")
+    if not want:
+        log.info("renderer unknown, so the default templates stand")
+        return None
+    if _p.set_renderer(want) is None:
+        return None
+    fresh = load_templates(cfg, log)
+    tpls.clear()
+    tpls.update(fresh)
+    return want
 
 
 def _read_json(rel, default):
@@ -1810,8 +1900,22 @@ def main():
     # a switch changes the pixels under a perception layer that cannot tell -
     # and the symptom is "the bot stopped recognising things" with nothing in
     # the log to explain it. One line at startup turns that into a fact.
-    _msg, _warn = browser.describe_renderer(browser.renderer_info(c))
+    _info = browser.renderer_info(c)
+    _msg, _warn = browser.describe_renderer(_info)
     (log.warning if _warn else log.info)("%s", _msg)
+
+    # AND LOAD THAT BACKEND'S OWN TEMPLATES.
+    #
+    # Not every crop survives a backend change: measured live on one screen,
+    # `mission_room_entry` reads 0.997 on wgpu-webgl and 0.531 on webgl, which
+    # stopped the farm leaving the village entirely. `perceive.set_renderer`
+    # makes `tpl/<renderer>/` variants win for the templates that need one.
+    #
+    # The set is refreshed IN PLACE rather than rebound, because `tpls` was
+    # already handed to `attach` and is shared by reference - rebinding here
+    # would leave the capture and actor holding the pre-renderer set, which is
+    # precisely the "half-applied correction" this project has been burned by.
+    _reload_templates_for_renderer(_info, tpls, cfg, log)
 
     r = Runner(c, cap, actor, tpls, cfg, log, controls, dock, port=a.port)
 

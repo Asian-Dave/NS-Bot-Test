@@ -258,7 +258,100 @@ _BOOTSTRAP = r"""
       }
     }
     window.__nsbotFocusOn = !!on;
+    // THE LOCK RIDES WITH FOCUS MODE, and that is deliberate rather than
+    // convenient. With focus ON the game is pinned at scrollY 0 and any scroll
+    // is an accident. With focus OFF the bot SCROLLS THE GAME ON PURPOSE -
+    // `Capture.scroll_game(frac)` is the documented fallback for reaching an
+    // anchor in the hidden 119 px band, and the resume ladder alternates the
+    // scroll before calling a frame unrecognised. Locking there would break
+    // the one path that needs scrolling.
+    if (window.__nsbotScrollLock) window.__nsbotScrollLock(!!on);
     return on ? "focused" : "restored";
+  };
+
+  // ---------------------------------------------------------------------
+  // SCROLL LOCK — an accidental wheel must not move the game under the bot
+  //
+  // The operator reported "sometimes I accidentally scroll down which causes
+  // some kind of behaviour bug". It does, and this file already documents why:
+  // every minigame's geometry is ABSOLUTE, so a displaced game breaks all of
+  // them at once, each reporting a fault in its own subsystem and none naming
+  // the real cause. Measured previously: scrollY 60 put the game at -236
+  // CAPTURED px and the memory board's rows measured -237 out.
+  //
+  // `__nsbotAlign` already puts the scroll back - but it is only called from
+  // `ensure_focus`, which runs BETWEEN cycles, and a mission blocks for
+  // minutes. So a scroll during a mission stood for the whole of it. Snapping
+  // back has to be event-driven and live IN THE PAGE, for exactly the reason
+  // the panel's heartbeat does: Python is not there to notice.
+  //
+  // Three layers, because each catches what the others miss:
+  //   1. overflow:hidden via an !important STYLESHEET - removes the scroll
+  //      rather than reacting to it, and beats the site's inline styles.
+  //   2. a scroll listener that snaps to 0 - catches anything that still
+  //      scrolls (keyboard, the site's own script, a focus() on some element).
+  //      `scroll` cannot be prevented, only undone.
+  //   3. wheel/touchmove preventDefault - stops the gesture before it scrolls,
+  //      which avoids a visible jump-and-snap.
+  //
+  // THE PANEL'S OWN LOG PANE MUST STAY SCROLLABLE. It is `overflow:auto` and
+  // the operator reads it, so layer 3 exempts any event inside the dock. Layer
+  // 1 cannot affect it: the dock is position:fixed with its own scroller.
+  //
+  // KEYS ARE DELIBERATELY NOT BLOCKED. This is a Flash game and the SWF may
+  // want them; a swallowed keystroke would be a new bug to chase. Layer 2
+  // covers a keyboard scroll after the fact.
+  //
+  // Snaps are COUNTED, not silent. "the game drifted" was invisible before,
+  // and a counter turns an accidental scroll into something the log can name.
+  window.__nsbotScrollSnaps = window.__nsbotScrollSnaps || 0;
+  window.__nsbotScrollLock = (on) => {
+    const ID = "__nsbot_scrolllock";
+    if (on) {
+      if (!window.__nsbotScrollHandlers) {
+        const snap = () => {
+          if (window.scrollY !== 0 || window.scrollX !== 0) {
+            window.__nsbotScrollSnaps++;
+            window.scrollTo(0, 0);
+          }
+        };
+        const inDock = (ev) => {
+          const d = document.getElementById("__ID__");
+          return d && ev.target && d.contains(ev.target);
+        };
+        const block = (ev) => {
+          if (inDock(ev)) return;          // the log pane scrolls; leave it
+          ev.preventDefault();
+          snap();
+        };
+        window.addEventListener("scroll", snap, {passive: true});
+        window.addEventListener("wheel", block, {passive: false});
+        window.addEventListener("touchmove", block, {passive: false});
+        window.__nsbotScrollHandlers = {snap, block};
+      }
+      let st = document.getElementById(ID);
+      if (!st) {
+        st = document.createElement("style");
+        st.id = ID;
+        document.documentElement.appendChild(st);
+      }
+      st.textContent =
+        "html,body{overflow:hidden !important;overscroll-behavior:none !important;}";
+      window.scrollTo(0, 0);
+      window.__nsbotScrollLocked = true;
+      return "locked";
+    }
+    const h = window.__nsbotScrollHandlers;
+    if (h) {
+      window.removeEventListener("scroll", h.snap, {passive: true});
+      window.removeEventListener("wheel", h.block, {passive: false});
+      window.removeEventListener("touchmove", h.block, {passive: false});
+      window.__nsbotScrollHandlers = null;
+    }
+    const st0 = document.getElementById(ID);
+    if (st0) st0.remove();
+    window.__nsbotScrollLocked = false;
+    return "unlocked";
   };
 
   // Re-run ONLY the top-alignment. Focus is applied as soon as the game appears,
@@ -272,6 +365,14 @@ _BOOTSTRAP = r"""
     // The page can scroll out from under us even in focus mode; rect.y is
     // viewport-relative, so put the scroll back first and then measure.
     if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
+    // Re-assert the SCROLL LOCK as well. A reload drops the injected <style>
+    // and the listeners with it, and this project's standing rule is that any
+    // cached belief about page state is invalidated by a navigation - so ask
+    // the page rather than remembering. Idempotent, so calling it every cycle
+    // costs nothing.
+    if (!window.__nsbotScrollLocked && window.__nsbotScrollLock) {
+      window.__nsbotScrollLock(true);
+    }
     // Re-assert the pin: a reload drops the injected <style>, and without it the
     // site's own top:-58.5px takes over again.
     if (!document.getElementById("__nsbot_pin")) {
@@ -744,6 +845,34 @@ class Dock:
         """Re-assert top alignment once the layout has settled."""
         return self.cdp.evaluate(
             "(window.__nsbotAlign ? window.__nsbotAlign() : 'no-panel')")
+
+    def scroll_lock(self, on=True):
+        """Remove the page scroll (or restore it). Renderer-independent.
+
+        This is pure DOM, so it behaves identically on every Ruffle backend -
+        which matters, because the operator asked for it "in all renders" and
+        the per-renderer template work only covers what the SWF DRAWS.
+        """
+        return self.cdp.evaluate(
+            f"(window.__nsbotScrollLock "
+            f"? window.__nsbotScrollLock({str(bool(on)).lower()}) : 'no-panel')")
+
+    def scroll_state(self):
+        """(locked, snaps) read FROM THE PAGE, never remembered here.
+
+        `snaps` counts how many times an actual scroll had to be undone, so an
+        accidental wheel becomes something the log can name instead of a
+        mystery drift.
+        """
+        try:
+            raw = self.cdp.evaluate(
+                "JSON.stringify([!!window.__nsbotScrollLocked,"
+                " window.__nsbotScrollSnaps|0, window.scrollY|0])")
+            import json as _j
+            locked, snaps, y = _j.loads(raw)
+            return bool(locked), int(snaps), int(y)
+        except Exception:
+            return False, 0, 0
 
     def focus_state(self):
         try:

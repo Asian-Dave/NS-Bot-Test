@@ -666,9 +666,35 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
                         digit_mask(frame, g_xy))
             cv2.imwrite(os.path.join(d, f"UNREAD_gold_{n}.png"),
                         digit_mask(frame, o_xy))
-            log.info("could not read row %d (green %.3f / gold %.3f); crops saved "
-                     "as UNREAD_*. Classify them and rerun rather than guessing.",
-                     len(hist_a), gc, oc)
+            # SAVE THE WHOLE FRAME, not only the two crops.
+            #
+            # The crops alone cannot tell you WHY the read failed, and that
+            # cost a diagnosis: both came back as neither digit nor noise - one
+            # was almost solid black, the other a white SPIRAL, which is a RUNE
+            # GLYPH. So the reader was not misreading a digit at all, it was
+            # looking in the wrong place, and nothing in a 68x68 binarised crop
+            # says that. `find_rows` segments a fixed absolute column
+            # (x 1950..2030) by GREEN HUE, and both of those are fragile here:
+            # the panel moves (measured 116 px on one occasion) and colour is
+            # exactly what a different Ruffle backend renders differently.
+            #
+            # With the full frame, where the discs really are is measurable
+            # afterwards. Bounded, because the point is one good frame.
+            try:
+                nsaved = len([f for f in os.listdir(d)
+                              if f.startswith("UNREAD_frame")])
+                if nsaved < 3:
+                    fp = os.path.join(d, f"UNREAD_frame_{int(time.time())}.png")
+                    cv2.imwrite(fp, frame)
+                    log.info("saved the whole panel to %s - measure where the "
+                             "feedback discs actually are before touching the "
+                             "digit exemplars", os.path.relpath(fp, ROOT))
+            except Exception as e:
+                log.warning("could not save the panel frame: %s", e)
+            log.info("could not read row %d (green %.3f / gold %.3f) at "
+                     "green=%s gold=%s; crops saved as UNREAD_*. Classify them "
+                     "and rerun rather than guessing.",
+                     len(hist_a), gc, oc, g_xy, o_xy)
             return None, n + 1
         log.info("   feedback: green=%d gold=%d", gv, ov)
         if gv == length or ov == length:
@@ -715,7 +741,9 @@ def seal_broken(cap, settle=1.2):
     from perceive import Template, find
     time.sleep(settle)
     g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
-    t = Template("gc", os.path.join(ROOT, "tpl/mission_start.png"), threshold=0.80)
+    # Named by its FILE (`mission_start`), because the renderer-variant
+    # lookup is by template name - "gc" would find no variant.
+    t = perceive.template("mission_start", threshold=0.80)
     t.scales = [round(0.95 + i * 0.05, 2) for i in range(21)]
     return find(g, t)[0].found
 
@@ -730,10 +758,9 @@ def mission_over(cap, log=None):
     from perceive import Template, find
     g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
     for name, thr in (("mission_success", 0.88), ("cutscene_continue", 0.80)):
-        p = os.path.join(ROOT, "tpl", f"{name}.png")
-        if not os.path.exists(p):
+        t = perceive.template(name, threshold=thr)
+        if t is None:
             continue
-        t = Template(name, p, threshold=thr)
         if name == "cutscene_continue":
             t.scales = [round(0.9 + i * 0.05, 2) for i in range(9)]
         m, c = find(g, t)
@@ -846,9 +873,8 @@ def hunt_and_solve(cap, actor, log, length=3, max_rounds=6, max_walks=10):
         # acknowledge "You break the seal!"
         time.sleep(1.5)
         f = cap.frame(gray=False)
-        from perceive import Template, find as _find
-        gc = Template("gc", os.path.join(ROOT, "tpl/mission_start.png"),
-                      threshold=0.80)
+        from perceive import find as _find
+        gc = perceive.template("mission_start", threshold=0.80)
         gc.scales = [round(0.95 + i * 0.05, 2) for i in range(21)]
         m, conf = _find(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), gc)
         if m.found:
