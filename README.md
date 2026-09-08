@@ -89,7 +89,7 @@ The panel offers:
 
 | | |
 |---|---|
-| **Task** | resume to lobby, TP training, farm missions, idle |
+| **Task** | resume to lobby, TP training, farm missions, exam rune puzzle, idle |
 | **Run** | run / pause / relog / stop, and quit |
 | **Stop** | aborts the task, clears its progress, and relaunches attached — no terminal trip |
 | **Quit** | removes the panel and exits for good |
@@ -153,6 +153,14 @@ different mission entirely.
 | Kekkai (rune Mastermind) | solved — missions banked |
 | Scroll (memory board) | solved — cleared 20/20 with 51s to spare |
 | Potion (hand-seal memorisation) | solved — five levels including an eight-sign round |
+
+**Exam rune puzzle.** The same Mastermind the Kekkai TP mission uses, which the
+exams also run — verified over code lengths 2 to 5 (their four table sizes),
+with the length read from the seal's node count rather than configured. The
+*navigation* to an exam is not implemented: nobody has captured those screens
+yet. So navigate to the exam yourself and press Run; if there is no puzzle on
+screen the bot says so and saves the frame, which is what the navigation would
+be built from.
 
 ## Performance and unattended running
 
