@@ -372,8 +372,13 @@ def start_row(actor, cap, log, y, x=2195, settle=2.6):
     return True, "started"
 
 
-def pick_any(actor, cap, log, skip=(), max_pages=3, done=None):
-    """Start ANY unplayed mission on the TP list. Returns its (page, y) or None.
+def pick_any(actor, cap, log, skip=(), max_pages=3, done=None, label="TP"):
+    """Start ANY unplayed mission on the list. Returns its (page, y) or None.
+
+    `label` names the list in the log only. The SS pass shares this sweep, and
+    the lines still read "TP list page 1" while an SS mission was being
+    started - which is the kind of small lie that sends a later reader looking
+    at the wrong task.
 
     Name-agnostic on purpose: what the mission actually is gets decided by
     looking at the minigame once it opens.
@@ -389,7 +394,8 @@ def pick_any(actor, cap, log, skip=(), max_pages=3, done=None):
     for page in range(max_pages):
         f = cap.frame(gray=False)
         rows = find_mission_rows(f)
-        log.info("TP list page %d: %d row(s) at y=%s", page + 1, len(rows), rows)
+        log.info("%s list page %d: %d row(s) at y=%s",
+                 label, page + 1, len(rows), rows)
         for y in rows:
             fp = row_fingerprint(f, y)
             if any(same_row(fp, s_fp) for s_fp in skip):
@@ -407,7 +413,7 @@ def pick_any(actor, cap, log, skip=(), max_pages=3, done=None):
         nm, nc = find(g, nxt)
         if not nm.found:
             return None
-        actor.click_pixel(*nm.center, why=f"TP list next page ({nc:.3f})")
+        actor.click_pixel(*nm.center, why=f"{label} list next page ({nc:.3f})")
         time.sleep(2.2)
     return None
 
@@ -651,7 +657,8 @@ def close_out(actor, cap, log, timeout=45):
 SWEEP_TRIPWIRE = 40
 
 
-def run_all(cap, actor, log, relog=None, max_missions=None):
+def run_all(cap, actor, log, relog=None, max_missions=None,
+            to_list=None, run_one_fn=None, label="TP"):
     """Play EVERY TP mission on the list, whatever they turn out to be.
 
     The mission is chosen by position, not by name, and what it IS gets decided
@@ -683,8 +690,18 @@ def run_all(cap, actor, log, relog=None, max_missions=None):
     genuinely wants one (a test, or a cautious manual run). The default is
     unbounded.
 
+    **THE SWEEP IS SHARED WITH SS TRAINING**, via `to_list` and `run_one_fn`.
+    Not for tidiness: the loop below carries several fixes that were each paid
+    for in lost missions - remembering only FAILURES because survivors reflow
+    upward into vacated slots, fingerprinting rows so a reflow cannot make one
+    mission stand in for another, and a tripwire that reports a broken
+    termination check instead of looking like a tidy stop. A second copy for SS
+    would be a second place for all of that to be got wrong.
+
     Returns (played, banked).
     """
+    to_list = to_list or to_tp_list
+    run_one_fn = run_one_fn or (lambda: run_one(cap, actor, log))
     played = banked = 0
     # ONLY FAILURES ARE REMEMBERED, and this is the fix for a pass that stopped
     # with a mission still on the list.
@@ -712,27 +729,27 @@ def run_all(cap, actor, log, relog=None, max_missions=None):
                      max_missions)
             break
         if sweeps > SWEEP_TRIPWIRE:
-            log.error("TP: %d sweeps without exhausting the list - the "
+            log.error("%s: %d sweeps without exhausting the list - the "
                       "termination check is not working; stopping to avoid "
                       "looping. %d played, %d rows set aside",
-                      sweeps, played, len(failed) + len(exhausted))
+                      label, sweeps, played, len(failed) + len(exhausted))
             break
-        if not to_tp_list(actor, cap, log):
-            log.info("could not reach the TP list")
+        if not to_list(actor, cap, log):
+            log.info("could not reach the %s list", label)
             break
-        spot = pick_any(actor, cap, log, skip=failed + exhausted,
+        spot = pick_any(actor, cap, log, skip=failed + exhausted, label=label,
                         done=exhausted)
         if spot is None:
-            log.info("every TP row is now played or greyed out - the day's "
+            log.info("every %s row is now played or greyed out - the day's "
                      "list is finished (%d played, %d already done, %d set "
                      "aside after failing)",
-                     played, len(exhausted), len(failed))
+                     label, played, len(exhausted), len(failed))
             break
         page, y, fp = spot
         played += 1
         log.info("started the mission at page %d y=%d - identifying it from the "
                  "screen", page + 1, y)
-        if run_one(cap, actor, log):
+        if run_one_fn():
             banked += 1
             log.info("mission banked (%d of %d played)", banked, played)
         else:
@@ -742,7 +759,7 @@ def run_all(cap, actor, log, relog=None, max_missions=None):
             log.info("mission did not complete; it stays in the list and will "
                      "not be retried this pass")
             _recover_to_lobby(cap, actor, log, relog=relog)
-    log.info("TP pass finished: %d started, %d banked", played, banked)
+    log.info("%s pass finished: %d started, %d banked", label, played, banked)
     return played, banked
 
 

@@ -3002,7 +3002,8 @@ def test_tp_pass_is_bounded_by_the_list_not_by_a_count():
                 for i in range(8)]
         pending = list(rows)
 
-        def pick(actor, cap, lg, skip=(), max_pages=3, done=None):
+        def pick(actor, cap, lg, skip=(), max_pages=3, done=None,
+                 label="TP"):
             for r in list(pending):
                 if any(tp_mod.same_row(r[2], sk) for sk in skip):
                     continue
@@ -4062,7 +4063,8 @@ def test_a_completed_tp_row_reflows_and_must_not_poison_its_slot():
     missions = [f"m{i}" for i in range(5)]
     done_names = []
 
-    def fake_pick(actor, cap, log, skip=(), max_pages=3, done=None):
+    def fake_pick(actor, cap, log, skip=(), max_pages=3, done=None,
+                  label="TP"):
         remaining = [m for m in missions if m not in done_names]
         for page in range(2):
             for i, name in enumerate(remaining[page * 3:(page + 1) * 3]):
@@ -5064,6 +5066,348 @@ def test_the_unknown_streak_counts_the_ladder_not_our_label():
           or "max_unknown" in src,
           "and the count still drives a relog / pause")
 
+
+def test_the_ss_hints_panel_is_dismissed_by_a_button_below_the_fold():
+    """Two SS families open on a hints panel with NO X, and its only exit is
+    drawn off the bottom of the viewport.
+
+    `open_puzzle` swept three X templates and pressed nothing, so the mission
+    was abandoned as unrecognised and the family could never be learned.
+    Measured on the saved frames, no X-shaped anchor comes close:
+
+        close_popup_x      0.608 / 0.665
+        close_popup_x_menu 0.620 / 0.610
+        close_promo_x      0.466 / 0.454
+        mission_start      0.598 / 0.502
+
+    The exit is a wide green button, and the game is 839 CSS px tall in a 720
+    px viewport, so its bottom 238 captured px are hidden and the button lands
+    there: tops at y=1404 and y=1410 against a frame ending at 1440. Only a
+    30..36 px sliver is on screen, which is why the click aims near the blob's
+    top - the centre of a clipped button is off screen entirely.
+    """
+    print("\nthe SS hints panel is dismissed by a button below the fold")
+    import ss as ss_mod
+
+    # NAMED, NOT GLOBBED. `ss.run_one` writes new frames into this very
+    # directory during live play, so a glob of it cannot carry a hardcoded
+    # expectation - the moment a Lights Out BOARD was saved there, this test
+    # asserted that a board offers a hints button and failed on correct code.
+    # This project already records that trap for the cooldown fixtures.
+    frames = sorted(glob.glob(os.path.join(ROOT, "ref/auto/ss/hints_*.png")))
+    check(len(frames) >= 4, f"named hints frames on disk ({len(frames)})")
+
+    hits = 0
+    for p in frames:
+        im = cv2.imread(p)
+        if im is None:
+            continue
+        xy = ss_mod.hints_button(im)
+        if xy is None:
+            continue
+        hits += 1
+        x, y = xy
+        check(isinstance(x, int) and isinstance(y, int),
+              f"{os.path.basename(p)}: the point is plain ints, not numpy "
+              f"(CDP serialises it)")
+        check(y >= 1400 and y < im.shape[0],
+              f"{os.path.basename(p)}: the click is in the visible sliver "
+              f"(y={y}, frame ends at {im.shape[0]})")
+        check(x < 2680, f"{os.path.basename(p)}: and clear of the dock (x={x})")
+    check(hits == len(frames),
+          f"every saved SS screen offers a button ({hits}/{len(frames)})")
+
+    # --- IT MUST NOT FIRE ANYWHERE ELSE --------------------------------
+    # The same green range catches the puzzle's own artwork at y=1300 (884x43
+    # and 440x101), so a width window alone is not enough - the band floor is
+    # what separates them.
+    others = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer"):
+        others += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    # the puzzle boards themselves have no hints panel on them
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/lights_*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/balance_board*.png"))
+    false_fires = []
+    for p in sorted(others):
+        im = cv2.imread(p)
+        if im is None:
+            continue
+        if ss_mod.hints_button(im) is not None:
+            false_fires.append(os.path.basename(p))
+    check(not false_fires,
+          f"and on none of the {len(others)} other reference frames "
+          f"({false_fires[:3]})")
+
+    # --- the dismissal is actually wired in -----------------------------
+    src = inspect.getsource(ss_mod.open_puzzle)
+    check("hints_button" in src, "open_puzzle consults it")
+    check("close_popup_x" in src,
+          "and still tries the X, which the rune family does have")
+
+
+
+def test_balance_control_is_read_and_solved_as_a_subset_sum():
+    """SS `Balance Control`: two columns, a circle per row that SWAPS its pair.
+
+    A swap moves a value from one column to the other and back, so the grand
+    total is invariant - which FORCES the target to be half of it, and that is
+    what makes the puzzle a subset sum rather than a search:
+
+        d_i = right_i - left_i          pressing row i moves left by d_i
+        want = total // 2 - left_sum    choose S with sum(d_i for i in S) == want
+
+    Measured live, stage 1 of one mission (169 s on the clock):
+
+        17 18  7 12 = 54    5 24 15  2 = 46    target 50   swap {0,2} or {1,3}
+
+    Both of those work, so `solve` returns the SMALLEST set; four rows is
+    sixteen subsets and brute force is the whole algorithm.
+
+    **STAGE 2 HIDES THE SUMS** - they read `??` - so they are COMPUTED from the
+    rows and the printed values are only a cross-check when present. A reader
+    that depended on them stopped dead on the second stage of every mission.
+    """
+    print("\nBalance Control is read and solved as a subset sum")
+    import balance as bal
+
+    # --- the algebra, independent of any pixels -------------------------
+    rows = [(17, 5), (18, 24), (7, 15), (12, 2)]
+    pick = bal.solve(rows, 54, 46)
+    check(pick is not None, "stage 1's real board has a solution")
+    if pick:
+        moved = 54 + sum(rows[i][1] - rows[i][0] for i in pick)
+        check(moved == 50, f"the chosen swaps land on the target ({moved})")
+        check(len(pick) == 2, f"and it is the shortest set ({pick})")
+    check(bal.solve([(1, 1), (1, 1)], 2, 2) == [],
+          "an already balanced board needs no swaps")
+    check(bal.solve([(1, 2)], 1, 2) is None,
+          "an odd total is refused rather than half-solved")
+
+    # exhaustive: any board whose total is even and reachable must be solved
+    import random
+    rnd = random.Random(7)
+    tried = solved = 0
+    for _ in range(400):
+        n = rnd.choice((3, 4, 5))
+        rs = [(rnd.randint(1, 60), rnd.randint(1, 60)) for _ in range(n)]
+        ls, rss = sum(r[0] for r in rs), sum(r[1] for r in rs)
+        want = bal.solve(rs, ls, rss)
+        # brute force the truth independently
+        truth = None
+        for bits in range(1 << n):
+            idx = [i for i in range(n) if bits >> i & 1]
+            if (ls + rss) % 2 == 0 and \
+                    ls + sum(rs[i][1] - rs[i][0] for i in idx) == (ls + rss) // 2:
+                if truth is None or len(idx) < len(truth):
+                    truth = idx
+        tried += 1
+        if (want is None) == (truth is None) and \
+                (want is None or len(want) == len(truth)):
+            solved += 1
+    check(solved == tried,
+          f"400 random boards agree with brute force ({solved}/{tried})")
+
+    # --- reading a real board -------------------------------------------
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/ss/balance_board_stage1.png"))
+    check(f is not None, "the stage-1 fixture is on disk")
+    if f is not None:
+        geom = bal.locate(f)
+        check(geom is not None, f"the board is located ({geom})")
+        board = bal.read_board(f)
+        check(board is not None, "and it reads")
+        if board:
+            got, ls, rs, _g = board
+            check(list(got) == rows, f"the numbers read correctly ({got})")
+            check((ls, rs) == (54, 46), f"and so do the sums ({ls}/{rs})")
+            check(ls + rs == 2 * ((ls + rs) // 2),
+                  "the total is even, so a target exists")
+        # the circle for a row sits between the two columns
+        if geom:
+            cx, _cy = bal.circle_xy(geom, 0, 4)
+            check(geom[0] < cx < geom[1],
+                  f"a circle is between the columns ({cx})")
+
+    # --- IT MUST NOT FIRE ON ANYTHING ELSE ------------------------------
+    # Red text is everywhere in this game, and a size filter alone let 31 of
+    # 94 combat and lobby frames pass as a balance board.
+    others = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer"):
+        others += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/hints_*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/lights_*.png"))
+    fires = [os.path.basename(p) for p in sorted(others)
+             if (im := cv2.imread(p)) is not None
+             and bal.board_present(im) is not None]
+    check(not fires, f"board_present fires on none of {len(others)} other "
+                     f"frames ({fires[:3]})")
+
+    # --- the hidden-sum glyph is a positive reading, not a fallback -----
+    check("?" in bal.exemplars(),
+          "the `??` glyph has an exemplar, so a hidden sum is READ as hidden "
+          "rather than mistaken for an unrecognised digit")
+    have = {d for d in bal.exemplars() if d.isdigit()}
+    check(have == set("0123456789"),
+          f"all ten digits are harvested ({sorted(have)})")
+
+
+def test_lights_out_is_solved_over_gf2_and_the_rule_is_learned():
+    """SS `Sage Sealed Boxes`: a 3x3 Lights Out, cleared in five presses.
+
+    Pressing a sphere toggles a neighbourhood of it and the goal is all-off,
+    which over GF(2) is a 9x9 linear system. The plus rule's matrix is
+    invertible, so every board has exactly one solution - verified here
+    against ALL 512 states rather than a sample.
+
+    The rule is nevertheless LEARNED from play: every press is read before and
+    after, so it reports which cells it toggled and the model corrects itself
+    from moves that were going to be made anyway. Nothing is spent probing,
+    which matters because this project has already lost an SS mission to a
+    diagnostic sweep that ate the budget it was diagnosing.
+
+    Two of the nine cells defeat a centroid, and both were measured:
+
+        a LIT sphere    masks 232x222 against a grey one's 274x274
+        the BOTTOM ROW  is clipped by the viewport, masking 274x196
+
+    so centres come from `left + R` / `top + R`, with R from the whole spheres
+    on that frame.
+    """
+    print("\nLights Out is solved over GF(2) and the rule is learned")
+    import lights as lo
+
+    cols = lo.matrix(lo.PLUS)
+    bad = []
+    for bits in range(1 << lo.CELLS):
+        lit = [bool(bits >> i & 1) for i in range(lo.CELLS)]
+        mv = lo.solve(lit, cols)
+        if mv is None:
+            bad.append(bits)
+            continue
+        acc = 0
+        for j in mv:
+            acc ^= cols[j]
+        if acc != bits:
+            bad.append(bits)
+    check(not bad, f"all 512 board states solve exactly ({len(bad)} wrong)")
+    check(lo.solve([False] * lo.CELLS, cols) == [],
+          "a dark board needs no presses")
+
+    # --- the rule is learned from an observed press ---------------------
+    # A deliberately different rule: the cell plus its diagonal neighbours.
+    cross = ((0, 0), (-1, -1), (-1, 1), (1, -1), (1, 1))
+    truth = lo.matrix(cross)
+    model = lo.matrix(lo.PLUS)
+    before = [False] * lo.CELLS
+    after = [bool(truth[4] >> i & 1) for i in range(lo.CELLS)]
+    changed = lo.learn(model, 4, before, after)
+    check(changed, "an unexpected toggle set corrects the model")
+    check(model[4] == truth[4],
+          "and the corrected column is exactly what was observed")
+    check(not lo.learn(model, 4, before, after),
+          "re-observing the same press changes nothing")
+
+    # --- reading real boards --------------------------------------------
+    for name, want in (("lights_board.png", "......O.."),
+                       ("lights_board_lit0.png", "O........")):
+        f = cv2.imread(os.path.join(ROOT, "ref/auto/ss", name))
+        check(f is not None, f"{name} is on disk")
+        if f is None:
+            continue
+        geom = lo.locate(f)
+        check(geom is not None, f"{name}: the 3x3 grid is located")
+        if geom is None:
+            continue
+        xs, ys = geom
+        check(len(xs) == 3 and len(ys) == 3,
+              f"{name}: nine cells ({xs} {ys})")
+        # THE CLIPPED BOTTOM ROW must still be reconstructed and on screen.
+        check(abs((ys[1] - ys[0]) - (ys[2] - ys[1])) <= 12,
+              f"{name}: the rows are evenly pitched ({ys})")
+        check(ys[2] + lo.LIT_R < f.shape[0],
+              f"{name}: the derived bottom row can still be sampled "
+              f"({ys[2]} + {lo.LIT_R} < {f.shape[0]})")
+        st = lo.state(f, geom)
+        check(st is not None and lo._grid(st) == want,
+              f"{name}: state reads {lo._grid(st) if st else None}, want {want}")
+        if st:
+            mv = lo.solve(st, lo.matrix())
+            check(mv is not None and len(mv) == 5,
+                  f"{name}: solved in {len(mv) if mv else None} presses")
+
+    # --- and on nothing else --------------------------------------------
+    others = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer"):
+        others += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/hints_*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/balance_board*.png"))
+    fires = [os.path.basename(p) for p in sorted(others)
+             if (im := cv2.imread(p)) is not None and lo.locate(im) is not None]
+    check(not fires, f"locate fires on none of {len(others)} other frames "
+                     f"({fires[:3]})")
+
+
+def test_an_ss_family_is_dispatched_by_looking_not_by_name():
+    """`ss.identify` names the four families off the screen, and the drivers
+    do not decide whether anything banked.
+
+    The pixels win - the rule this project records for TP and then had to
+    re-learn for SS. And a one-stage mission ends straight on `Mission
+    Success!` with no stage dialog, so `mission_over` exists: without it the
+    Lights Out driver waited out its blank tolerance and reported "lost" while
+    `Mission Success! 10,000 gold` was on screen, and `run_one` threw the win
+    away.
+    """
+    print("\nan SS family is dispatched by looking, not by name")
+    import ss as ss_mod
+
+    cases = (("ref/auto/ss/lights_board.png", "lights"),
+             ("ref/auto/ss/lights_board_lit0.png", "lights"),
+             ("ref/auto/ss/balance_board_stage1.png", "balance"),
+             ("ref/auto/tp/kekkai_puzzle.png", "rune"))
+    for rel, want in cases:
+        f = cv2.imread(os.path.join(ROOT, rel))
+        if f is None:
+            check(False, f"{rel} is on disk")
+            continue
+        got = ss_mod.identify(f)
+        check(got == want, f"{os.path.basename(rel)} -> {got} (want {want})")
+
+    # a hints panel is NOT a puzzle - it must be dismissed, not played
+    for p in sorted(glob.glob(os.path.join(ROOT, "ref/auto/ss/hints_*.png"))):
+        f = cv2.imread(p)
+        if f is None:
+            continue
+        check(ss_mod.identify(f) is None,
+              f"{os.path.basename(p)}: a hints panel names no family")
+        check(ss_mod.hints_button(f) is not None,
+              f"{os.path.basename(p)}: but it does offer its button")
+
+    src = inspect.getsource(ss_mod.run_one)
+    check("close_out" in src, "run_one closes out")
+    # Only the PUZZLE branch changed. The rune path keeps its own veto, and
+    # asserting about the whole function would have read that as the failure.
+    branch = src.split('elif kind in ("balance", "lights"):')[1]
+    branch = branch.split("elif kind ==")[0]
+    check('if outcome not in ("cleared", "failed"):' not in branch,
+          "and a puzzle driver's verdict no longer vetoes close_out, which is "
+          "the measurement that establishes a banked mission")
+
+    for drv in (ss_mod.play_balance, ss_mod.play_lights):
+        d = inspect.getsource(drv)
+        check("mission_over" in d,
+              f"{drv.__name__} stops on the reward panel")
+        check("blank <= BLANK_TOLERANCE" in d,
+              f"{drv.__name__} tolerates the gap between stages")
+        check(d.index("= stage_dialog(f)") < d.index("blank += 1"),
+              f"{drv.__name__} checks the dialog BEFORE counting a frame as "
+              f"blank")
+        check(d.index("mission_over(f)") < d.index("blank += 1"),
+              f"{drv.__name__} checks the reward panel before that too")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -5126,7 +5470,11 @@ def main():
                test_a_greyed_skill_is_never_clicked,
                test_a_template_is_recut_per_renderer_where_the_backend_differs,
                test_an_accidental_scroll_cannot_move_the_game,
-               test_the_unknown_streak_counts_the_ladder_not_our_label):
+               test_the_unknown_streak_counts_the_ladder_not_our_label,
+               test_the_ss_hints_panel_is_dismissed_by_a_button_below_the_fold,
+               test_balance_control_is_read_and_solved_as_a_subset_sum,
+               test_lights_out_is_solved_over_gf2_and_the_rule_is_learned,
+               test_an_ss_family_is_dispatched_by_looking_not_by_name):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

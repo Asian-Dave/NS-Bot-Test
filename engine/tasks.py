@@ -110,6 +110,40 @@ class TpTraining(Task):
         return f"TP pass: {played} started, {banked} banked"
 
 
+class SsTraining(Task):
+    """One SS pass: play the whole day's SS list, then hand back.
+
+    THE NEXT TIER UP FROM TP, and the operator asked for it as its own button
+    rather than something reached through the farm. That is not only
+    convenience: an SS mission that turns out to be COMBAT used to leave the
+    supervisor in `farm_missions`, which then went off and started a story
+    mission - "it always returns to farm mission after combat".
+
+    Same shape as TpTraining: a one-shot over the day's list, terminating when
+    every row is played or measured to be greyed out rather than on a count.
+
+    SS MIXES PUZZLES AND FIGHTS, and which is which is read off the screen:
+    `Sage Power Seal` is the rune Mastermind, `Twins Unicorn` is two Lv 80
+    enemies. Combat is handed to the supervisor's OWN mission runner, so SS
+    fights inherit the whole battle stack - the panel's rotation, the
+    greyed-slot skip, cooldown learning, the stun fallback to Dodge and
+    DamageWatchdog - instead of a second copy of it.
+    """
+
+    key, label = "ss_training", "SS training"
+    oneshot = True
+
+    def run(self, rt):
+        import ss as ss_mod
+        rt.note = "SS run in flight - the panel pauses until it finishes"
+        rt.push()
+        played, banked = ss_mod.run_all(rt.cap, rt.actor, rt.log,
+                                        tpls=rt.tpls,
+                                        play_combat=rt._run_mission,
+                                        relog=rt.relog)
+        return f"SS pass: {played} started, {banked} banked"
+
+
 class FarmMissions(Task):
     """Farm story missions, one mission per lap.
 
@@ -253,7 +287,7 @@ class ExamKekkai(Task):
 
 # ORDER IS THE PANEL'S ORDER. `idle` sits last because it is the resting
 # choice, not the first thing an operator wants to reach for.
-REGISTRY = [ResumeToLobby(), TpTraining(), FarmMissions(),
+REGISTRY = [ResumeToLobby(), TpTraining(), SsTraining(), FarmMissions(),
             ExamKekkai(), Idle()]
 BY_KEY = {t.key: t for t in REGISTRY}
 AS_DICTS = [t.as_dict() for t in REGISTRY]

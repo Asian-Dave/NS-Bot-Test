@@ -3789,6 +3789,229 @@ installs a fresh rAF chain per call without cancelling the previous one and
 they all increment the same counter: three calls read 119.6 / 239.3 / 359.8.
 The A/B harness only escapes it because each backend is preceded by a reload.
 
+## SS: THE OTHER TWO FAMILIES — Balance Control and Lights Out, both cleared
+
+Both were sitting behind one obstacle that had nothing to do with either
+puzzle, and neither had ever been seen.
+
+### THE HINTS PANEL HAS NO X, AND ITS BUTTON IS DRAWN OFF SCREEN
+
+`Balance Control` and `Sage Sealed Boxes` open on a panel of illustrated rules
+instead of the rune family's rules popup. `open_puzzle` swept three X templates
+across it and pressed nothing, so both missions were abandoned as unrecognised
+and the families could never be learned. Measured on all five saved frames, no
+X-shaped anchor comes close:
+
+    close_popup_x      0.608 / 0.665      close_promo_x    0.466 / 0.454
+    close_popup_x_menu 0.620 / 0.610      mission_start    0.598 / 0.502
+
+The only exit is a wide green button at the bottom of the panel — **and it does
+not fit on screen.** The game is 839 CSS px tall in a 720 px viewport, so its
+bottom 238 captured px are hidden, and the button lands exactly there: tops
+measured at y=1404 and y=1410 against a frame that ends at 1440, leaving a
+30..36 px sliver. So `ss.hints_button` clicks near the blob's TOP rather than
+its centre — the centre of a clipped button is off screen, and a Flash button's
+hit area is the whole button, so the sliver is as good as the middle.
+
+The positive signal is the WIDTH: both panels draw it at 412 px. The band floor
+of 1350 is what does the real separating, because the same green range also
+catches the puzzle art at y=1300 (884x43 and 440x101) and a width window alone
+would let the 440 through. Verified: 5 of 5 hints frames, 0 of 94 other
+reference frames.
+
+### BALANCE CONTROL IS A SUBSET SUM, and the target is forced
+
+Two columns of numbers, a circle button per row between them, a red SUM box
+under each column, `Target: N` at the top, and a countdown. Clicking a row's
+circle SWAPS that row's two numbers — verified by prediction, not assumed: the
+first click was told which pair reversal to expect and the board was re-read to
+confirm it.
+
+Because a swap only moves values BETWEEN the columns, the grand total is
+invariant, so the target is forced to half of it — measured on every board
+seen (100 -> 50, 104 -> 52, 152 -> 76). Nothing therefore reads the white
+`Target:` text: deriving it costs no perception and cannot disagree with the
+board. With `d_i = right_i - left_i`, the puzzle is
+
+    choose S with sum(d_i for i in S) == total // 2 - left_sum
+
+Four rows is sixteen subsets; brute force is the whole algorithm, and `solve`
+returns the SHORTEST set because boards often have two answers (stage 1's had
+`{0,2}` and `{1,3}`).
+
+**STAGE 2 HIDES THE SUMS — they read `??`.** So the sums are COMPUTED from the
+rows and the printed values are only a CROSS-CHECK when present: a column must
+equal its own sum box, which is exactly the invariant a misread digit breaks.
+A reader that depended on them stopped dead on the second stage of every
+mission. `?` is an EXEMPLAR rather than a fallback, so "deliberately hidden" is
+read positively and never confused with "a digit I could not recognise" — the
+two want opposite responses.
+
+Digits are read from a mask, so **one exemplar set serves both the pale-yellow
+row numbers and the RED sums** — the same trick the kekkai counters needed.
+0 to 9 are harvested; measured worst distance 0.037 at a worst margin of 5.8x.
+
+**ANCHOR ON THE BOXES, NOT ON THE SUM TEXT.** The first version keyed on the
+red sum digits and died on stage 2's `??`. The boxes are what both variants
+draw: near-black rectangles, interior grey 31 against a border of 77, 359x157
+at a 203 px pitch, columns centred x=1236 and x=2188. A `grey < 40` pass finds
+the bottom THREE rows on every frame held and never the top two — the glow
+behind those is brighter — which costs nothing, because the bottom row plus the
+pitch locates the rest.
+
+`locate` answers "where are the boxes"; **`board_present` is what DISPATCH
+uses**, and the difference is not cosmetic. Red text is everywhere in this game
+— floating damage, status effects, the Admin Message banner — and the
+sum-digit version fired on **31 of 94** combat and lobby frames. Requiring two
+columns of evenly-pitched boxes with at least two paired pale rows above them
+brings that to 0 of 99.
+
+### THE CLOCK IS THE REASON `balance.py` COMPUTES INSTEAD OF POLLING
+
+169 s per stage (99 s on the hints illustration). The first live look at the
+board cost the mission outright: reading it, measuring the geometry offline and
+coming back to click took longer than the timer, and the stage ended
+`Mission Fail` at `0s` with nothing clicked. Every step is now one pass —
+locate, read, solve, click — and the module never waits on anything it can
+compute.
+
+### A STAGE IS MANY BOARDS UNDER ONE CLOCK — and that produced a FALSE FAILURE
+
+Balancing the columns does not end the stage: the game immediately deals a
+FRESH set with a fresh target and the timer keeps running.
+
+    169s   left 17 18  7 12 = 54   right  5 24 15  2 = 46   target 50
+     94s   left 19  5  9 34 = 67   right 12  1  1 23 = 37   target 52
+
+The first attempt read that second board as the result of its own clicks and
+reported *"after the swaps the sums are 67/37, not 50"* — a false failure on a
+round it had just WON. That is the vacuous-verification trap this file already
+records for the hand-seal slots: a reading taken after the screen has moved on
+says nothing about what we did. Note the target tracked the total both times,
+which is the strongest evidence for the swap model — the total is only
+invariant under swapping, and a re-roll is exactly where it may change.
+
+So a round's verdict is "did the board become something OTHER than what my
+swaps would have made it": that is a re-roll, and a re-roll only happens on
+success.
+
+**AND A BLINK IS NOT AN ENDING.** The first version called the board gone the
+instant `locate` missed, and a re-roll redraws the boxes — so every round
+returned "gone" after zero wins, which meant **a wrong answer and a win were
+reported identically**. That is worse than a wrong count: it is the loss of the
+only signal that says whether the solver is right. An absent board now has to
+persist for the whole wait, and only the stage dialog ends a round early.
+
+### LIGHTS OUT — a 3x3 GF(2) system, cleared in five presses
+
+`Sage Sealed Boxes`. Nine spheres in a wooden frame and a timer; the game's own
+hints panel gives the rules, half of them in Spanish: *"There are randomly 1-2
+circles with light at the start"*, *"Extinguish all the light to clear the
+stage"*. Lit is ON, grey is OFF, pressing toggles a neighbourhood, and over
+GF(2) that is `A x = b` on nine unknowns. The 3x3 plus-rule matrix is
+invertible, so every board has exactly one solution — verified against **all
+512 states**, not a sample. Live:
+
+    O........  ->  press [0, 2, 5, 6, 7]
+    .O.O.....     ..OO.O...     ...OO...O     ....O.OOO     dark
+
+Five presses, every intermediate state exactly as predicted, then
+`Mission Success! Sage Sealed Boxes  10,000 gold / 10,000 XP`. It is a
+ONE-STAGE mission.
+
+**The rule is LEARNED rather than assumed.** The plus shape is the prior; every
+press is read before and after, so it reports which cells it actually toggled
+and the model corrects itself from moves that were going to be made anyway.
+Nothing is spent probing — which matters, because this project has already lost
+an SS mission to a diagnostic sweep that ate the budget it was diagnosing.
+`solve` does not rely on invertibility either: it eliminates, then enumerates
+the solution coset and returns the shortest member, so a learned matrix that
+turns out singular still works.
+
+**TWO OF THE NINE CELLS DEFEAT A CENTROID**, and both had to be measured:
+
+    a LIT sphere      masks 232x222 against a grey one's 274x274 - its bright
+                      core falls outside both colour ranges, so the centroid
+                      lands 24 px up and left of the true centre
+    the BOTTOM ROW    is clipped by the viewport at y=1440, masking 274x196,
+                      so its centroid sits 36 px high
+
+In both cases the LEFT and TOP edges survive and only the far side is missing,
+so `left + R` / `top + R` — with R from the whole spheres on that very frame —
+reconstructs all nine centres to within 7 px against a radius of 137. Measured
+grid: columns 1382 / 1733 / 2085, rows 668 / 1028 / 1388.
+
+**Requiring six whole spheres does not work**: with one light on only five are
+whole, and two x clusters cannot say WHICH two of the three columns they are.
+Reconstructing the centres first removes the ambiguity instead of guessing at
+it. First attempt did the arithmetic on `top + bw//2` per blob and inherited
+the lit sphere's shrunken width, putting the extrapolated bottom row at 1372
+instead of 1388.
+
+### A PUZZLE DRIVER'S VERDICT MUST NOT VETO `close_out`
+
+Lights Out cleared in five presses, and `run_one` reported `banked=False`.
+The driver had returned "lost" — no board and no stage dialog followed — while
+`Mission Success! 10,000 gold` was on screen at that moment, because a
+one-stage mission ends straight on the reward panel and the panel is not an OK
+button, so `stage_dialog` cannot see it.
+
+Two fixes, and the second is the general one:
+
+* `ss.mission_over` tests for the reward panel, so a driver stops at once
+  instead of waiting out its blank tolerance;
+* **`close_out` is asked either way**, because it is the measurement that
+  establishes a banked mission. A driver's opinion about its own stage is not
+  that measurement. (The rune path keeps its veto; only the puzzle branch
+  changed.)
+
+Also: a stage ending is not instant. Both drivers tolerate a bounded run of
+frames with neither board nor dialog (`BLANK_TOLERANCE`), and only a sustained
+blank is a real loss.
+
+### CORRECTION — COMPLETED SS MISSIONS DROP OUT OF THE DAY'S LIST
+
+TP's do not: this file records that they stay listed and go GREY, and the whole
+`start_row` "did anything change?" mechanism exists because of it. **SS behaves
+the other way.** Measured across one afternoon: five rows over two pages, then
+two rows on one page, then a panel reading `1 / 0` with no rows at all.
+
+Consequence, and it was a real bug: an exhausted SS day looks exactly like a
+list that never opened, and `to_ss_list` reported *"the SS list did not open"*
+about a perfectly healthy panel — which would have `run_all` blame navigation
+for having nothing left to do. That is the negative-definition trap again:
+"no rows matched" is not evidence that the panel failed to open. The list UI
+carries its own anchors and all three read **1.000** on the empty panel against
+0.18..0.35 for anything row-shaped, so the panel's presence is now a positive
+reading.
+
+### A FIXTURE DIRECTORY THE BOT WRITES TO CANNOT CARRY A HARDCODED EXPECTATION
+
+Second instance, after the cooldown frames. The hints test globbed
+`ref/auto/ss/*.png` and asserted every frame offers a hints button; the moment
+a live run saved a Lights Out BOARD into that directory, it asserted that a
+board offers a hints button and failed on correct code. The fixtures are named
+for what they are now — `hints_balance_*`, `hints_lights_*`, `lights_board*`,
+`balance_board*` — and each test globs only its own.
+
+### STILL OPEN on SS
+
+* **A red dialog was followed by `Mission Success!`.** Stage 2 of Balance
+  Control ended on the red OK button — which this file records as `Mission
+  Fail` — with all four of its boards arithmetically correct, and then the
+  reward panel banked the mission. So either that button is not always a
+  mission failure, or a stage can be failed without failing the mission. The
+  dialog is now SAVED to `ref/auto/ss/balance_fail_*.png` when it appears,
+  because it is gone by the time an operator looks.
+* **Hidden sums remove the arithmetic cross-check.** When stage 2 draws `??`
+  there is nothing to validate a misread row against, and a wrong read is only
+  caught afterwards by the board failing to re-roll. Reading the white
+  `Target:` text would restore the check (`target == total // 2`) and needs one
+  more exemplar set.
+* **A failed mission still pays `close_out`'s 45 s timeout** looking for a
+  reward panel that cannot be there.
+
+
 ## THE GAME'S OWN SETTINGS — and three attempts aimed at the wrong layer
 
 The operator wanted to switch Ruffle's render backend from the panel, because
