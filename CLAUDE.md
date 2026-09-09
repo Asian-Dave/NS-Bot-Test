@@ -2146,6 +2146,94 @@ rescans on arrival, and **clears the dud set**, because those coordinates
 described the previous map and would blacklist innocent ground on a map the bot
 has never seen.
 
+## MINIMISING THE WINDOW — the renderer survives it, the COMPOSITOR does not
+
+"Can the window be minimised and still keep the game running?" splits in two,
+and rAF alone gives the wrong answer to the half that matters.
+
+**THE GAME KEEPS RUNNING, COMPLETELY UNTHROTTLED.** Measured with a
+second-by-second rAF trace recorded IN the page (so nothing is evaluated while
+the window is down, and a suspended renderer cannot hang the probe):
+
+    t     top fps   game fps   visibilityState
+    -1      120       120      visible
+    +1      119       119      hidden        <- minimised
+    +6      118       118      hidden
+    +12     120       120      hidden
+    +13     120       120      visible       <- restored
+
+`visibilityState` does go to `hidden`, and rAF does not care: 120 fps
+throughout, in the top page and in the game frame alike. That is the three
+launch flags doing their job — `--disable-backgrounding-occluded-windows`,
+`--disable-renderer-backgrounding`, `--disable-background-timer-throttling`,
+all three verified present on the live browser. `browser.py`'s comment
+predicted exactly this and it is now measured rather than hoped.
+
+**BUT THE BOT DOES NOT SEE VIA rAF — IT SEES VIA `Page.captureScreenshot`,
+AND THAT BLOCKS.** Same window, captures issued on their own CDP connection
+from a worker thread:
+
+    t       took    phase
+    -0.4    0.14s   visible
+    +0.3    7.00s   MINIMISED   <- returned only when the window came back
+    +8.2    0.13s   visible
+
+    and again over 45 s down:
+    +0.3   45.98s   MINIMISED   <- same, so it does NOT recover on its own
+
+One capture, issued just after minimising, blocks for exactly as long as the
+window is down. **Zero captures complete while minimised**, at either
+duration. A minimised window does not composite, so there is no new frame to
+hand over — and nothing times out, because `CDP.call` waits with `select` and
+no socket timeout (a timeout expiring mid-frame desynchronises the stream, as
+this file records).
+
+**IT IS THE GOOD FAILURE, AND THAT IS WORTH SAYING PRECISELY.** The bot is
+parked INSIDE the capture call: it never receives a frame to be wrong about,
+never reports an unrecognised screen, and never clicks. The DANGEROUS version
+would be captures SUCCEEDING with stale pixels, which is exactly what this
+file warns about for the lock screen — "captures show a stale frame and every
+template match is against the past". That is not this.
+
+It freezes more than the perception, though: `Capture.on_activity` is the hook
+that pumps the operator's buttons and the panel's heartbeat, so Run, Stop and
+the staleness banner all stop being serviced too. Everything resumes cleanly
+on restore.
+
+**THE REAL HAZARD IS THAT THE GAME DOES NOT FREEZE WITH IT.** rAF keeps
+running at 120 fps, so the world moves on while the bot is blind, and several
+things in this game are on a CLOCK: Balance Control allows 169 s per stage,
+Lights Out 84 s, and combat has its own turn timer. Minimise mid-puzzle and
+the bot resumes to a `Mission Fail` it could not have prevented. Park the
+window off-screen instead.
+
+**OFF-SCREEN IS THE ANSWER, AND IT WORKS PERFECTLY.** Move the window instead
+of minimising it: still a normal, composited window, just not where anyone is
+looking. Measured over the same six seconds:
+
+    +0.5 .. +5.3   0.14 .. 0.16s per capture, every frame different
+
+Full speed, no stalls. Note macOS CLAMPS the position — asking for
+`left: 6000, top: 3000` landed it at `1688, 995`, keeping a corner on the
+desktop — so in practice the window ends up parked in a corner rather than
+truly gone. Covering it with another window is the same class and the
+occlusion flag already handles that.
+
+Two things that follow:
+
+* **Never resize it to hide it, only move it.** The bot's viewport is pinned
+  with `Emulation.setDeviceMetricsOverride`, so it is independent of the OS
+  window and moving cannot desync a click. Resizing `ruffle-player` is the
+  standing prohibition at the top of this file, and shrinking the OS window is
+  a needless invitation to reflow the page under the bot.
+* **A separate macOS Space is UNMEASURED.** It plausibly behaves like a
+  minimise (the compositor for an inactive Space may stop), and guessing is
+  what this file exists to prevent. Measure it with the same probe before
+  relying on it.
+
+Still distinct, and still true: SLEEP cannot be prevented and the LOCK SCREEN
+is unmeasured — see the section on those. This entry is about minimising only.
+
 ## SLEEP AND LOCK SCREEN ARE DIFFERENT PROBLEMS — one is impossible
 
 Asked as one question ("can the bot keep running when I sleep or lock the
@@ -2895,6 +2983,66 @@ per-user paths by inspecting the evaluated candidate strings, and on macOS
 relative string and was invisible. The assertion now reads the module source
 instead - the right move whenever a platform-specific value cannot exist on the
 platform running the test.
+
+### `os.kill(pid, 0)` IS A KILL ON WINDOWS, NOT A PROBE
+
+Reported from a Windows machine: *"when I clicked stop it did not immediately
+reconnect the panel and just died."* That is precisely what the code did.
+
+CPython's `os.kill` only sends a real signal for `CTRL_C_EVENT` and
+`CTRL_BREAK_EVENT`; for every other value it calls
+`TerminateProcess(handle, sig)`. So the POSIX liveness idiom
+`os.kill(pid, 0)` **terminates the target with exit code 0** there — and
+`_respawn` releases the pid lock by asking `_lock_holder(lock) == os.getpid()`,
+which probed OUR OWN pid. Pressing Stop therefore made the process kill itself
+before it could spawn its replacement, leaving the injected panel with no
+receiver: exactly the "dead panel, no bot" state Stop was rewritten to prevent.
+
+`_alive(pid)` is now the single liveness probe and is non-destructive on both
+platforms. Windows has no zombies, so a handle that signals means the process
+is finished, and `WaitForSingleObject(h, 0)` answers directly —
+`WAIT_TIMEOUT` running, `WAIT_OBJECT_0` exited — opened with `SYNCHRONIZE`,
+the least right that permits the wait, so it cannot modify the target even by
+accident.
+
+**Two more POSIX-only assumptions sat in the same path, and both failed
+SILENTLY rather than loudly:**
+
+    `_dead`      shelled out to `ps`, which raises FileNotFoundError on
+                 Windows, was swallowed, and returned "not dead" for ever - so
+                 every `_wait_for_exit` burned its full 10 s timeout
+    `_proc_cmd`  also shelled out to `ps`, returning "" for every pid - and
+                 `_lock_holder` reads an unreadable command line as "not the
+                 holder we recorded" and DROPS THE LOCK. The one guard against
+                 two bots clicking one game was inert on Windows, on every
+                 launch.
+
+`_proc_cmd` now uses `Get-CimInstance Win32_Process` with a `wmic` fallback
+(`wmic` is deprecated and absent on recent Windows, so it cannot be the only
+route), and `_dead` no longer reaches for `ps` there at all.
+
+**The unknown-answer direction matters and is chosen deliberately.** When
+`_alive` genuinely cannot tell, it says ALIVE: a false "alive" costs a refused
+launch the operator can resolve by killing a process, while a false "dead"
+lets two instances click the same game — which this file records happening
+eight instances over.
+
+**A test that only runs on POSIX still catches this**, which is the point:
+it asserts there is exactly ONE `os.kill` call site, that it is inside
+`_alive`, and that the platform test precedes it in the CODE (the first
+version of that assertion matched the docstring's own prose and failed on
+correct code — the trap this suite keeps re-learning). It also spawns a real
+child, probes it four times and asserts it is still running, which the old
+code would have killed.
+
+### AND TWO WINDOWS REPORTS THAT WERE NOT BUGS AT ALL
+
+The same machine reported the window still scrollable and webgl not working
+for the bot. Both features exist ONLY in commit `75053db`, which sat
+**unpushed** while that machine was tested; the newest commit it could have
+pulled predates the scroll lock and `tpl/webgl/` entirely. Before diagnosing a
+platform difference, check `git log --oneline -1` on the platform — a missing
+commit and a broken port look identical from the outside.
 
 ## THE "Go!" BADGE BLINKS — which is why one veto worked and the next did not
 

@@ -1679,10 +1679,84 @@ def _write_skills(order):
     _write_json(SKILLS_PATH, order)
 
 
-def _proc_cmd(pid):
-    """The command line of `pid`, or "" if it cannot be read."""
+def _alive(pid):
+    """Is `pid` a live process? NON-DESTRUCTIVE on every platform.
+
+    **`os.kill(pid, 0)` IS NOT A PROBE ON WINDOWS - IT IS A KILL.** CPython's
+    `os.kill` only sends a real signal for `CTRL_C_EVENT` and
+    `CTRL_BREAK_EVENT`; for anything else it calls
+    `TerminateProcess(handle, sig)`. So the POSIX idiom `os.kill(pid, 0)`
+    terminates the target with exit code 0 there.
+
+    That was not theoretical. `_respawn` releases the pid lock by asking
+    `_lock_holder(lock) == os.getpid()` - which probed OUR OWN pid - so on
+    Windows pressing Stop made the process kill itself before it could spawn
+    its replacement. Reported exactly as observed: "when I clicked stop it did
+    not immediately reconnect the panel and just died."
+
+    Windows has no zombies, so a handle that signals means the process is
+    finished, and `WaitForSingleObject(h, 0)` answers liveness directly:
+
+        WAIT_TIMEOUT  (0x102)  still running
+        WAIT_OBJECT_0 (0x000)  exited, handle merely not yet closed
+
+    `SYNCHRONIZE` is the least access right that permits the wait, so this
+    cannot modify the target even by accident.
+    """
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+        except Exception:
+            return True                   # unknown: assume alive, never kill
     try:
-        import subprocess
+        import ctypes
+        SYNCHRONIZE, WAIT_TIMEOUT = 0x00100000, 0x00000102
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not h:
+            return False                  # no such process (or already gone)
+        try:
+            return k.WaitForSingleObject(h, 0) == WAIT_TIMEOUT
+        finally:
+            k.CloseHandle(h)
+    except Exception:
+        # Cannot tell. Say ALIVE: a false "alive" costs a refused launch the
+        # operator can resolve, while a false "dead" lets two bots click one
+        # game - which this file records happening eight instances over.
+        return True
+
+
+def _proc_cmd(pid):
+    """The command line of `pid`, or "" if it cannot be read.
+
+    `ps` is POSIX-only, so on Windows this returned "" for every pid - and
+    `_lock_holder` reads an unreadable command line as "not the holder we
+    recorded" and DROPS THE LOCK. The one guard against two bots clicking one
+    game was therefore inert on Windows, every single launch.
+    """
+    import subprocess
+    if os.name == "nt":
+        # PowerShell first: `wmic` is deprecated and absent on recent Windows.
+        for argv in (
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\")"
+             f".CommandLine"],
+            ["wmic", "process", "where", f"processid={int(pid)}",
+             "get", "commandline", "/value"],
+        ):
+            try:
+                out = subprocess.run(argv, capture_output=True, text=True,
+                                     timeout=8).stdout or ""
+            except Exception:
+                continue
+            out = out.replace("CommandLine=", "").strip()
+            if out:
+                return out
+        return ""
+    try:
         out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=3)
         return (out.stdout or "").strip()
@@ -1713,9 +1787,7 @@ def _lock_holder(path, marker="app.py"):
             pid, saved = 0, ""
     if not pid:
         return None
-    try:
-        os.kill(pid, 0)                       # raises unless it is alive
-    except (ProcessLookupError, PermissionError, OSError):
+    if not _alive(pid):
         _drop_lock(path)
         return None
     cmd = _proc_cmd(pid)
@@ -1762,14 +1834,15 @@ def _dead(pid):
     This is the same trap this project already recorded for the pid lock: a
     bare pid proves something exists, never that it is alive and ours.
     """
-    try:
-        os.kill(pid, 0)
-    except OSError:
+    if not _alive(pid):
         return True                       # no such process
-    except Exception:
+    if os.name == "nt":
+        # `_alive` already distinguishes finished from running on Windows -
+        # there are no zombies there - and shelling out to `ps` would only
+        # raise FileNotFoundError, be swallowed, and report "not dead" for
+        # ever, so every wait burned its full timeout.
         return False
-    # It exists. A zombie is finished, so ask the OS for its state. No `ps` on
-    # Windows, where a finished process's handle simply goes away instead.
+    # It exists. A zombie is finished, so ask the OS for its state.
     try:
         out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=5).stdout

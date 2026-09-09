@@ -5408,6 +5408,96 @@ def test_an_ss_family_is_dispatched_by_looking_not_by_name():
               f"{drv.__name__} checks the reward panel before that too")
 
 
+
+def test_liveness_is_probed_without_killing_anything_on_windows():
+    """`os.kill(pid, 0)` is a PROBE on POSIX and a KILL on Windows.
+
+    CPython's `os.kill` only sends a real signal for `CTRL_C_EVENT` and
+    `CTRL_BREAK_EVENT`; for every other value it calls
+    `TerminateProcess(handle, sig)`. So the POSIX idiom terminates the target
+    with exit code 0 there.
+
+    That is not theoretical. `_respawn` releases the pid lock by asking
+    `_lock_holder(lock) == os.getpid()`, which probed OUR OWN pid - so on
+    Windows pressing Stop made the bot kill itself before it could spawn its
+    replacement, leaving the injected panel with no receiver. Reported from a
+    Windows machine as: "when I clicked stop it did not immediately reconnect
+    the panel and just died."
+
+    Two more POSIX-only assumptions sat in the same code path, and each failed
+    silently rather than loudly:
+
+        `_dead`      shelled out to `ps`, which raises FileNotFoundError on
+                     Windows, was swallowed, and reported "not dead" for ever -
+                     so every wait burned its full timeout
+        `_proc_cmd`  also shelled out to `ps`, returning "" for every pid, and
+                     `_lock_holder` reads an unreadable command line as "not
+                     the holder we recorded" and DROPS the lock - so the one
+                     guard against two bots clicking one game was inert on
+                     Windows, on every launch
+    """
+    print("\nliveness is probed without killing anything on Windows")
+    import app as app_mod
+
+    src = inspect.getsource(app_mod)
+
+    # CODE ONLY. These functions DISCUSS os.kill at length in their
+    # docstrings, and the first version of every check below matched the prose
+    # and failed on correct code - the trap this suite keeps re-learning.
+    def code_of(fn):
+        t = inspect.getsource(fn)
+        parts = t.split('"""')
+        return parts[0] + "".join(parts[2:]) if len(parts) > 2 else t
+
+    # --- os.kill may appear ONLY inside the probe, and only for POSIX ----
+    probe = code_of(app_mod._alive)
+    calls = [ln.strip() for ln in src.splitlines()
+             if "os.kill(" in ln and not ln.strip().startswith("#")
+             and "`" not in ln]
+    check(len(calls) == 1,
+          f"exactly one os.kill call site remains ({calls})")
+    check("os.kill(" in probe, "and it is inside _alive")
+    check('os.name != "nt"' in probe or 'os.name == "nt"' in probe,
+          "which branches on the platform before using it")
+    check(probe.index('os.name != "nt"') < probe.index("os.kill("),
+          "the platform test comes BEFORE the os.kill, so Windows never "
+          "reaches it")
+
+    # --- everything that asks 'is it alive' goes through the probe -------
+    for fn in (app_mod._lock_holder, app_mod._dead):
+        body = code_of(fn)
+        check("_alive(" in body, f"{fn.__name__} uses _alive")
+        check("os.kill(" not in body,
+              f"{fn.__name__} does not call os.kill itself")
+
+    # --- `ps` is never the only answer ----------------------------------
+    for fn in (app_mod._dead, app_mod._proc_cmd):
+        body = code_of(fn)
+        if '"ps"' in body:
+            check('os.name == "nt"' in body,
+                  f"{fn.__name__} guards its use of `ps`, which is POSIX-only")
+
+    # --- and it still works here ----------------------------------------
+    check(app_mod._alive(os.getpid()) is True,
+          "our own pid reads as alive")
+    check(app_mod._alive(999999) is False,
+          "a pid that cannot exist reads as dead")
+    # A REAL PROCESS MUST SURVIVE BEING PROBED. This is the whole point: the
+    # old code would have terminated it on Windows, and nothing here would
+    # have noticed on a POSIX test host.
+    import subprocess as sp
+    child = sp.Popen([sys.executable, "-c", "import time; time.sleep(6)"])
+    try:
+        seen = [app_mod._alive(child.pid) for _ in range(4)]
+        check(all(seen), f"a live child survives four probes ({seen})")
+        check(child.poll() is None, "and is still running afterwards")
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+    check(app_mod._dead(child.pid) is True,
+          "and reads as dead once it has been reaped")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -5474,7 +5564,8 @@ def main():
                test_the_ss_hints_panel_is_dismissed_by_a_button_below_the_fold,
                test_balance_control_is_read_and_solved_as_a_subset_sum,
                test_lights_out_is_solved_over_gf2_and_the_rule_is_learned,
-               test_an_ss_family_is_dispatched_by_looking_not_by_name):
+               test_an_ss_family_is_dispatched_by_looking_not_by_name,
+               test_liveness_is_probed_without_killing_anything_on_windows):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
