@@ -376,6 +376,47 @@ class Runner:
                              key, got, value)
         return True
 
+    def ensure_renderer_templates(self):
+        """Load the live backend's templates once the game exists.
+
+        THE COLD START HAD NO RENDERER TO READ. `main` asks for the backend at
+        startup, but a cold SWF takes 25-30 s to load, so on a fresh launch
+        there is no `ruffle-player` yet and the probe returns nothing:
+
+            renderer: no canvas context yet (no ruffle-player)
+            renderer unknown, so the default templates stand
+
+        Nothing re-asked. So a session that started before the game finished
+        loading ran on the WRONG template set for its entire life - and on
+        webgl that means the farm cannot leave the village, which is the exact
+        failure the variants exist to fix. It only came right in practice
+        because the operator happened to switch the renderer by hand, which
+        reloads and re-reads.
+
+        This is one cheap CDP evaluate per cycle and it stops asking the moment
+        it gets an answer, so the steady-state cost is nothing. It deliberately
+        does NOT re-ask once known: the renderer cannot change while the
+        document stays put, and `_apply_game_setting` already handles the case
+        where it does.
+        """
+        if getattr(self, "_renderer_templates_for", None):
+            return
+        try:
+            info = browser.renderer_info(self.cdp)
+        except (OSError, CDPError) as e:
+            raise Disconnected(str(e))
+        except Exception:
+            return
+        want = (info or {}).get("requested")
+        if not want:
+            return                      # still loading; ask again next cycle
+        self._renderer_templates_for = want
+        self._renderer_live = info.get("live")
+        msg, warn = browser.describe_renderer(info)
+        (self.log.warning if warn else self.log.info)(
+            "the game is up - %s", msg)
+        _reload_templates_for_renderer(info, self.tpls, self.cfg, self.log)
+
     def _refresh_no_click_zone(self):
         """Re-read where the panel actually is, every cycle.
 
@@ -1534,6 +1575,7 @@ class Runner:
                     break
                 self.ensure_dock()
                 self.ensure_focus()
+                self.ensure_renderer_templates()
                 self.pump()
                 if self.mode == "running":
                     try:
@@ -1915,9 +1957,13 @@ def main():
     # already handed to `attach` and is shared by reference - rebinding here
     # would leave the capture and actor holding the pre-renderer set, which is
     # precisely the "half-applied correction" this project has been burned by.
-    _reload_templates_for_renderer(_info, tpls, cfg, log)
+    _startup_renderer = _reload_templates_for_renderer(_info, tpls, cfg, log)
 
     r = Runner(c, cap, actor, tpls, cfg, log, controls, dock, port=a.port)
+    # If the game was not up yet there is nothing to key on, so the loop keeps
+    # asking (see `Runner.ensure_renderer_templates`). Recording it here is
+    # what stops it asking once the answer is in.
+    r._renderer_templates_for = _startup_renderer
 
     # READ THE GAME'S OWN SETTINGS. The site stores and reuses these itself,
     # so there is nothing for us to re-apply at startup - only to report.

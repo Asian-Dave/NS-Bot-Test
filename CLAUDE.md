@@ -2985,6 +2985,258 @@ frame**, which is how the navigation gets taught - the same trick that
 eventually solved the mission list, the between-turns battle, the seal-broken
 dialog and the Level Up panel.
 
+## SS TRAINING — the multi-stage rune puzzle, cleared
+
+Mission Room -> `Special` tab -> `SS Training`, one row below TP Training at
+(2118, 1037). Five missions, all Lv 80, XP 10,000, Gold 10,000, flame 30 -
+five times TP's reward against TP's flame of 10:
+
+    Twins Unicorn · Sage Power Seal · Forest Guardians
+    Balance Control · Sage Sealed Boxes
+
+`Sage Power Seal` is **the same rune Mastermind as the TP kekkai**, and it has
+been cleared end to end: two stages, `Mission Success!` banked.
+
+**THE GAME STATES ITS OWN FEEDBACK MAPPING.** A rules panel opens before the
+puzzle and says outright that the green disc counts runes "correct in both
+pattern and position" and the gold disc "a correct rune pattern placed in the
+wrong position". That is exactly what this project established by carrying both
+hypotheses through live play - the mapping was right, and it is now confirmed
+from the game rather than inferred.
+
+### One mission is several stages, and the length ESCALATES
+
+    stage 1   FIVE nodes  -> length 5, answer Red,White,Blue,Black,Green
+    stage 2   SIX  nodes  -> length 6, answer Yellow,Red,Black,Green,Blue,White
+
+So the length is re-read PER STAGE from the seal's node count and never
+carried over. `count_nodes` needs a bigger box than the TP triangle uses -
+measured, the default (260, 160) clips a pentagon and returns 3 for a five-node
+seal, so `ss.NODE_BOX` is (320, 300).
+
+The secret's SHAPE also varies, which settles a question this file carried as
+an assumption. **Repeats occur.** Stage 1's answer repeated nothing, but the
+FIRST five-node stage played (a different attempt) had two survivors and
+neither was repeat-free - both repeated White. Stage 2's answer was a
+permutation of all six. So the solver must keep allowing repeats: assuming
+otherwise would search 720 codes instead of 46,656 and eliminate a true answer
+outright.
+
+### TEN ROWS PER STAGE, AND RUNNING OUT FAILS THE MISSION
+
+Not the stage - the whole mission, with `Mission Fail - Sorry, try again next
+time`. That was learned expensively: a diagnostic sweep of six all-same probes
+left four rows for solving and lost the mission. Knuth selection needs roughly
+six to eight guesses at length six, which fits ten; a probe sweep does not.
+
+An all-same guess is still the one probe whose answer is knowable without
+reading it - gold MUST be 0, because no wrong-position match is possible when
+every slot holds the same rune - which makes it perfect for harvesting and far
+too expensive for playing.
+
+### THE STAGE DIALOGS ARE TOLD APART BY COLOUR
+
+    Stage Clear    a GREEN button, area 31542, 351x108, centre (1712,  991)
+    Mission Fail   a RED   button, area 29891, 352x108, centre (1720, 1015)
+
+Same shape, same place; only the colour differs, and it decides whether to
+carry on to the next stage or stop. Checking the dialog BEFORE the puzzle
+matters: a solved stage leaves the panel closed and the dialog up, and "the
+panel is gone" alone cannot tell a clear from a failed mission - a script that
+read a closed panel as "solved" reported a win on a mission that had just
+failed.
+
+Verified against a real distractor: the game's own "Learn new Jutsu" nag has a
+green `Go to Academy` button inside the same band and is correctly NOT read as
+a stage dialog, because its aspect ratio is far wider than an OK button's 3.25.
+
+### GEOMETRY THAT WAS HARDCODED TO THE TP LAYOUT
+
+Five things, all now located rather than assumed, and each validated against
+both layouts:
+
+| | was | now |
+|---|---|---|
+| history column x | fixed 1950..2030, found NOTHING on SS | TP 1987, SS 2058 |
+| gold disc offset | fixed 86 | TP 84..86, SS 78..79 |
+| `count_filled` window | fixed, landed on SS's gold discs | relative to the located gold column |
+| `find_rune_buttons` | first row of six wins | the row with the widest HUE SPREAD |
+| `find_confirm_point` | largest dark blob | a SOLID disc, not a dark ring |
+
+**The rune row was the worst of them.** At length six there are six numbered
+slots AND six rune discs - two rows of six evenly spaced identical circles -
+and it locked onto the SLOTS. Every click landed on an empty numbered slot and
+six successive guesses read back byte-identical feedback from an untouched
+board. Saturation does not separate them (mean S 75 against 85); hue spread
+does, decisively:
+
+    slot row   H = 19 19 19 19 19 19        spread   0
+    rune row   H = 53 174 120 0 24 15       spread 174
+
+`find_confirm_point` had two failures in one. It picked a dark RING - a node's
+outline - whose centroid lands in the pale middle, so it returned a point that
+was BRIGHT (grey 220) out of a mask built from `g < 90`. Requiring a solid fill
+fixes it: the real submit disc measures fill 0.65 / 0.66 / 0.77 across the
+three layouts while every distractor sits at 0.18..0.47. And a "the centre must
+be dark" test was tried and REJECTED THE RIGHT BLOB everywhere, because the
+kanji is drawn LIGHT on the dark disc - centre grey 148 on both SS stages and
+204 on TP.
+
+### `count_filled` BY EDGES, because a black rune is not saturated
+
+The old version counted a row as filled from the fraction of strongly
+saturated pixels in the rune strip. That works until a row contains the BLACK
+rune: measured on a scroll with eight rows filled, the two rows holding black
+read 0.09 against a 0.12 gate and were counted EMPTY, so it returned 6 for 8 -
+and the solver then read stale rows and converged by luck.
+
+Hue is irrelevant to "is there an icon here, or a dash?", so measure STRUCTURE.
+Edge density separates cleanly and a black rune has as strong an outline as a
+bright one:
+
+    filled rows   0.160 .. 0.215 (SS, including the black-rune rows), 0.168 (TP)
+    empty rows    0.009 .. 0.089 (both layouts, both renderers)
+
+### `solve_live` CAN RESUME, because rows are the scarce resource
+
+It used to start a fresh model on every call, so a restart replayed the same
+openers into fresh rows - and a restart is exactly what happens after an
+unreadable digit is harvested and labelled. At length five the solver needs
+about six of the ten rows, so two wasted restarts lose the mission.
+
+`history` seeds it with answers already on the scroll and `on_history` reports
+them back after every answer, so a caller can resume. **The seed shape is the
+flat `(guess, green, gold)` this function already appends** - a first attempt
+passed a nested `(guess, (green, gold))` and would have filtered against a
+shape the solver never produces.
+
+Measured working: stage 1 resumed from two answers and solved in four more;
+stage 2 resumed three times across digit harvests and still finished inside its
+ten rows.
+
+### The digit exemplars are complete, 0 to 6
+
+Harvested during the clear, both discs. The set was the whole reason the solver
+kept stopping, and every stop was correct behaviour - an unread counter is
+refused, never rounded to the nearest exemplar, because a wrong counter
+silently corrupts the model. That happened once and is worth remembering: with
+only 0 and 1 present, an SS "2" matched the "1" exemplar above the 0.80 gate,
+the solver recorded green=1 for a row that truly read 2, and every candidate it
+computed afterwards came from a false premise.
+
+Note the last stall of the winning run was the digit **6** - the win condition
+itself. The game acted on it and cleared the stage while the solver could not
+read it, so the mission succeeded without the bot knowing why.
+
+## TP NOW BANKS — and the last blocker was a hand-picked threshold
+
+Five TP missions banked in one session across all three families: hand-seal
+(including eight-sign rounds), memory cards (20/20 and 10/10), and the kekkai.
+Before this, every pass read "N started, 0 banked".
+
+**THE CAUSE WAS FIVE THOUSANDTHS.** `close_out` confirmed the village with
+`_tpl("lobby_rail_fortune", 0.90)` - a threshold invented at the call site. The
+anchor's CALIBRATED threshold is 0.88; 0.90 was reasonable when it measured
+~1.000, which it does on wgpu. On webgl the same anchor reads **0.895**, so the
+village could never be confirmed and a won mission was reported as a failure.
+One second apart in the log:
+
+    15:56:40  Success panel cleared but the village did not come back; not
+              calling this a success
+    15:56:41  resume: lobby (lobby_rail_fortune conf=0.895)
+
+The resume ladder, on the calibrated 0.88, found it instantly. A threshold is
+calibrated ONCE against measured extremes; every call site that re-guesses it
+is a place where one backend, one animation frame or one re-cut silently
+changes an outcome. `lobby_rail_fortune` also has a webgl variant now, so it
+reads 1.000 there and the margin is real rather than marginal.
+
+### `close_share_x` CLOSES THE SUCCESS PANEL ITSELF
+
+There is often no separate share prompt to dismiss. Measured live:
+`close_share_x` matched 0.998, was clicked, and the next frame was the VILLAGE
+with the gold and level both up - the template had matched the reward panel's
+OWN close button, and the mission was already banked.
+
+The old code went straight on to hunt for the green check on that village
+frame, failed, and logged *"Success panel up but its check was not located
+(0.609)"* about a panel that no longer existed. **That one misleading line sent
+this investigation to measure a check glyph on a frame with no panel in it,
+twice** - a scale sweep peaked at 0.699 on village scenery. So the panel is now
+RE-VERIFIED after any dismissal, and if it has gone the village confirmation
+decides, which is the measurement that actually establishes a banked mission.
+
+**AND SAVE THE FRAME YOU SCORED, NEVER A FRESH CAPTURE.** The "save the frame
+that defeated us" instrumentation re-captured at save time, so it wrote the
+village - evidence that looked exactly like a panel whose check could not be
+found. Worse than no evidence, because it was confidently wrong. It saves `f`,
+the frame the decision was made on.
+
+## THE KEKKAI DIGIT READER — key on the INK, not on a white outline
+
+The kekkai stopped after guess 1 every time: "could not read row 0 (green
+0.410 / gold 0.897)". The geometry was never wrong - overlaid on a saved frame,
+the coordinates land exactly on the two feedback discs - and neither was the
+solver. `digit_mask` thresholded BRIGHT pixels, because on wgpu the glyph is a
+dark digit with a WHITE OUTLINE. webgl draws no outline, so:
+
+    green disc (dark)   bright fraction 0.08  - the "0" VANISHED, leaving only
+                                                a specular highlight
+    gold disc (light)   bright fraction 0.375 - the DISC went white and the "1"
+                                                became a dark HOLE in it
+
+The ink is dark in BOTH renderings - measured p1=17 against a green disc body
+of 112, and p1=28 against a gold body of 198 - so that is what to key on.
+Taking the darkest 30% inside a disc-shaped window (which also excludes the
+parchment and the disc's dark rim) gives a clean legible glyph on either disc,
+at consistent mask fractions of 0.150 and 0.153 where the old mask gave
+0.08 and 0.375.
+
+**THE OLD EXEMPLARS ARE NOT REUSABLE, AND THAT WAS MEASURED BEFORE RELYING ON
+IT.** Scored against ink masks of a known 0 and 1, all sixteen outline
+exemplars sat at 0.33..0.63 distance and the ink "1" matched `2.png` BEST - a
+wrong answer. An outline and a silhouette of the same glyph are different
+shapes, which is also why this file's earlier attempts to normalise between the
+two measured worse. So the ink set lives in `ref/auto/tp/digits_ink/` and
+`digits/` is left in place, unloaded, as the record of what wgpu draws.
+
+**IT IS DELIBERATELY INCOMPLETE.** Only two digits could be labelled with
+certainty from a saved panel - a "0" on the green disc and a "1" on the gold -
+so the gate has to REFUSE the rest rather than round them to the nearest
+exemplar. Verified: with only the wrong exemplar available, a 0 scores 0.099
+and a 1 scores 0.206 against the 0.80 gate, so both are refused; with the right
+one, both read 1.000. A wrong counter corrupts the solver's model silently,
+which is far worse than an unread one.
+
+Two exemplars turned out to be enough for a live solve, because early feedback
+counters are small:
+
+    guess 1  Green,Red,Blue     pool 216   feedback green=1 gold=1
+    guess 2  Green,Green,Red    pool  24   feedback green=1 gold=0
+    guess 3  Green,Blue,Black   pool   8   panel closed -> SOLVED
+
+A 2 or a 3 will still be refused and saved for labelling, which is the correct
+failure and how the set grows.
+
+## THE COLD START HAD NO RENDERER TO READ
+
+`main` asks for the backend once, at startup - but a cold SWF takes 25-30 s, so
+on a fresh launch there is no `ruffle-player` yet:
+
+    renderer: no canvas context yet (no ruffle-player)
+    renderer unknown, so the default templates stand
+
+and nothing re-asked. A session that started before the game finished loading
+therefore ran on the WRONG template set for its entire life, which on webgl
+means the farm cannot leave the village - the exact failure the variants exist
+to fix. It only came right in practice because the operator happened to switch
+the renderer by hand, which reloads and re-reads.
+
+`Runner.ensure_renderer_templates` asks once per cycle and stops the moment it
+gets an answer, so the steady-state cost is nothing. It does not re-ask once
+known: the renderer cannot change while the document stays put, and
+`_apply_game_setting` already covers the case where it does.
+
 ## THE HAND-SEAL GAME WAS NEVER FAILING TO MEMORISE — it clicked too early
 
 Five TP missions, zero banked, and the board explained it in one glance:

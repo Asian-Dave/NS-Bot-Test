@@ -920,44 +920,69 @@ def test_kekkai_digits():
     print("\n[14] kekkai feedback digits")
     import kekkai_play as kp
 
+    # THE MASK CHANGED, AND SO DID WHAT COUNTS AS AN EXEMPLAR.
+    #
+    # `digit_mask` used to threshold BRIGHT pixels, because on wgpu the glyph is
+    # a dark digit with a WHITE OUTLINE. webgl draws no outline - the same
+    # missing text stroke that broke seven templates - so on webgl the bright
+    # mask collapsed: the green disc's "0" vanished (bright fraction 0.08) and
+    # the gold disc's "1" became a dark HOLE in a white disc (0.375). The
+    # kekkai stopped after guess 1 every time.
+    #
+    # It now keys on the DARK INK, which is dark in both renderings, inside a
+    # disc-shaped window so the parchment and the disc rim are excluded.
     lib = kp.load_exemplars()
     check(bool(lib), "digit exemplars load")
-    check(set(lib) >= {0, 1, 2},
-          f"library covers 0, 1 and 2 (has {sorted(lib)})")
     check(all(set(np.unique(i)) <= {0, 255} for v in lib.values() for i in v),
-          "exemplars are binarised the same way the live patch is")
+          "exemplars are stored as masks, exactly as digit_mask produces them")
 
     # Tight-cropping must actually shrink the glyph, or it is doing nothing.
     any_trimmed = any(kp.tight_glyph(i).shape != i.shape
                       for v in lib.values() for i in v)
     check(any_trimmed, "tight_glyph trims the exemplar below the patch size")
 
-    # Every exemplar must classify as its own digit against the whole library,
-    # comfortably above the gate.
-    d = os.path.join(ROOT, "ref/auto/tp/digits")
-    worst = 1.0
-    for f in sorted(glob.glob(os.path.join(d, "*.png"))):
-        base = os.path.basename(f)
-        head = os.path.splitext(base)[0].split("_")[0]
-        if not head.isdigit():
-            continue
-        want = int(head)
-        g = cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2GRAY)
-        patch = cv2.threshold(g, 200, 255, cv2.THRESH_BINARY)[1]
-        best, got = 0.0, None
-        for val, imgs in lib.items():
-            for img in imgs:
-                t = kp.tight_glyph(img)
-                if t.shape[0] > patch.shape[0] or t.shape[1] > patch.shape[1]:
-                    continue
-                m = float(cv2.minMaxLoc(
-                    cv2.matchTemplate(patch, t, cv2.TM_CCOEFF_NORMED))[1])
-                if m > best:
-                    best, got = m, val
-        worst = min(worst, best)
-        check(got == want and best >= 0.80,
-              f"{base} reads as {want} ({got} @ {best:.3f})")
-    check(worst >= 0.95, f"weakest self-match across the library {worst:.3f}")
+    # --- THE INK LIBRARY IS SELF-CONSISTENT -----------------------------
+    frame = os.path.join(ROOT, "ref/auto/tp/digits/UNREAD_frame_1788876295.png")
+    if os.path.exists(frame):
+        f14 = cv2.imread(frame)
+        # Read off that saved panel by eye and overlaid to confirm placement:
+        # the green disc shows 0 and the gold disc shows 1.
+        for want, xy in ((0, (1997, 292)), (1, (2083, 292))):
+            got, conf = kp.read_digit(f14, xy, lib)
+            check(got == want and conf >= 0.80,
+                  f"the live webgl {'green' if want == 0 else 'gold'} disc "
+                  f"reads {want} (got {got} @ {conf:.3f})")
+
+        # --- AN UNSEEN DIGIT IS REFUSED, NOT MIS-ASSIGNED ---------------
+        #
+        # The ink library is deliberately incomplete - only the two digits that
+        # could be labelled with certainty from a saved panel - so the gate has
+        # to reject the rest rather than round them to the nearest exemplar. A
+        # wrong counter corrupts the solver's model silently.
+        for true, xy in ((0, (1997, 292)), (1, (2083, 292))):
+            without = {k: v for k, v in lib.items() if k != true}
+            if not without:
+                continue
+            got, conf = kp.read_digit(f14, xy, without)
+            check(got is None,
+                  f"with only {sorted(without)} available, a {true} is REFUSED "
+                  f"(got {got} @ {conf:.3f})")
+
+    # --- THE OUTLINE SET IS NOT LOADED, AND MUST NOT BE MERGED IN --------
+    #
+    # Measured: scored against ink masks of a known 0 and 1, every one of the
+    # sixteen outline exemplars sat at 0.33..0.63 distance and the ink "1"
+    # matched `2.png` best - a wrong answer. An outline and a silhouette of the
+    # same glyph are different shapes. They live on in `digits/` as the record
+    # of what wgpu draws; loading them would quietly reintroduce that.
+    check("digits_ink" in kp.INK_DIR,
+          f"exemplars come from a separate ink directory ({kp.INK_DIR})")
+    src14 = inspect.getsource(kp.load_exemplars)
+    check("INK_DIR" in src14 and '"ref/auto/tp/digits/*.png"' not in src14,
+          "load_exemplars reads the ink directory, not the outline one")
+    check("THRESH_BINARY" not in src14,
+          "and does NOT re-binarise - a mask re-thresholded is a mask no "
+          "longer comparable to the live one")
 
     # An unreadable counter must return None, never a silent zero.
     blank = np.zeros((68, 68), np.uint8)

@@ -521,6 +521,7 @@ def close_out(actor, cap, log, timeout=45):
             # four matched it: measured on a live share prompt, close_popup_x
             # 0.719, close_popup_x_menu 0.586, close_promo_x 0.465 - all below
             # threshold, so close-out timed out with the reward panel still open.
+            dismissed = None
             for x_tpl in ("close_share_x", "close_popup_x", "close_popup_x_menu"):
                 p = os.path.join(ROOT, "tpl", f"{x_tpl}.png")
                 if not os.path.exists(p):
@@ -530,8 +531,35 @@ def close_out(actor, cap, log, timeout=45):
                     actor.click_pixel(*m.center,
                                       why=f"close share prompt via {x_tpl} ({c:.3f})")
                     time.sleep(2.0)
-                    g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+                    f = cap.frame(gray=False)
+                    g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                    dismissed = x_tpl
                     break
+
+            # THAT X MAY HAVE CLOSED THE SUCCESS PANEL ITSELF, and it does.
+            #
+            # Observed live: `close_share_x` matched at 0.998, was clicked, and
+            # the very next frame was the VILLAGE - gold up, level up, mission
+            # plainly banked. There was no separate share prompt to close; the
+            # template had matched the reward panel's OWN close button.
+            #
+            # The old code went straight on to hunt for the green check on that
+            # village frame, failed, and logged "Success panel up but its check
+            # was not located" about a panel that no longer existed. That single
+            # misleading line sent this investigation twice to measure a check
+            # glyph on a frame with no panel in it - the scale sweep peaked at
+            # 0.699 on a piece of village scenery.
+            #
+            # So verify the panel is STILL THERE before looking for its
+            # control. If it is gone, the dismissal did the job: fall through
+            # and let the village confirmation below decide, which is the
+            # measurement that actually establishes a banked mission.
+            if dismissed and not find(g, ms)[0].found:
+                log.info("the %s click also closed the Success panel - not "
+                         "hunting for a check that is gone; confirming the "
+                         "village instead", dismissed)
+                continue
+
             pt, c = green_check(g)
             if pt:
                 actor.click_pixel(*pt, why=f"acknowledge Mission Success ({c:.3f})")
@@ -562,7 +590,12 @@ def close_out(actor, cap, log, timeout=45):
                     if n < 3:
                         p2 = os.path.join(
                             d, f"success_check_missing_{int(time.time())}.png")
-                        cv2.imwrite(p2, cap.frame(gray=False))
+                        # `f`, THE FRAME THAT WAS SCORED - never a fresh
+                        # capture. The first version re-captured here and saved
+                        # the village, because the panel had closed in between,
+                        # which made the evidence worse than useless: it looked
+                        # like a panel whose check could not be found.
+                        cv2.imwrite(p2, f)
                         log.info("saved the panel to %s - the check glyph needs "
                                  "measuring on it (green_check sweeps "
                                  "0.95..1.95 at a 0.80 gate)",
@@ -575,7 +608,26 @@ def close_out(actor, cap, log, timeout=45):
             # story missions: returning success on the panel alone let the next
             # run start while the game was still mid-transition. Require the
             # lobby anchor too, and say so when it does not come back.
-            lob = _tpl("lobby_rail_fortune", 0.90)
+            # DO NOT INVENT A TIGHTER GATE THAN THE CALIBRATED ONE.
+            #
+            # This read `_tpl("lobby_rail_fortune", 0.90)`, and that 0.90 was
+            # THE WHOLE REASON TP BANKED NOTHING. The anchor's calibrated
+            # threshold is 0.88; 0.90 was chosen when it measured ~1.000, which
+            # it does on wgpu. On webgl the same anchor reads **0.895** - five
+            # thousandths under the invented gate - so the village could never
+            # be confirmed and a won mission was reported as a failure. From
+            # the log, one second apart:
+            #
+            #   15:56:40  Success panel cleared but the village did not come
+            #             back; not calling this a success
+            #   15:56:41  resume: lobby (lobby_rail_fortune conf=0.895)
+            #
+            # The resume ladder, using the calibrated 0.88, found it instantly.
+            #
+            # A threshold is calibrated once, against measured extremes, and
+            # every call site that re-guesses it is a place where one backend,
+            # one animation frame or one re-cut silently changes an outcome.
+            lob = _tpl("lobby_rail_fortune")
             for _ in range(10):
                 lg = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
                 lm, lc = find(lg, lob)
@@ -584,8 +636,9 @@ def close_out(actor, cap, log, timeout=45):
                              "(%.3f) - mission banked", lc)
                     return True
                 time.sleep(1.2)
-            log.info("Success panel cleared but the village did not come back; "
-                     "not calling this a success")
+            log.info("Success panel cleared but the village did not come back "
+                     "(best %.3f against %.2f); not calling this a success",
+                     lc, lob.threshold)
             return False
         time.sleep(1.5)
     log.info("close-out timed out after %ss", timeout)
