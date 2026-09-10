@@ -5668,6 +5668,99 @@ def test_losing_the_idle_poke_does_not_also_lose_sleep_prevention():
         check(True, "(the guard is macOS-only; not exercised here)")
 
 
+
+def test_every_run_one_branch_actually_runs():
+    """`run_one` dispatches four ways, and one of them could not execute.
+
+    Shipped and caught live on the first rune mission of the day:
+
+        SS: this mission is rune
+        ERROR task error: UnboundLocalError: local variable 'play'
+                          referenced before assignment
+
+    The puzzle branch had been written as `play = play_balance if ... else
+    play_lights`. Assigning a name ANYWHERE in a function makes it local for
+    the WHOLE function, so the rune branch's call to the MODULE-LEVEL `play`
+    resolved to an unbound local and raised before doing anything.
+
+    **This is the second instance of exactly this bug** - `_traverse` shipped
+    with `UnboundLocalError: local variable 'arrow'` behind 749 passing
+    checks - and the lesson is the one already recorded: source inspection is
+    a supplement to execution, never a substitute. Every assertion I had
+    written about this function read its text, and text was not the problem.
+
+    So this test CALLS it, once per family, with fakes.
+    """
+    print("\nevery run_one branch actually runs")
+    import ss as ss_mod
+
+    # `play` must not be a local of run_one at all - the bytecode says so
+    # without depending on how the line happens to be spelled.
+    import dis
+    names = {i.argval for i in dis.get_instructions(ss_mod.run_one)
+             if i.opname in ("STORE_FAST", "LOAD_FAST")}
+    check("play" not in names,
+          f"`play` is not shadowed as a local in run_one ({sorted(names)})")
+
+    class _Cap:
+        def frame(self, gray=False):
+            return np.zeros((1440, 3440, 3), np.uint8)
+
+    class _Actor:
+        def __init__(self):
+            self.clicks = []
+
+        def click_pixel(self, x, y, why=""):
+            self.clicks.append((x, y, why))
+
+    calls = []
+    orig = {n: getattr(ss_mod, n) for n in
+            ("identify", "open_puzzle", "play", "play_balance", "play_lights")}
+    orig_close = ss_mod.tp.close_out
+    try:
+        ss_mod.open_puzzle = lambda *a, **k: False
+        ss_mod.play = lambda *a, **k: (calls.append("rune"), (2, "cleared", []))[1]
+        ss_mod.play_balance = lambda *a, **k: (calls.append("balance"), (1, "cleared"))[1]
+        ss_mod.play_lights = lambda *a, **k: (calls.append("lights"), (1, "cleared"))[1]
+        ss_mod.tp.close_out = lambda *a, **k: True
+
+        for family in ("rune", "balance", "lights"):
+            calls.clear()
+            ss_mod.identify = lambda *a, **k: family
+            try:
+                banked = ss_mod.run_one(_Cap(), _Actor(), _Log())
+            except Exception as e:
+                check(False, f"{family}: run_one raised "
+                             f"{type(e).__name__}: {e}")
+                continue
+            check(calls == [family],
+                  f"{family}: reached its own driver ({calls})")
+            check(banked is True,
+                  f"{family}: banks via close_out ({banked})")
+
+        # combat goes to the supplied runner, not to a puzzle driver
+        calls.clear()
+        fought = []
+        ss_mod.identify = lambda *a, **k: "combat"
+        banked = ss_mod.run_one(_Cap(), _Actor(), _Log(),
+                                play_combat=lambda: fought.append(1))
+        check(fought == [1] and calls == [],
+              f"combat: handed to the battle runner ({fought}, {calls})")
+        check(banked is True, "combat: banks via close_out")
+
+        # an unnameable screen must click NOTHING and bank NOTHING
+        ss_mod.identify = lambda *a, **k: None
+        act = _Actor()
+        banked = ss_mod.run_one(_Cap(), act, _Log())
+        check(banked is False, "an unrecognised mission banks nothing")
+        check(not act.clicks,
+              f"and clicks nothing at all ({act.clicks})")
+    finally:
+        for n, v in orig.items():
+            setattr(ss_mod, n, v)
+        ss_mod.tp.close_out = orig_close
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -5737,7 +5830,8 @@ def main():
                test_an_ss_family_is_dispatched_by_looking_not_by_name,
                test_liveness_is_probed_without_killing_anything_on_windows,
                test_a_stage_dialog_is_a_solid_button_of_one_fixed_size,
-               test_losing_the_idle_poke_does_not_also_lose_sleep_prevention):
+               test_losing_the_idle_poke_does_not_also_lose_sleep_prevention,
+               test_every_run_one_branch_actually_runs):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

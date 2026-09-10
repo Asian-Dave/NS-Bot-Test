@@ -599,8 +599,14 @@ def run_one(cap, actor, log, tpls=None, play_combat=None, relog=None):
         # followed, and `Mission Success! 10,000 gold` was on screen at the
         # time. `close_out` is the measurement that establishes a banked
         # mission, so it is asked either way and its answer is the answer.
-        play = play_balance if kind == "balance" else play_lights
-        cleared, outcome = play(cap, actor, log)
+        # NOT `play = ...`: this function also calls the module-level `play`
+        # for the rune family, and assigning that name ANYWHERE in a function
+        # makes it local for the WHOLE function - so the rune branch raised
+        # UnboundLocalError before it could run. Same shape as the `arrow` bug
+        # in `_traverse`, and caught the same way: by executing it, not by
+        # reading it.
+        driver = play_balance if kind == "balance" else play_lights
+        cleared, outcome = driver(cap, actor, log)
         log.info("SS: %d %s stage(s) cleared, %s", cleared, kind, outcome)
     elif kind == "combat":
         if play_combat is None:

@@ -2904,6 +2904,41 @@ does not raise, that it walks toward the badge, and that it never clicks the
 badge itself. Source inspection is a supplement to execution, never a
 substitute.
 
+### ASSIGNING A NAME ANYWHERE MAKES IT LOCAL EVERYWHERE — the second UnboundLocalError
+
+Shipped with 998 checks passing, and it died on the first real mission of the
+day:
+
+    SS: this mission is rune
+    ERROR task error: UnboundLocalError: local variable 'play' referenced
+                      before assignment
+
+`run_one` dispatches four ways. The puzzle branch had been written as
+
+    play = play_balance if kind == "balance" else play_lights
+
+and Python makes a name local to the WHOLE function if it is assigned
+anywhere in it — so the RUNE branch's call to the module-level `play` resolved
+to an unbound local and raised before doing anything at all. The rune family
+is the one this project has supported longest, and it was the one that broke.
+
+**This is the second instance of exactly this bug.** `_traverse` shipped with
+`UnboundLocalError: local variable 'arrow'` behind 749 passing checks, and
+this file already draws the conclusion: *a test that reads code cannot catch
+code that does not run*. Every assertion written about `run_one` inspected its
+text — its branches, its ordering, which functions it mentions — and the text
+was never the problem.
+
+`test_every_run_one_branch_actually_runs` CALLS it once per family with fakes,
+and additionally asserts from the BYTECODE that `play` is not a local of
+`run_one` at all, which does not depend on how the line happens to be spelled.
+Verified by reintroducing the bug: the test reports the identical
+`UnboundLocalError` the live run hit.
+
+General rule, now paid for twice: **a dispatcher must be executed down every
+branch it offers.** Fakes are cheap; the branch that never runs in testing is
+the branch that runs in production.
+
 ## "THE TASK RETURNED" IS NOT "THE TASK ACHIEVED SOMETHING"
 
 The same live loop exposed a hole in the setback budget. `farm.farm` CATCHES a
