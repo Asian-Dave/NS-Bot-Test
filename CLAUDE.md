@@ -4091,6 +4091,85 @@ installs a fresh rAF chain per call without cancelling the previous one and
 they all increment the same counter: three calls read 119.6 / 239.3 / 359.8.
 The A/B harness only escapes it because each backend is preceded by a reload.
 
+## RECRUITING A PARTY — and the one place a resize is justified
+
+Two party slots (`Team 0/2`), filled from the recruit rail. The operator wants
+them filled because some Hunting House and Eudemon bosses are hard to solo.
+
+**NPCs COST TOKENS AND ARE EXCLUDED, three ways.** This bot never spends
+tokens, and the rail mixes NPC cards in among the friends even on the friends
+tab, so a card is PROVEN a friend rather than assumed from which tab is open:
+
+    card colour     friends S 33..47, NPCs S 104..117
+    card structure  a friend card is exactly "Lv" + one or two digits; the
+                    NPC cards break the motif (one has no digits, one carries
+                    a 37 px blob of card art among them)
+    BUTTON COLOUR   a GREEN + recruits a friend for free, a BLUE + is the
+                    token-priced NPC
+
+**The button colour is the one that earns its place.** On a paged rail two
+NPC cards read DESATURATED and passed the colour test; the blue-button check
+caught them, and `eligible` returned four names out of six. Neither test is
+load-bearing alone, which is exactly why there are three.
+
+**STRONGEST FIRST.** The rule is "at or below the player's level", and the
+first version satisfied it by sorting ascending and taking the WEAKEST two.
+The point of a party is help, so it takes the highest that qualify.
+
+### THE + ROW IS BELOW WHAT RUFFLE DRAWS, and only a resize reveals it
+
+The buttons sit at the foot of each card, past the bottom of the rendered
+game. Everything cheaper was measured and none of it works:
+
+    taller browser viewport   free (game rect and every anchor verified
+                              identical at 800/860/900) but no help - the
+                              clip is not the viewport
+    overflow:visible on the   no reflow, no help
+    clipping .site-wrapper
+    shifting the game up      really moves it (iframe y 0 -> -59, and the
+                              Admin Message band does disappear) but the
+                              buttons stay absent at -59, -90, -120, -150
+    clicking the 8 px sliver  the click lands and changes nothing
+
+Only enlarging the player draws them - measured `player 960x839 -> 960x909`.
+That is this file's oldest prohibition, so it is done as a BOUNDED exception:
+grow the page wrappers, click, restore in a `finally`.
+
+**The restore is verified, not assumed.** After a full cycle a control at a
+known position was clicked and the rail responded both ways (mean |diff|
+14.64), so click -> stage mapping survives. Worth noting the prohibition's
+own premise has drifted: it was written after forcing 960x839 on a 960x720
+stage, and the player is 960x839 today with clicking working perfectly - so
+"taller than the stage" cannot by itself be the fault.
+
+### TWO TRAPS WHILE FINDING THIS
+
+**A green PAGING ARROW is not a `+`.** A loose sliver filter (35-80 px wide)
+matched the rail's arrow at 51x76, clicked it, and PAGED THE RAIL - which
+silently changed which friends were on screen and is why a Lv 42 player got
+recruited during a test. The `+` discs are 84x69; the arrows are excluded by
+requiring width >= 60.
+
+**The friends' shield emblems are blue.** A first blue-button filter matched
+them at 46x31 and vetoed real friends as "NPC columns". The `+` row is
+separated by being at the very bottom and much wider.
+
+### THE RAIL IS LOCATED, NEVER ASSUMED
+
+The `Lv` badge row moves when the player is enlarged (measured y~1370 normal,
+y~1440 grown), so a fixed offset from the button row found nothing at the
+grown size and read as "no friends here" rather than as a geometry fault.
+`find_rail_band` takes the densest run of amber glyphs instead. Cards are
+grouped by GAP (16-22 px within a card, 133 between), not by the measured
+192 px pitch, and the label/digit split is relative to each card's own tallest
+glyph so it survives any scaling.
+
+One digit set serves the card badges and the player's own larger plate: the
+player's "8" at 34 px matched a card-harvested "8" at 25 px with d=0.109 and a
+2.8x margin. An unread digit is REFUSED - a misread level could recruit
+someone above the player, which is the one thing the rule forbids. `1` is
+still unharvested and will refuse until seen.
+
 ## SS: THE OTHER TWO FAMILIES — Balance Control and Lights Out, both cleared
 
 Both were sitting behind one obstacle that had nothing to do with either

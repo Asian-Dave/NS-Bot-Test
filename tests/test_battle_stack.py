@@ -5867,6 +5867,71 @@ def test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely():
           "AUTO is the default, so the live caller gets it")
 
 
+
+def test_recruiting_takes_the_strongest_friend_and_never_an_npc():
+    """Two party slots, filled from FRIENDS at or below the player's level.
+
+    NPCs cost tokens, which this bot never spends, so a card must be proven a
+    friend rather than assumed from which tab is open. Three independent
+    tests, and the live rail proved why more than one is needed:
+
+        card colour     friends S 33..47, NPCs S 104..117 - but on a paged
+                        rail two NPC cards read DESATURATED and passed
+        card structure  a friend card is exactly "Lv" + 1-2 digits; the NPC
+                        cards break the motif
+        BUTTON COLOUR   green + is a free friend, blue + is a token NPC
+
+    The button colour is the one that caught the two NPCs the colour test let
+    through, so `eligible` returned four names from a rail of six.
+
+    **STRONGEST FIRST.** An earlier version sorted ascending and would have
+    taken the WEAKEST two. The operator wants teammates because some hunts are
+    hard to solo, so "at or below" means the highest that qualify.
+    """
+    print("\nrecruiting takes the strongest friend and never an NPC")
+    import roster as rs
+
+    # --- digits refuse rather than guess -------------------------------
+    have = set(rs.exemplars())
+    check(have, "level digit exemplars exist")
+    blank = np.zeros((25, 17), np.uint8)
+    d, dist, _m = rs.classify(blank)
+    check(d is None, f"an unrecognisable glyph is refused, not rounded ({d})")
+
+    # --- the live rail: NPC cards that the colour test would have passed
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/hh/rail_paged.png"))
+    if f is None:
+        check(True, "(no paged-rail fixture on disk; skipping the live case)")
+    else:
+        band = rs.find_rail_band(f)
+        check(band is not None, f"the Lv row is located, not assumed ({band})")
+        cards = rs.cards(f, band=band)
+        check(sum(c["friend"] for c in cards) >= 4,
+              f"the rail reads ({[c['level'] for c in cards]})")
+        picks = rs.eligible(f, 83)
+        lv = [p[2] for p in picks]
+        check(lv == sorted(lv, reverse=True),
+              f"eligible is STRONGEST first ({lv})")
+        check(all(l <= 83 for l in lv), f"and never above the player ({lv})")
+        blue = rs.plus_buttons(f, rs.PLUS_BLUE)
+        check(blue, "the rail has blue (NPC) buttons on it at all")
+        for gx, _gy, _l in picks:
+            check(not any(abs(gx - bx) < rs.PAIR_DX for bx, _b in blue),
+                  f"no pick sits in a blue column (x={gx})")
+        check(len(picks) < len(rs.plus_buttons(f, rs.PLUS_GREEN)) + len(blue),
+              "and the NPC cards were excluded from the picks")
+
+    # --- the resize is bounded and always undone -----------------------
+    src = inspect.getsource(rs.recruit)
+    check("finally" in src, "recruit restores the layout in a finally")
+    check("grow_rail(cdp, False)" in src, "and the restore is the real call")
+    check(src.index("player_level") < src.index("grow_rail"),
+          "the player's level is read BEFORE growing, because the grown "
+          "layout moves that plate")
+    grow = inspect.getsource(rs.grow_rail)
+    check("__nsbotAlign" in grow, "restoring re-asserts the alignment")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -5938,7 +6003,8 @@ def main():
                test_a_stage_dialog_is_a_solid_button_of_one_fixed_size,
                test_losing_the_idle_poke_does_not_also_lose_sleep_prevention,
                test_every_run_one_branch_actually_runs,
-               test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely):
+               test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely,
+               test_recruiting_takes_the_strongest_friend_and_never_an_npc):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
