@@ -163,8 +163,25 @@ class Gate:
     bot you cannot turn off.
     """
 
-    def __init__(self, capture, log, controls=None, poll_interval=0.10):
+    # A BLOCKING DIALOG IS EXACTLY WHAT MAKES A GATE WAIT. The token guard
+    # first went into the resume ladder, and that was the wrong place: a
+    # running TASK never reaches the ladder, so when a lost boss raised "revive
+    # for 50 tokens?" the battle runner simply sat in its 90 s turn gate and
+    # the prompt was never answered. Every long wait in this bot goes through
+    # `wait_for_any`, so one hook here covers the turn gate, the resolve gate,
+    # loading and close-out alike.
+    #
+    # Checked only after `CHOICE_AFTER_S` of waiting, which costs nothing in
+    # the common case: a gate that fires promptly never looks, and a gate that
+    # is stuck is precisely the one that should.
+    CHOICE_AFTER_S = 6.0
+    CHOICE_EVERY_S = 3.0
+
+    def __init__(self, capture, log, controls=None, poll_interval=0.10,
+                 actor=None):
         self.capture, self.log, self.controls = capture, log, controls
+        self.actor = actor
+        self._last_choice_check = 0.0
         # 0.10, not 0.25. The interval was set when a single combat check cost
         # seconds, so a longer sleep was free; with the command-bar geometry
         # cached that check is 1.6 ms and the capture (~0.14 s) dominates, so the
@@ -183,6 +200,38 @@ class Gate:
             if payload:
                 return Fired(i, c.name, payload, 0.0, 1)
         return TimedOut(0.0, 1, [c.name for c in conditions])
+
+    def _maybe_decline(self, bgr, waited):
+        """Decline a two-button dialog that is blocking this wait.
+
+        NEVER accepts. The prompt this exists for spends 50 tokens if the green
+        control is pressed - see `perceive.choice_dialog`.
+        """
+        if self.actor is None or waited < self.CHOICE_AFTER_S:
+            return False
+        now = time.time()
+        if now - self._last_choice_check < self.CHOICE_EVERY_S:
+            return False
+        self._last_choice_check = now
+        try:
+            import perceive
+            ch = perceive.choice_dialog(bgr)
+        except Exception:
+            return False
+        if not ch:
+            return False
+        self.log.warning("gate: a dialog is blocking this wait and offers a "
+                         "CHOICE (green %s / red %s) - declining, because "
+                         "accepting can spend tokens",
+                         ch["accept"], ch["decline"])
+        try:
+            self.actor.click_pixel(*ch["decline"],
+                                   why="decline a blocking two-button dialog "
+                                       "(never accept - it may cost tokens)")
+        except Exception as e:
+            self.log.warning("gate: could not press decline: %s", e)
+            return False
+        return True
 
     def wait_for_any(self, conditions, timeout, clip=None, why=""):
         """Poll until one condition fires, or `timeout` seconds elapse.
@@ -210,6 +259,7 @@ class Gate:
             except Exception as e:
                 self.log.error("gate capture failed: %s", e)
                 return TimedOut(time.time() - t0, polls, names)
+            self._maybe_decline(bgr, time.time() - t0)
             for i, c in enumerate(conditions):
                 payload = c.check(bgr, gray)
                 if payload:

@@ -1382,7 +1382,8 @@ class Runner:
                           "HUNT" if (profile == "hunt" and self.hunt_skills)
                           else "panel's", " ".join(order))
         r = mission_mod.MissionRunner(
-            Gate(self.cap, self.log, self.controls), self.actor, self.cap,
+            Gate(self.cap, self.log, self.controls, actor=self.actor),
+            self.actor, self.cap,
             self.tpls, cfg, self.log, self.controls)
         r.grade = self.cfg.get("mission", {}).get("grade") or "A"
         try:

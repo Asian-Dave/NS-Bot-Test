@@ -566,6 +566,42 @@ def grow_rail(cdp, on=True):
     return h
 
 
+PANEL_MIN_CARDS = 4
+
+
+def panel_open(frame):
+    """Is the team panel (with its recruit rail) actually on screen?
+
+    **The caller needs this because a popup swallows the click.** A LOST fight
+    raises a promo over the village ("Please use smoke bomb to flee... Go to
+    Shop"), which is exactly when the hunt recruits - so Recruit Friends landed
+    on the popup and the panel never opened. Without a positive check the
+    caller cannot tell that from a rail that is merely empty, and every live
+    lap fought solo while a clean manual test passed.
+
+    Keyed on the RAIL ITSELF: a located badge row carrying several cards. Two
+    things that were tried and rejected:
+
+        the tab strip     brown plates, and so is village architecture - it
+                          fired on the plain village
+        the Search field  only drawn on the FRIENDS tab, so it cannot answer
+                          the question before the tab is switched
+
+    **This is a CONTEXTUAL check, and the limit is stated rather than papered
+    over.** It still answers True on 29 unrelated reference frames - combat
+    screens and mission lists, where a row of amber glyphs happens to exist.
+    That is acceptable ONLY because of where it is called: immediately after
+    pressing Recruit Friends in the village, where the alternatives are the
+    panel, the village, or a popup over it. All three of those are answered
+    correctly. Do not reuse it as a general "is this the team panel" test
+    without tightening it first.
+    """
+    band = find_rail_band(frame)
+    if band is None:
+        return False
+    return len(cards(frame, band=band)) >= PANEL_MIN_CARDS
+
+
 def recruit(cap, actor, cdp, log, want=2, settle=3.0):
     """Fill up to `want` party slots from FRIENDS at or below the player.
 

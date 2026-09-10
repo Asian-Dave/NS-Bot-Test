@@ -413,6 +413,33 @@ PANEL_CLOSE = (2597, 192)
 RECRUIT_SETTLE = 3.0
 
 
+POPUP_TPLS = ("close_promo_x", "close_popup_x", "close_popup_x_menu")
+
+
+def dismiss_popups(actor, cap, log, rounds=3):
+    """Close any popup sitting over the village. Returns how many it shut."""
+    from perceive import find
+    shut = 0
+    for _ in range(rounds):
+        g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+        for name in POPUP_TPLS:
+            t = tp._tpl(name, 0.85)
+            if t is None:
+                continue
+            m, conf = find(g, t)
+            if m.found:
+                actor.click_pixel(*m.center,
+                                  why=f"dismiss a popup ({name} {conf:.3f})")
+                time.sleep(1.8)
+                shut += 1
+                break
+        else:
+            break
+    if shut:
+        log.info("eudemon: dismissed %d popup(s) before recruiting", shut)
+    return shut
+
+
 def recruit_party(cap, actor, cdp, log, want=2):
     """Fill the party from the village, then close the panel. Levels taken.
 
@@ -427,8 +454,24 @@ def recruit_party(cap, actor, cdp, log, want=2):
         return []
     try:
         import roster
-        actor.click_pixel(*VILLAGE_RECRUIT, why="village: Recruit Friends")
-        time.sleep(RECRUIT_SETTLE)
+        # CLEAR POPUPS FIRST. A LOST fight raises a promo ("Please use smoke
+        # bomb to flee... Go to Shop") over the village, and that is exactly
+        # when this runs - so the Recruit Friends click landed on the popup and
+        # the panel never opened. Every live lap failed this way while a clean
+        # manual test passed, which is what made it look like a detector bug.
+        dismiss_popups(actor, cap, log)
+        for attempt in (1, 2):
+            actor.click_pixel(*VILLAGE_RECRUIT, why="village: Recruit Friends")
+            time.sleep(RECRUIT_SETTLE)
+            # VERIFY IT OPENED, rather than assuming. The rail's own tab strip
+            # is the cheapest positive signal available.
+            if roster.panel_open(cap.frame(gray=False)):
+                break
+            log.info("eudemon: the team panel did not open (try %d)", attempt)
+            dismiss_popups(actor, cap, log)
+        else:
+            log.info("eudemon: giving up on recruiting this lap")
+            return []
         took = roster.recruit(cap, actor, cdp, log, want=want)
         actor.click_pixel(*PANEL_CLOSE, why="close the team panel")
         time.sleep(2.0)
