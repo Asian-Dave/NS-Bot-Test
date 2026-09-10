@@ -577,11 +577,13 @@ def recruit(cap, actor, cdp, log, want=2, settle=3.0):
     # nothing is recruitable and the lap silently fights solo. The tab is
     # switched BEFORE the layout is grown, because that is the geometry the
     # tab coordinates were measured at.
-    f0 = cap.frame(gray=False)
-    if not plus_buttons(f0, PLUS_GREEN) and not any(
-            c["friend"] for c in cards(f0, band=find_rail_band(f0) or RAIL_BAND)):
-        actor.click_pixel(*FRIENDS_TAB, why="recruit rail: FRIENDS tab")
-        time.sleep(2.2)
+    # ALWAYS, not "only if it looks like the NPC tab". The conditional version
+    # of this never fired: at the un-grown layout the `+` row is below the
+    # fold, so `plus_buttons` sees nothing whatever the tab, and the guard read
+    # that as "already fine". Clicking the friends tab when it is already
+    # selected does nothing, so there is no reason to be clever.
+    actor.click_pixel(*FRIENDS_TAB, why="recruit rail: FRIENDS tab")
+    time.sleep(2.2)
 
     me = player_level(cap.frame(gray=False), log)
     if me is None:

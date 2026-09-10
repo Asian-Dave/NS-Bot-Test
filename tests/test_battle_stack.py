@@ -5933,6 +5933,14 @@ def test_recruiting_takes_the_strongest_friend_and_never_an_npc():
     # which is exactly what happened on the first real Eudemon lap.
     src = inspect.getsource(rs.recruit)
     check("FRIENDS_TAB" in src, "recruit switches to the friends tab")
+    # UNCONDITIONALLY. The first version only switched when the rail "looked
+    # like" the NPC tab, and that guard never fired: at the un-grown layout the
+    # + row is below the fold, so plus_buttons sees nothing whatever the tab.
+    tab_line = [ln for ln in src.splitlines() if "FRIENDS_TAB" in ln][0]
+    idx = src.index(tab_line)
+    before = src[:idx]
+    check("if " not in before.split("me = player_level")[0].split("\n")[-2],
+          "and does so unconditionally, not behind a guard that cannot fire")
     check(src.index("FRIENDS_TAB") < src.index("grow_rail"),
           "and does it BEFORE growing the layout, which is the geometry the "
           "tab coordinates were measured at")
