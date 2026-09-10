@@ -473,8 +473,15 @@ def recruit_party(cap, actor, cdp, log, want=2):
             log.info("eudemon: giving up on recruiting this lap")
             return []
         took = roster.recruit(cap, actor, cdp, log, want=want)
-        actor.click_pixel(*PANEL_CLOSE, why="close the team panel")
-        time.sleep(2.0)
+        # CLOSE AND VERIFY. One blind click left the bot off the village on a
+        # live run ("back in the village: False"), and the next lap then could
+        # not find the Hunting House label.
+        for _ in range(4):
+            actor.click_pixel(*PANEL_CLOSE, why="close the team panel")
+            time.sleep(2.0)
+            if close(actor, cap, log, tries=1):
+                break
+            dismiss_popups(actor, cap, log, rounds=1)
         return took
     except Exception as e:
         log.warning("eudemon: recruiting failed (%s: %s) - fighting with "

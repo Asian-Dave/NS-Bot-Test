@@ -255,6 +255,10 @@ ME_BAND = (725, 790)
 ME_X = (850, 980)
 ME_MIN_H = 28
 ME_MAX_H = 70
+PLATE_TRIES = 6
+PLATE_RETRY_S = 0.5
+RAIL_TRIES = 5
+RAIL_RETRY_S = 0.8
 
 # The `Team n/m` badge in the panel header.
 TEAM_BAND = (330, 380)
@@ -546,7 +550,43 @@ FRIENDS_TAB = (835, 1268)
 NPC_TAB = (955, 1260)
 
 
+# GROWING THE GAME IS NOT ENOUGH - THE VIEWPORT MUST GROW TOO.
+# `grow_rail` takes the player to ~914 CSS px, but the pinned viewport is 720,
+# so the `+` row at y~1655 captured lands OUTSIDE a 1440-tall frame and
+# `plus_buttons` finds nothing. Measured live: "rail exposed (player 914 px
+# tall)" immediately followed by "0 green button(s)". The successful manual
+# recruit had set the viewport to 880 first, which is why it worked and the
+# live lap did not.
+#
+# The viewport is restored with the game, and it is READ BACK rather than
+# assumed, so a session running at some other size is put back where it was.
+GROW_VIEWPORT_H = 900
+_saved_viewport = {}
+
+
+def _viewport(cdp):
+    try:
+        v = cdp.call("Runtime.evaluate",
+                     expression="JSON.stringify({w:innerWidth,h:innerHeight,"
+                                "d:devicePixelRatio})",
+                     returnByValue=True)["result"].get("value")
+        import json as _j
+        return _j.loads(v)
+    except Exception:
+        return None
+
+
 def grow_rail(cdp, on=True):
+    if on:
+        vp = _viewport(cdp)
+        if vp:
+            _saved_viewport.update(vp)
+            try:
+                cdp.call("Emulation.setDeviceMetricsOverride",
+                         width=int(vp["w"]), height=GROW_VIEWPORT_H,
+                         deviceScaleFactor=int(vp.get("d") or 2), mobile=False)
+            except Exception:
+                pass
     js = """
     (() => {
       let s = document.getElementById(%r);
@@ -560,6 +600,16 @@ def grow_rail(cdp, on=True):
     h = cdp.call("Runtime.evaluate", expression=js,
                  returnByValue=True)["result"].get("value")
     if not on:
+        if _saved_viewport:
+            try:
+                cdp.call("Emulation.setDeviceMetricsOverride",
+                         width=int(_saved_viewport["w"]),
+                         height=int(_saved_viewport["h"]),
+                         deviceScaleFactor=int(_saved_viewport.get("d") or 2),
+                         mobile=False)
+            except Exception:
+                pass
+            _saved_viewport.clear()
         cdp.call("Runtime.evaluate",
                  expression="typeof window.__nsbotAlign==='function' "
                             "&& window.__nsbotAlign()", returnByValue=True)
@@ -621,7 +671,19 @@ def recruit(cap, actor, cdp, log, want=2, settle=3.0):
     actor.click_pixel(*FRIENDS_TAB, why="recruit rail: FRIENDS tab")
     time.sleep(2.2)
 
-    me = player_level(cap.frame(gray=False), log)
+    # RETRY, because the read is TRANSIENT. Measured: the same detector
+    # returned None during a live lap and 83 on a frame captured moments later
+    # by hand - the tab switch redraws the panel, so a single capture can land
+    # mid-animation. One shot at a value everything else depends on is the
+    # wrong trade when the retry costs half a second.
+    me = None
+    for _ in range(PLATE_TRIES):
+        me = player_level(cap.frame(gray=False))
+        if me is not None:
+            break
+        time.sleep(PLATE_RETRY_S)
+    if me is None:
+        player_level(cap.frame(gray=False), log)      # log why, once
     if me is None:
         log.info("recruit: the player's level did not read - refusing, since "
                  "every level comparison depends on it")
@@ -632,8 +694,18 @@ def recruit(cap, actor, cdp, log, want=2, settle=3.0):
         time.sleep(2.0)
         log.info("recruit: rail exposed (player %s px tall)", h)
         for _ in range(want):
-            picks = eligible(cap.frame(gray=False), me, log)
-            picks = [p for p in picks if p[2] not in took] or picks
+            # THE RAIL REDRAWS AFTER A RECRUIT, so re-reading it once can land
+            # on the blank frame between states - measured, the second pick saw
+            # "0 green button(s)" a moment after the first succeeded. Poll
+            # instead of trusting one capture.
+            picks = []
+            for _try in range(RAIL_TRIES):
+                picks = eligible(cap.frame(gray=False), me,
+                                 log if _try == RAIL_TRIES - 1 else None)
+                picks = [p for p in picks if p[2] not in took] or picks
+                if picks:
+                    break
+                time.sleep(RAIL_RETRY_S)
             if not picks:
                 log.info("recruit: nobody left at or below Lv%d", me)
                 break
