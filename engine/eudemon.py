@@ -22,10 +22,12 @@ permanent roster and SS sits on top. Their list is positional and has no
 names, and their build is a different private server, so it is not portable -
 the roster is read off the screen instead.
 
-**SS IS NEVER BLACKLISTED, BY DESIGN.** The operator's rule is that the
-blacklist covers only the non-SS ranks, because SS bosses are time limited.
-`blacklistable()` enforces that rather than trusting the caller, so a stale
-blacklist entry cannot silently skip a limited-time boss.
+**EVERY RANK IS BLACKLISTABLE, SS INCLUDED** - reversed once the scan button
+existed. The old rule refused SS because the roster was only harvested while
+hunting, so a stale entry could quietly cost an event attempt. A rescan now
+rebuilds the list on demand and retired bosses keep their fingerprint, so the
+panel cannot offer a boss that is not there; the protection had nothing left
+to protect and only removed a choice from the operator. See `blacklistable`.
 
 MEASURED GEOMETRY (captured px, the pinned 1720x720 viewport)
 -------------------------------------------------------------
@@ -324,8 +326,25 @@ def harvest_roster(frame, roster):
 
 
 def blacklistable(rank):
-    """SS is never blacklistable - those bosses are time limited."""
-    return rank is not None and rank != SS
+    """EVERY rank can be skipped, SS included. Deliberately reversed.
+
+    This used to refuse SS outright, and the reasoning was sound at the time:
+    SS bosses are event-limited, the roster was harvested only as a
+    side-effect of hunting, and a STALE skip entry could therefore quietly
+    cost an attempt that does not come back.
+
+    **The scan button removes that premise.** The roster is rebuilt from the
+    live list on demand, a boss that leaves is retired rather than forgotten,
+    and identity travels by fingerprint - so an entry cannot drift onto a boss
+    the operator never chose. With the list current by construction, refusing
+    SS stops protecting anything and only takes a decision away from the
+    operator, who can see the event bosses in the panel and knows which are
+    worth an attempt.
+
+    A rank must still be READ. `None` means the badge did not classify, and
+    skipping an unread rank would be skipping something unidentified.
+    """
+    return rank is not None
 
 
 # --- navigation -----------------------------------------------------------
@@ -490,17 +509,133 @@ def recruit_party(cap, actor, cdp, log, want=2):
         return []
 
 
+
+def _next_key(rank, *lists):
+    """The next free index for `rank`, never reusing a retired one."""
+    n = 0
+    for lst in lists:
+        for e in lst:
+            if e.get("rank") != rank:
+                continue
+            try:
+                n = max(n, int(str(e["key"]).rsplit("-", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+    return row_key(rank, n + 1)
+
+
+def survey_roster(cap, actor, log, roster, on_roster=None, pages=(1, 2, 3),
+                  replace=False):
+    """Page through the WHOLE list once, harvesting every boss.
+
+    **The panel can only offer what has been harvested, and the target search
+    stops harvesting the moment it finds something to fight.** Page 1 always
+    carries a startable SS boss, so `hunt`'s selection loop broke out there on
+    every lap and pages 2 and 3 were never visited - which is why the roster
+    held five entries (four SS and one C) and the operator could not blacklist
+    the C..S bosses at all. Those are exactly the ranks the blacklist is FOR:
+    every read rank may be skipped, SS included - see `blacklistable`.
+
+    So the survey is separate from target selection. It runs ONCE per hunt,
+    not once per lap - the roster is persisted and matched by fingerprint, so
+    a boss stays known once seen, and paying two extra page turns on every lap
+    would buy nothing.
+    """
+    if roster is None:
+        return roster
+    before = [dict(e) for e in roster]
+    seen = []
+    for page in pages:
+        found = goto_page(actor, cap, log, page)
+        frame = cap.frame(gray=False)
+        if replace:
+            seen.extend(r for r in rows(frame)
+                        if r["rank"] is not None and r["fp"] is not None)
+        else:
+            harvest_roster(frame, roster)
+        log.info("eudemon: survey page %d - %d row(s): %s", page, len(found),
+                 [r["rank"] for r in found])
+        if not found:
+            # An empty page is the END of the list, not a transient miss: the
+            # list is contiguous. Stopping here keeps a 2-page account from
+            # paying for a third turn.
+            break
+
+    if replace:
+        # **THE LIST CHANGES WITH EVENTS**, so a rescan must be able to DROP a
+        # boss as well as add one - `harvest_roster` only ever adds, which
+        # would leave the panel offering bosses that are no longer there.
+        #
+        # Identity still travels by FINGERPRINT: a row that matches something
+        # already known keeps its key AND its name, so a blacklist entry
+        # survives a rescan and a boss that leaves and returns comes back as
+        # itself. A retired index is never reused, so a stale skip entry can
+        # never silently attach to a different boss.
+        # A BOSS THAT LEAVES IS RETIRED, NOT FORGOTTEN (`listed: False`).
+        #
+        # Deleting it outright looks equivalent and is not, which a test
+        # caught: with the entry gone its FINGERPRINT goes too, so when the
+        # event returns there is nothing to match against and the boss comes
+        # back as a stranger - a new key, no name, and the operator's
+        # blacklist entry silently detached. It only LOOKED right because
+        # `_next_key` reissued the same numbers by coincidence.
+        #
+        # Keeping the record makes identity survive an absence, which is the
+        # whole point when the list is event-driven. `eudemon_roster` shows
+        # only the listed ones, so the panel is unchanged.
+        fresh, matched = [], []
+        for r in seen:
+            if any(same_row(r["fp"], e["fp"]) for e in fresh):
+                continue
+            was = next((e for e in before if same_row(r["fp"], e["fp"])), None)
+            if was:
+                matched.append(was["key"])
+                fresh.append({"key": was["key"], "rank": r["rank"],
+                              "name": was.get("name"), "fp": r["fp"],
+                              "listed": True})
+            else:
+                fresh.append({"key": _next_key(r["rank"], before, fresh),
+                              "rank": r["rank"], "name": None, "fp": r["fp"],
+                              "listed": True})
+        added = [e["key"] for e in fresh if e["key"] not in matched]
+        gone = []
+        for e in before:
+            if e["key"] in matched:
+                continue
+            gone.append(e["key"])
+            r = dict(e)
+            r["listed"] = False
+            fresh.append(r)
+        if gone:
+            log.info("eudemon: no longer listed (kept, so they return as "
+                     "themselves): %s", ", ".join(gone))
+        if added:
+            log.info("eudemon: newly listed: %s", ", ".join(added))
+        roster[:] = fresh
+
+    changed = len(roster) != len(before) or any(
+        a["key"] != b["key"] or bool(a.get("listed", True)) !=
+        bool(b.get("listed", True)) for a, b in zip(roster, before))
+    if changed and on_roster:
+        on_roster(roster)
+    log.info("eudemon: roster now holds %d boss(es): %s", len(roster),
+             ", ".join(e["key"] for e in roster))
+    return roster
+
+
 def hunt(cap, actor, log, play_combat, blacklist=(), max_fights=40,
          relog=None, skip_ss=False, cdp=None, recruit=True,
          roster=None, skip_keys=(), on_roster=None):
     """Farm every non-blacklisted boss until nothing will start.
 
-    `blacklist` holds row FINGERPRINTS (see `rows`). SS rows are never
-    skipped by it - `blacklistable` decides that, not the caller - because SS
-    bosses are time limited and a stale entry must not cost one.
+    `blacklist` holds row FINGERPRINTS (see `rows`). Every rank may be
+    skipped, SS included - `blacklistable` decides, not the caller - since the
+    scan keeps the roster current and a skip therefore cannot drift onto a
+    boss nobody chose. `skip_ss` remains a separate, explicit caller switch.
     """
     fought = banked = 0
     exhausted = list(blacklist or [])
+    surveyed = False
     for sweep in range(max_fights):
         # RECRUIT FIRST, FROM THE VILLAGE, and before choosing a target.
         # The party empties after every boss - the panel says so outright -
@@ -519,6 +654,14 @@ def hunt(cap, actor, log, play_combat, blacklist=(), max_fights=40,
                 log.info("eudemon: cannot reach the garden - stopping")
                 break
 
+        # HARVEST THE WHOLE LIST BEFORE SEARCHING IT, once. See
+        # `survey_roster`: the search below stops at the first startable boss,
+        # which is always on page 1, so without this the panel never learns
+        # the C..S bosses the blacklist exists to cover.
+        if roster is not None and not surveyed:
+            survey_roster(cap, actor, log, roster, on_roster)
+            surveyed = True
+
         target = None
         for page in (1, 2, 3):
             found = goto_page(actor, cap, log, page)
@@ -534,9 +677,10 @@ def hunt(cap, actor, log, play_combat, blacklist=(), max_fights=40,
                     continue
                 if skip_ss and r["rank"] == SS:
                     continue
-                # THE PANEL'S SKIP LIST. Matched by fingerprint against the
-                # harvested roster, and SS is exempt whatever the list says -
-                # `blacklistable` is the single place that rule lives.
+                # THE PANEL'S SKIP LIST, matched by fingerprint against the
+                # harvested roster. `blacklistable` is the single place the
+                # rank rule lives - it now admits every READ rank, SS
+                # included; an unread rank is still never skipped.
                 if roster is not None and skip_keys:
                     hit = next((e for e in roster
                                 if same_row(r["fp"], e["fp"])), None)

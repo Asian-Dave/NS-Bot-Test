@@ -567,13 +567,16 @@ class Runner:
             entry = next((e for e in roster if e["key"] == key), None)
             if entry is None:
                 return
-            # SS IS NEVER SKIPPABLE. `eudemon.blacklistable` enforces it at the
-            # point of use as well; refusing here too means the panel cannot
-            # even show a checked box for one, so the operator is never misled
-            # into thinking a time-limited boss has been excluded.
-            if entry["rank"] == "SS":
-                self.log.info("operator: %s is SS and cannot be skipped - "
-                              "those bosses are time limited", key)
+            # EVERY READ RANK MAY BE SKIPPED, SS INCLUDED. The refusal that
+            # used to sit here protected against a STALE roster silently
+            # costing an event attempt; the scan button rebuilds the list on
+            # demand, so that premise is gone and the choice is the
+            # operator's. `eudemon.blacklistable` remains the single place the
+            # rule lives, and it still refuses an UNREAD rank.
+            import eudemon as _eu
+            if not _eu.blacklistable(entry.get("rank")):
+                self.log.info("operator: %s has no readable rank, so it is "
+                              "not offered for skipping", key)
                 return
             skip = {str(k) for k in _read_json(EUDEMON_SKIP_PATH, [])}
             if key in skip:
@@ -633,7 +636,10 @@ class Runner:
                 pass
             self._hard_exit()
         elif c == "task":
-            if any(t["key"] == cmd.get("arg") for t in TASKS):
+            # BY_KEY, not TASKS: a hidden task has no button in the task row
+            # but is still a real task, and validating against the panel list
+            # would make it unreachable.
+            if cmd.get("arg") in tasks.BY_KEY:
                 was, self.task = self.task, cmd["arg"]
                 # SWITCHING TASK MUST INTERRUPT THE ONE IN FLIGHT.
                 #
@@ -656,6 +662,29 @@ class Runner:
                                   self.task, was)
                 else:
                     self.log.info("operator: task -> %s", self.task)
+        elif c == "run_task":
+            # ARM AND GO, in one press. Selecting a task only SETS it - Run is
+            # a separate button - which is right for a long farm the operator
+            # is choosing deliberately, and wrong for "show me what bosses
+            # exist": that is a question, and a question should be answered by
+            # pressing the thing that asks it.
+            #
+            # **It refuses to barge in.** If something is already running, the
+            # task is armed and nothing is interrupted - a scan is not worth
+            # aborting a mission for, and silently killing one to answer a
+            # question would be the worst reading of this button.
+            key = str(cmd.get("arg") or "")
+            if key not in tasks.BY_KEY:
+                return
+            self.task = key
+            if self.mode == "running":
+                self.log.info("operator: %s is queued - something is already "
+                              "running, so it was not interrupted", key)
+                return
+            self.mode = "running"
+            self.unknown = 0
+            _write_control("run")
+            self.log.info("operator: RUN (%s) - started on click", key)
         elif c == "renderer":
             rd = next((r for r in RENDERERS if r["key"] == cmd.get("arg")), None)
             if rd is None:
@@ -1289,7 +1318,13 @@ class Runner:
             except Exception:
                 continue
             if fp.ndim == 2 and fp.size:
+                # name and `listed` MUST travel with the fingerprint. A
+                # first version dropped them here, which silently undid the
+                # retirement fix: the survey reloaded every boss as freshly
+                # listed and nameless on the next scan.
                 out.append({"key": str(e["key"]), "rank": e.get("rank") or "?",
+                            "name": e.get("name"),
+                            "listed": bool(e.get("listed", True)),
                             "fp": fp})
         return out
 
@@ -1299,8 +1334,19 @@ class Runner:
     def save_eudemon_roster(self, roster):
         """Persist what the hunt has seen, so the panel can offer it later."""
         try:
+            prev = {str(e.get("key")): e.get("name")
+                    for e in (_read_json(EUDEMON_ROSTER_PATH, []) or [])
+                    if isinstance(e, dict)}
             _write_json(EUDEMON_ROSTER_PATH,
                         [{"key": e["key"], "rank": e["rank"],
+                          # A LABEL, NEVER AN IDENTITY. Identity stays the
+                          # fingerprint; the name only makes the panel
+                          # readable, so a re-harvest must not drop one that
+                          # was already recorded.
+                          "name": e.get("name") or prev.get(str(e["key"])),
+                          # False = seen before, not on the list right now.
+                          # Kept so it returns as ITSELF when the event does.
+                          "listed": bool(e.get("listed", True)),
                           "fp": e["fp"].tolist()} for e in roster])
         except Exception as ex:
             self.log.warning("could not save the Eudemon roster: %s", ex)
@@ -1319,7 +1365,13 @@ class Runner:
         for e in seen if isinstance(seen, list) else []:
             if not isinstance(e, dict) or "key" not in e:
                 continue
+            # Only what the garden is offering NOW. A retired boss stays in
+            # the file so its identity survives the event, but showing it
+            # would invite skipping something that is not there.
+            if not bool(e.get("listed", True)):
+                continue
             out.append({"key": str(e["key"]), "rank": e.get("rank") or "?",
+                        "name": e.get("name") or "",
                         "skipped": str(e["key"]) in skip})
         return out
 
@@ -1329,7 +1381,8 @@ class Runner:
         Stored as plain lists of ints so the file stays readable and editable
         by hand - the operator is the one who decides what goes in it.
         SS rows are exempt from skipping regardless of what this returns;
-        `eudemon.blacklistable` enforces that, not this accessor.
+        `eudemon.blacklistable` decides which ranks qualify, not this
+        accessor - it now admits every rank whose badge READ.
         """
         import numpy as _np
         raw = _read_json(EUDEMON_BLACKLIST_PATH, [])

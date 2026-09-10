@@ -443,11 +443,20 @@ _BOOTSTRAP = r"""
       `<div class="d" id="v_hskills" style="margin-bottom:5px"></div>` +
       `<div class="g4" id="v_hslots"></div>` +
       `<div style="margin-top:5px">` + btn("hskill_clear", "Clear hunt order") + `</div>` +
-      // EUDEMON BLACKLIST. Populated as the hunt pages the list, so it can
-      // be empty until one has run - the label says so rather than showing a
-      // bare empty box. SS entries are shown but not clickable: those bosses
-      // are time limited and must never be skipped.
+      // EUDEMON BLACKLIST, with its own SCAN button directly above it.
+      //
+      // The scan belongs HERE rather than in the task row because it is what
+      // fills the list underneath it - the two are one control surface, and
+      // an operator looking at a stale or empty list should not have to know
+      // that the fix lives somewhere else. It runs on click (`run_task`)
+      // when nothing else is going, since it answers a question rather than
+      // starting a shift.
+      //
+      // Every boss is clickable, event bosses included: the scan keeps this
+      // list current, so the old SS lock protected nothing.
       `<h4>Eudemon bosses (click to skip)</h4>` +
+      `<div style="margin-bottom:5px">` +
+        btn("run_task", "Scan bosses now", "eudemon_scan") + `</div>` +
       `<div class="d" id="v_eu_none" style="margin-bottom:4px"></div>` +
       `<div class="g4" id="v_eudemon"></div>` +
       `<h4>View</h4><div style="margin-top:2px">` +
@@ -637,7 +646,8 @@ _BOOTSTRAP = r"""
   };
 
   const fillEudemon = (list) => {
-    const key = (list || []).map(e => e.key + (e.skipped ? "!" : "")).join(",");
+    const key = (list || []).map(e => e.key + ":" + (e.name || "")
+        + (e.skipped ? "!" : "")).join(",");
     if (!V.v_eudemon || V.v_eudemon.dataset.key === key) return;
     V.v_eudemon.dataset.key = key;
     V.v_eudemon.innerHTML = "";
@@ -645,13 +655,12 @@ _BOOTSTRAP = r"""
         : "(none seen yet - run the hunt once and they appear here)");
     (list || []).forEach(e => {
       const b = document.createElement("button");
-      b.textContent = e.key + (e.skipped ? " x" : "");
-      if (e.rank === "SS") {
-        b.disabled = true;
-        b.title = "SS bosses are time limited and are never skipped";
-      } else {
-        b.dataset.cmd = "eu_skip"; b.dataset.arg = e.key;
-      }
+      b.textContent = (e.name ? e.key + " " + e.name : e.key)
+          + (e.skipped ? " x" : "");
+      // EVERY boss is skippable now, event bosses included - the scan
+      // keeps this list current, so the old SS lock protected nothing.
+      b.dataset.cmd = "eu_skip"; b.dataset.arg = e.key;
+      if (e.rank === "SS") b.title = "event boss - limited attempts";
       setOn(b, !!e.skipped);
       V.v_eudemon.appendChild(b);
     });

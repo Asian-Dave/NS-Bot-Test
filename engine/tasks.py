@@ -60,6 +60,14 @@ class Task:
     def run(self, rt):
         raise NotImplementedError
 
+    # NOT EVERY TASK NEEDS A BUTTON IN THE TASK ROW. A hidden task is still
+    # a real, runnable task - `BY_KEY` keeps it and `run_task` can start it -
+    # it simply has its own control somewhere the operator will actually look
+    # for it. The Eudemon scan lives above the boss list it fills, and a
+    # second button in the task row would be the same command twice, with the
+    # duplicate sitting where its effect is invisible.
+    hidden = False
+
     def as_dict(self):
         return {"key": self.key, "label": self.label}
 
@@ -180,6 +188,51 @@ class EudemonHunt(Task):
             roster=roster, skip_keys=rt.eudemon_skip_keys(),
             on_roster=rt.save_eudemon_roster)
         return f"Eudemon: {fought} fought, {banked} banked"
+
+
+class EudemonScan(Task):
+    """Read the CURRENT boss list into the panel, without fighting anything.
+
+    **The list changes with events**, so which bosses exist is not a fixed
+    fact to be learned once. The operator asked to be able to scan what is
+    there now and then allocate the skips by hand, and this is that button:
+    it pages the whole garden, refreshes the roster, and comes back.
+
+    It is a `replace` survey, not an additive one. `harvest_roster` only ever
+    ADDS, so without this the panel would keep offering bosses that an event
+    has taken away. Identity still travels by FINGERPRINT, so a boss that
+    survives the rescan keeps its key and its name - and therefore its
+    blacklist entry - while a genuinely new one gets a fresh key and a retired
+    index is never handed to a different boss.
+
+    Deliberately a separate task from the hunt. Scanning is cheap, safe and
+    reversible; fighting is none of those, and an operator who wants to see
+    what is available should not have to start a fight to find out.
+    """
+
+    key, label = "eudemon_scan", "Scan bosses"
+    oneshot = True
+    # Its button is the "Scan bosses now" one directly above the boss list -
+    # see `Task.hidden`.
+    hidden = True
+
+    def run(self, rt):
+        import eudemon as eu
+        rt.note = "scanning the Eudemon boss list"
+        rt.push()
+        if not eu.in_garden(rt.cap.frame(gray=False)):
+            eu.dismiss_popups(rt.actor, rt.cap, rt.log)
+            if not eu.to_garden(rt.actor, rt.cap, rt.log):
+                return "could not reach the Eudemon Garden"
+        roster = rt.eudemon_roster_fps()
+        eu.survey_roster(rt.cap, rt.actor, rt.log, roster,
+                         on_roster=rt.save_eudemon_roster, replace=True)
+        rt.save_eudemon_roster(roster)
+        eu.close(rt.actor, rt.cap, rt.log)
+        skippable = sum(1 for e in roster if eu.blacklistable(e["rank"]))
+        return (f"scanned {len(roster)} boss(es), {skippable} can be skipped "
+                f"- click them in the panel")
+
 
 class FarmMissions(Task):
     """Farm story missions, one mission per lap.
@@ -324,11 +377,16 @@ class ExamKekkai(Task):
 
 # ORDER IS THE PANEL'S ORDER. `idle` sits last because it is the resting
 # choice, not the first thing an operator wants to reach for.
-REGISTRY = [ResumeToLobby(), TpTraining(), SsTraining(), EudemonHunt(),
+REGISTRY = [ResumeToLobby(), TpTraining(), SsTraining(),
+            EudemonScan(), EudemonHunt(),
             FarmMissions(),
             ExamKekkai(), Idle()]
 BY_KEY = {t.key: t for t in REGISTRY}
-AS_DICTS = [t.as_dict() for t in REGISTRY]
+# The PANEL's task row. Hidden tasks are runnable but have their own control
+# elsewhere, so they are deliberately absent here - validate a command
+# against BY_KEY, never against this list, or a hidden task becomes
+# unreachable by the very button that exists to run it.
+AS_DICTS = [t.as_dict() for t in REGISTRY if not t.hidden]
 
 
 def get(key):

@@ -4194,7 +4194,7 @@ port.** The CMMhero source was deleted, only their `config.json` survives, and
 the SWF extraction is 129 PNGs plus a manifest - no strings, no
 ActionScript. The roster is read off the screen.
 
-### RANK IS A COLOUR, and SS is never blacklisted
+### RANK IS A COLOUR
 
 Measured medians over each badge's saturated pixels:
 
@@ -4211,10 +4211,21 @@ alone. That matters here specifically: confusing them would either exempt a
 farmable boss from the blacklist or let a time-limited one be skipped. All 14
 rows read correctly.
 
-The operator's rule is that the blacklist covers only the NON-SS ranks,
-because SS bosses are time limited. `blacklistable()` enforces it in the
-module rather than trusting the caller, so a stale blacklist entry cannot cost
-a limited boss.
+**CORRECTION - EVERY READ RANK IS BLACKLISTABLE NOW, SS INCLUDED.** The rule
+used to be "non-SS only", and it was right for the code that existed then: the
+roster was harvested only as a side-effect of hunting, so a STALE entry could
+quietly cost an event attempt nobody chose to give up.
+
+The scan button removed that premise. The roster is rebuilt from the live list
+on demand, a boss that leaves is RETIRED rather than deleted so it returns as
+itself, and identity travels by fingerprint - so an entry cannot drift onto a
+different boss. With the list current by construction the refusal protected
+nothing and only took a decision away from the operator, who can see the event
+bosses in the panel and knows which are worth an attempt.
+
+`blacklistable()` is still the single place the rule lives, and it still
+refuses an UNREAD rank (`None`): skipping something unidentified is a
+different risk and stayed forbidden.
 
 ### THE LAP: RECRUIT, FIGHT, RETURN — and recruit BEFORE choosing a target
 
@@ -4244,14 +4255,47 @@ operator clicks the ones to skip. Two decisions worth keeping:
   identity needs; `same_row` already compares with tolerance and is what the
   rest of the module uses. Verified: re-harvesting the same three pages adds
   nothing to a roster of 14.
-* **An SS boss is shown but NOT clickable**, and the command refuses it
-  server-side as well. Showing a checkable box for a boss that will never be
-  skipped would mislead the operator into thinking a time-limited boss had
-  been excluded. `blacklistable` remains the single place that rule lives.
+* **Every boss is clickable, event bosses included** - see the correction
+  above. The command defers to `blacklistable` rather than testing the rank
+  itself, so there is still exactly one place the rule lives.
 
 The roster is persisted, because the panel has to offer the bosses BEFORE a
 hunt runs - an operator picks what to skip and then presses Run, not the other
 way round.
+
+
+### THE SCAN BUTTON, AND WHY IT SITS WITH THE LIST
+
+**The boss list changes with events**, so which bosses exist is not a fact to
+learn once. `EudemonScan` pages the whole garden and refreshes the roster
+without fighting anything - scanning is cheap and reversible, fighting is
+neither, and an operator who wants to see what is available should not have to
+start a fight to find out.
+
+Three decisions worth keeping:
+
+* **It lives ABOVE the boss grid, not in the task row.** The scan is what
+  FILLS the list beneath it; the two are one control surface, and an operator
+  looking at a stale list should not have to know the fix lives elsewhere in
+  the panel. It was in the task row first and that was a duplicate of the same
+  command, with the copy sitting where its effect is invisible. `Task.hidden`
+  keeps it runnable while absent from the row - so a command must be validated
+  against `BY_KEY`, never against the panel's visible list, or the button that
+  exists to run it cannot.
+* **It runs on click** (`run_task`), because it answers a question rather than
+  starting a shift. It will NOT interrupt: if something is already running the
+  task is queued and says so, since aborting a mission to answer a question is
+  the worst reading of that button.
+* **A rescan REPLACES rather than adds**, because `harvest_roster` only ever
+  adds and the panel would keep offering bosses an event has taken away.
+
+**A retired boss is kept, not deleted, and a test caught why.** Dropping the
+entry looks equivalent and is not: the FINGERPRINT goes with it, so when the
+event returns there is nothing to match and the boss comes back a stranger -
+new key, no name, and the operator's blacklist entry silently detached. The
+first version did exactly that and passed, because `_next_key` reissued the
+same numbers by coincidence. Entries now carry `listed: False`; the panel
+shows only listed ones, and identity survives an absence.
 
 ### `x0` MEANS NO TRIES LEFT — but only when it actually READ
 
@@ -4362,6 +4406,50 @@ has not filled the second list in has not asked for one. The two lists live in
 different files so neither can overwrite the other, and the panel's two slot
 rows are built by one filler taking the command as an argument, so a slot
 added to one cannot leak into the other by copy-paste drift.
+
+### THE PANEL COULD ONLY OFFER PAGE 1 — the search stopped the harvesting
+
+The blacklist UI was complete and the roster was nearly empty, so the feature
+looked built and was unusable: the operator could not skip a single C, B, A or
+S boss, which is the whole point of it.
+
+`hunt` harvested the roster INSIDE its target search, and that search stops at
+the first startable boss:
+
+    for page in (1, 2, 3):
+        found = goto_page(...)
+        harvest_roster(...)      # only for pages actually visited
+        ...
+        if target: break         # page 1 always has a startable SS boss
+
+Page 1 always carries the SS rows, so it broke out there on every lap and
+pages 2 and 3 were never visited. Measured on the live roster file: **5
+entries — SS-1..SS-4 and C-1** — out of fourteen bosses.
+
+`survey_roster` pages the whole list once per hunt, separately from target
+selection. Executed over the three committed garden pages it harvests all
+fourteen, and all fourteen are offerable in the panel (the SS lock was later
+removed - see the correction under RANK IS A COLOUR):
+
+    SS-1 Izo · SS-2 Kyunoki's Right Hand · SS-3 Mudo & Kyo · SS-4 Kojima
+    C-1 Kamaitachi · C-2 Hell Horse
+    B-1 Kabutomushi Musha · B-2 Kinkaku & Ginkaku
+    A-1 Thunder Eagle · A-2 Mammoth King
+    S-1 Oceans Queen · S-2 Ghost Soldier · S-3 Battle Angel
+    S-4 Infernal Chimera
+
+**Once per hunt, not once per lap.** The roster is persisted and matched by
+fingerprint, so a boss stays known once seen; two extra page turns on every
+lap would buy nothing. An empty page ends the survey early - the list is
+contiguous, so an empty one is the end and not a transient miss.
+
+**And the test EXECUTES the survey.** A source-level assertion would pass
+against a survey that cannot run - this suite has shipped that bug twice
+(`arrow`, `play`). Its ordering check also strips COMMENTS as well as
+docstrings, because the fix is now explained in a comment beside the call, and
+a naive grep would match the prose rather than the call and pass with the call
+deleted. That is the docstring trap wearing a different hat; the docstring
+half alone has caught this suite four times.
 
 ## RECRUITING A PARTY — and the one place a resize is justified
 

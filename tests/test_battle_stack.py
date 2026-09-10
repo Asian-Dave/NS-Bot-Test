@@ -3079,8 +3079,19 @@ def test_a_task_is_declared_in_exactly_one_place():
               f"{type(t).__name__} declares a key and a label")
     keys = [t.key for t in tasks_mod.REGISTRY]
     check(len(keys) == len(set(keys)), f"keys are unique ({keys})")
-    check([d["key"] for d in app_mod.TASKS] == keys,
-          "the panel's task list IS the registry, not a second copy")
+    # DERIVED FROM the registry, not equal to it: a task may be HIDDEN when
+    # it has its own control elsewhere (the Eudemon scan sits above the boss
+    # list it fills). What must never happen is a hand-kept second copy, so
+    # the row must be the registry MINUS the hidden ones, in order.
+    shown = [t.key for t in tasks_mod.REGISTRY if not t.hidden]
+    check([d["key"] for d in app_mod.TASKS] == shown,
+          "the panel's task row is derived from the registry, not a second "
+          f"copy ({[d['key'] for d in app_mod.TASKS]})")
+    check(set(shown) <= set(keys), "and every shown task is a real task")
+    for t in tasks_mod.REGISTRY:
+        if t.hidden:
+            check(t.key in tasks_mod.BY_KEY,
+                  f"the hidden task {t.key} is still runnable by key")
 
     # --- step() no longer knows any task by name --------------------------
     src = inspect.getsource(app_mod.Runner.step)
@@ -5978,16 +5989,23 @@ def test_the_eudemon_hunt_reads_ranks_and_never_blacklists_ss():
     presses Battle and asks whether the screen moved - the same positive
     reading `tp.start_row` uses for an exhausted TP row.
     """
-    print("\nthe Eudemon hunt reads ranks and never blacklists SS")
+    print("\nthe Eudemon hunt reads ranks; every read rank is blacklistable")
     import eudemon as eu
 
+    # DELIBERATELY REVERSED: SS is blacklistable now. The old rule refused it
+    # because the roster was harvested only while hunting, so a STALE entry
+    # could quietly cost an event attempt. The scan button rebuilds the list
+    # on demand and retired bosses keep their fingerprint, so the panel cannot
+    # offer a boss that is not there - the protection had nothing left to
+    # protect and only took a choice away from the operator.
     check(eu.blacklistable("C") and eu.blacklistable("A")
           and eu.blacklistable("B") and eu.blacklistable("S"),
-          "every non-SS rank may be blacklisted")
-    check(not eu.blacklistable("SS"),
-          "SS may NOT be blacklisted - those bosses are time limited")
+          "every ordinary rank may be blacklisted")
+    check(eu.blacklistable("SS"),
+          "and SS may be too, now the scan keeps the roster current")
     check(not eu.blacklistable(None),
-          "and an unread rank is not blacklistable either")
+          "but an UNREAD rank is still refused - skipping something "
+          "unidentified is the one case that stayed forbidden")
 
     frames = sorted(glob.glob(os.path.join(ROOT, "ref/auto/eudemon/page*.png")))
     if not frames:
@@ -6224,15 +6242,49 @@ def test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby():
           "identity is not a hash of the fingerprint - a hash changes with "
           "any pixel, which is the opposite of a stable identity")
 
-    # --- the panel refuses to even offer an SS box ---------------------
+    # --- EVERY boss is offerable, and the scan sits with the list -------
     dock_src = open(os.path.join(ROOT, "engine/dock.py")).read()
     check('"eu_skip"' in dock_src, "the panel can toggle a boss")
-    check('e.rank === "SS"' in dock_src and "disabled" in dock_src,
-          "and an SS boss is shown but not clickable, so the operator is "
-          "never misled into thinking one was excluded")
+    check("b.disabled = true" not in dock_src.split("fillEudemon")[1][:900],
+          "and no boss is rendered un-clickable - the SS lock is gone, "
+          "because the scan keeps the list current")
+    # The scan button belongs WITH the list it fills, above it.
+    head = dock_src.index("Eudemon bosses (click to skip)")
+    grid = dock_src.index('id="v_eudemon"')
+    scan = dock_src.index('btn("run_task", "Scan bosses now", "eudemon_scan")')
+    check(head < scan < grid,
+          "the scan button sits between the heading and the boss grid")
     app_src = open(os.path.join(ROOT, "engine/app.py")).read()
-    check('entry["rank"] == "SS"' in app_src,
-          "and the command refuses it server-side too")
+    check('entry["rank"] == "SS"' not in app_src,
+          "the server-side SS refusal is gone too")
+    check("_eu.blacklistable(entry.get(\"rank\"))" in app_src,
+          "and the command defers to blacklistable, the single place the "
+          "rank rule lives")
+
+    # --- the scan has ONE button, and it is the one by the list ---------
+    import tasks as tasks_mod
+    check("eudemon_scan" in tasks_mod.BY_KEY,
+          "the scan is a real, runnable task")
+    check(all(t["key"] != "eudemon_scan" for t in tasks_mod.AS_DICTS),
+          "but it is NOT in the panel's task row - its button lives above "
+          "the boss list it fills, and a second one would be the same "
+          "command twice with the duplicate where its effect is invisible")
+    # A HIDDEN TASK MUST STILL BE REACHABLE. Validating a command against the
+    # panel list instead of the registry would make the scan button dead.
+    app_body = open(os.path.join(ROOT, "engine/app.py")).read()
+    check("if key not in tasks.BY_KEY" in app_body,
+          "run_task validates against the REGISTRY, not the visible row")
+
+    # --- run_task arms AND starts, but never barges in ------------------
+    import app as app_mod
+    apply_src = inspect.getsource(app_mod.Runner._apply)
+    body = apply_src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else apply_src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check('c == "run_task"' in body, "run_task is a command")
+    check('self.mode == "running"' in body.split('c == "run_task"')[1][:600],
+          "and it checks whether something is already running BEFORE "
+          "starting - a scan must never abort a mission to answer a question")
 
 
 
@@ -6321,6 +6373,197 @@ def test_a_two_button_dialog_is_declined_never_accepted():
           "and BEFORE the rung is allowed to act on the match")
 
 
+
+def test_the_whole_boss_list_is_harvested_so_the_panel_can_offer_it():
+    """The panel can only offer bosses that have been HARVESTED.
+
+    `hunt`'s target search stops at the first startable boss, and page 1
+    always carries one (the SS rows), so it broke out there on every lap and
+    pages 2 and 3 were never visited. The persisted roster therefore held five
+    entries - four SS and one C - and the operator could not blacklist the
+    C..S bosses AT ALL. Those are exactly the ranks the blacklist is for: SS
+    is event-limited and `blacklistable` refuses it outright.
+
+    `survey_roster` pages the whole list once per hunt, separately from target
+    selection. This test EXECUTES it over the three committed garden pages
+    rather than reading the source - a survey that cannot run would pass every
+    source-level assertion, which this suite has been burned by twice
+    (`arrow`, `play`).
+    """
+    print("\nthe whole boss list is harvested, so the panel can offer it")
+    import eudemon as eu
+
+    frames = [cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{i}.png"))
+              for i in (1, 2, 3)]
+    check(all(f is not None for f in frames), "three garden pages on disk")
+    if not all(f is not None for f in frames):
+        return
+
+    class _Cap:
+        def __init__(self):
+            self.i = 0
+
+        def frame(self, gray=False):
+            return frames[min(self.i, len(frames) - 1)]
+
+    class _Actor:
+        def __init__(self, cap):
+            self.cap = cap
+            self.clicks = []
+
+        def click_pixel(self, x, y, why=""):
+            self.clicks.append(why)
+            if "next page" in why:
+                self.cap.i += 1
+            if "first page" in why:
+                self.cap.i = 0
+
+    cap = _Cap()
+    actor = _Actor(cap)
+    real_sleep = time.sleep
+    time.sleep = lambda *a, **k: None
+    try:
+        roster = []
+        eu.survey_roster(cap, actor, _Log(), roster)
+    finally:
+        time.sleep = real_sleep
+
+    keys = [e["key"] for e in roster]
+    check(len(roster) == 14, f"all fourteen bosses harvested ({len(roster)})")
+    check(sorted({e["rank"] for e in roster}) == ["A", "B", "C", "S", "SS"],
+          f"every rank represented ({sorted({e['rank'] for e in roster})})")
+
+    # THE POINT OF THE FEATURE: the non-SS ranks must be offerable.
+    skippable = [e["key"] for e in roster if eu.blacklistable(e["rank"])]
+    check(len(skippable) == 14,
+          f"all fourteen are blacklistable, event bosses included "
+          f"({len(skippable)})")
+    for rank in ("C", "B", "A", "S", "SS"):
+        check(any(e["rank"] == rank and eu.blacklistable(e["rank"])
+                  for e in roster),
+              f"rank {rank} can be skipped")
+    check(len(set(keys)) == len(keys), "keys are unique")
+
+    # --- and the hunt must actually SURVEY before it searches ----------
+    # CODE ONLY - docstrings AND comments stripped. `hunt` now DISCUSSES the
+    # survey in a comment, so a naive grep would match the prose explaining
+    # the fix rather than the call performing it, and would pass with the call
+    # deleted. This suite has been caught by the docstring half of that trap
+    # four times; a comment is the same trap wearing a different hat.
+    def code_only(fn):
+        t = inspect.getsource(fn)
+        parts = t.split('"""')
+        t = parts[0] + "".join(parts[2:]) if len(parts) > 2 else t
+        return "\n".join(ln.split("#")[0] for ln in t.splitlines())
+
+    body = code_only(eu.hunt)
+    check("survey_roster" in body, "hunt runs the survey (in code, not prose)")
+    check("survey_roster(" in body, "and CALLS it")
+    if "survey_roster" in body and "for page in (1, 2, 3)" in body:
+        check(body.index("survey_roster") < body.index("for page in (1, 2, 3)"),
+              "BEFORE the target search that would stop at page 1")
+    check("surveyed" in body, "and only once per hunt, not once per lap")
+
+
+
+def test_a_rescan_can_drop_a_boss_and_keeps_identity_across_events():
+    """The boss list CHANGES WITH EVENTS, so a rescan must drop as well as add.
+
+    `harvest_roster` only ever ADDS, so a panel built from it keeps offering
+    bosses an event has taken away. `survey_roster(replace=True)` rebuilds the
+    list from what is on screen.
+
+    What must survive a rescan is IDENTITY, and it travels by fingerprint, not
+    by position: a boss still listed keeps its key and its name, so the
+    operator's blacklist entry still points at the same boss. A retired index
+    is never reused, because a stale skip entry silently attaching to a
+    DIFFERENT boss is the one failure that would cost a fight nobody chose to
+    skip.
+    """
+    print("\na rescan drops what is gone and keeps identity for what remains")
+    import eudemon as eu
+
+    frames = [cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{i}.png"))
+              for i in (1, 2, 3)]
+    check(all(f is not None for f in frames), "the garden pages are on disk")
+    if not all(f is not None for f in frames):
+        return
+
+    def survey(pages, roster, replace=True):
+        class _Cap:
+            def __init__(self):
+                self.i = 0
+
+            def frame(self, gray=False):
+                return pages[min(self.i, len(pages) - 1)]
+
+        class _Actor:
+            def __init__(self, cap):
+                self.cap = cap
+
+            def click_pixel(self, x, y, why=""):
+                if "next page" in why:
+                    self.cap.i += 1
+                if "first page" in why:
+                    self.cap.i = 0
+
+        cap = _Cap()
+        real = time.sleep
+        time.sleep = lambda *a, **k: None
+        try:
+            eu.survey_roster(cap, _Actor(cap), _Log(), roster,
+                             pages=tuple(range(1, len(pages) + 1)),
+                             replace=replace)
+        finally:
+            time.sleep = real
+        return roster
+
+    # --- full list, then label it the way the panel does ----------------
+    roster = survey(frames, [])
+    check(len(roster) == 14, f"a full scan sees fourteen ({len(roster)})")
+    for e in roster:
+        e["name"] = "boss " + e["key"]
+    keys_before = {e["key"] for e in roster}
+
+    # --- an event ends: page 3 (the four S bosses) is gone --------------
+    # A retired boss is KEPT in the roster with listed=False - deleting it
+    # would throw away the fingerprint that lets it return as itself - so the
+    # assertion is about what the PANEL OFFERS, which is the real contract.
+    roster = survey(frames[:2], roster)
+    live = [e for e in roster if e.get("listed", True)]
+    check(len(live) == 10, f"the panel offers ten now ({len(live)})")
+    check(not any(e["rank"] == "S" for e in live),
+          "the S bosses are no longer offered")
+    check(len(roster) == 14,
+          f"but all fourteen are remembered ({len(roster)}), so identity "
+          f"survives the event")
+    check(all(e.get("name") for e in live),
+          "and every survivor kept its name")
+    check({e["key"] for e in live} <= keys_before,
+          "survivors kept their original keys, so a blacklist entry still "
+          "points at the same boss")
+
+    # --- the event returns -------------------------------------------
+    roster = survey(frames, roster)
+    live = [e for e in roster if e.get("listed", True)]
+    check(len(live) == 14, f"and they come back on the next scan ({len(live)})")
+    back = [e for e in live if e["rank"] == "S"]
+    check(len(back) == 4, f"all four S bosses returned ({len(back)})")
+    check({e["key"] for e in back} == {"S-1", "S-2", "S-3", "S-4"},
+          f"AS THEMSELVES - matched by fingerprint, not renumbered "
+          f"({sorted(e['key'] for e in back)})")
+    check(all(e.get("name") for e in back),
+          "with their names intact - which is what deleting them lost. The "
+          "first version dropped retired entries, so a returning boss had no "
+          "fingerprint to match and came back a stranger; it passed only "
+          "because _next_key reissued the same numbers by coincidence")
+
+    # --- an index is never handed to a different boss -------------------
+    fake = [{"key": "C-9", "rank": "C", "fp": None}]
+    check(eu._next_key("C", fake, []) == "C-10",
+          f"a retired index is never reused ({eu._next_key('C', fake, [])})")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -6398,7 +6641,9 @@ def main():
                test_the_hunts_carry_their_own_skill_rotation,
                test_a_eudemon_win_is_a_different_panel_from_a_mission_success,
                test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby,
-               test_a_two_button_dialog_is_declined_never_accepted):
+               test_a_two_button_dialog_is_declined_never_accepted,
+               test_the_whole_boss_list_is_harvested_so_the_panel_can_offer_it,
+               test_a_rescan_can_drop_a_boss_and_keeps_identity_across_events):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
