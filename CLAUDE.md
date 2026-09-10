@@ -4169,6 +4169,39 @@ because SS bosses are time limited. `blacklistable()` enforces it in the
 module rather than trusting the caller, so a stale blacklist entry cannot cost
 a limited boss.
 
+### A EUDEMON WIN IS A DIFFERENT PANEL FROM A MISSION SUCCESS
+
+The first live boss was WON and the bot reported `stalled`. Measured on the
+frame it stalled on (`ref/auto/eudemon/reward_panel.png` - `Izo`, XP 45,650 /
+Gold 45,650 plus a materials drop):
+
+    mission_success   0.266     <- the farm/TP banner does not match at all
+    result_panel      0.524
+    mission_start     0.668     <- the green check is not on this panel
+    close_popup_x     0.951     <- the X that dismisses it, at (2132, 242)
+
+A Eudemon boss pays out on a TALL PORTRAIT panel closed by a RED X, where the
+farm and TP pay out on a wide banner closed by a GREEN CHECK. So `tp.close_out`
+can never bank one - it waits out its 45 s looking for a check that is not
+there, the turn gate times out at 90 s, and the runner calls a won fight
+`stalled` while the reward sits on screen.
+
+**The `Share` button on that panel must never be pressed** - it publishes to a
+social feed, the same standing rule as the TP "Share with Teammates" dialog.
+The X is located BY TEMPLATE and additionally constrained to the panel's
+top-right corner, and the suite measures the Manhattan distance from the click
+to the green Share control (1517 px) so a loose match cannot drift onto it.
+
+**The garden's own close X is the same glyph in the same corner**, and
+`close_popup_x` matched all three list pages. A reward panel is never the
+list, so `reward_panel` returns None whenever `plates()` sees one - a positive
+reading of the list rather than another threshold.
+
+General shape, for the third time in this file: **a reward screen is not one
+asset.** The green check alone is drawn at three sizes; now there is a
+payout panel that does not use it at all. Check what the screen actually
+carries before reusing a close-out.
+
 ### A RANK COLOUR IS NOT AN ANCHOR — locate the LIST first
 
 The first version of `eudemon.rows` assumed the five row positions and read a

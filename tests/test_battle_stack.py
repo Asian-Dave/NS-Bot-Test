@@ -6062,6 +6062,88 @@ def test_the_hunts_carry_their_own_skill_rotation():
     check("v_hskills" in dock_src, "and shows what it currently holds")
 
 
+
+def test_a_eudemon_win_is_a_different_panel_from_a_mission_success():
+    """A Eudemon boss pays out on a TALL PORTRAIT panel with a RED X and a
+    `Share` button - not the wide banner with a green check.
+
+    Measured on a live win (`Izo`, XP 45,650 / Gold 45,650 plus a materials
+    drop), on the very frame this test loads:
+
+        mission_success   0.266    <- the farm banner does not match at all
+        result_panel      0.524
+        mission_start     0.668    <- the green check is not on this panel
+        close_popup_x     0.951    <- the X that dismisses it, at (2132, 242)
+
+    So `tp.close_out` cannot bank one: it waits for a check that is not there.
+    Live consequence - the fight was reported `stalled` after a 90 s turn-gate
+    timeout on a mission that had been WON, and the bot sat on the reward
+    screen until its own recovery relogged.
+
+    **`Share` must never be pressed** - it publishes to a social feed, the
+    same rule as the TP "Share to wall" dialog. The X is located by template
+    AND constrained to the panel's top-right corner, so a loose match cannot
+    wander onto the green button.
+    """
+    print("\na Eudemon win is a different panel from a Mission Success")
+    import eudemon as eu
+    import perceive as perceive_mod
+
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/eudemon/reward_panel.png"))
+    check(f is not None, "the reward-panel fixture is on disk")
+    if f is None:
+        return
+    was = perceive_mod.get_renderer()
+    try:
+        perceive_mod.set_renderer("webgl")
+        xy = eu.reward_panel(f)
+        check(xy is not None, f"the panel's X is located ({xy})")
+        if xy:
+            x, y = xy
+            check(x >= eu.REWARD_X_MIN_X,
+                  f"the click is in the panel's right-hand side (x={x})")
+            check(eu.REWARD_X_MIN_Y <= y <= eu.REWARD_X_MAX_Y,
+                  f"and in its top band (y={y})")
+            # The Share button is the large GREEN control low on the panel.
+            # Whatever else happens, the click must be nowhere near it.
+            hsv = cv2.cvtColor(f, cv2.COLOR_BGR2HSV)
+            green = cv2.inRange(hsv, np.array((38, 90, 90), np.uint8),
+                                np.array((85, 255, 255), np.uint8))
+            n, _l, st, ce = cv2.connectedComponentsWithStats(green)
+            share = [(int(ce[i][0]), int(ce[i][1])) for i in range(1, n)
+                     if st[i, 4] > 8000 and st[i, 3] > 40]
+            for sx, sy in share:
+                d = abs(sx - x) + abs(sy - y)
+                check(d > 300,
+                      f"the X is far from the green Share control at "
+                      f"({sx},{sy}) - Manhattan {d}")
+
+        # --- and it is NOT confused with the garden's own close X --------
+        for n_ in (1, 2, 3):
+            g = cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{n_}.png"))
+            if g is None:
+                continue
+            check(eu.reward_panel(g) is None,
+                  f"page{n_} is the list, not a reward panel")
+
+        # the farm banner genuinely does not match this panel
+        t = perceive_mod.template("mission_success", threshold=0.80)
+        if t is not None:
+            from perceive import find
+            _m, conf = find(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), t)
+            check(conf < 0.60,
+                  f"mission_success does not match a Eudemon win ({conf:.3f})")
+    finally:
+        if was:
+            perceive_mod.set_renderer(was)
+        else:
+            perceive_mod.clear_renderer()
+
+    src = inspect.getsource(eu.hunt)
+    check("tp.close_out" not in src,
+          "hunt() banks with the Eudemon close-out, not the TP one")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -6136,7 +6218,8 @@ def main():
                test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely,
                test_recruiting_takes_the_strongest_friend_and_never_an_npc,
                test_the_eudemon_hunt_reads_ranks_and_never_blacklists_ss,
-               test_the_hunts_carry_their_own_skill_rotation):
+               test_the_hunts_carry_their_own_skill_rotation,
+               test_a_eudemon_win_is_a_different_panel_from_a_mission_success):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

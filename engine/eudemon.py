@@ -429,7 +429,7 @@ def hunt(cap, actor, log, play_combat, blacklist=(), max_fights=40,
         except Exception as e:
             log.warning("eudemon: the battle runner raised %s: %s",
                         type(e).__name__, e)
-        if tp.close_out(actor, cap, log):
+        if close_out(actor, cap, log):
             banked += 1
             log.info("eudemon: banked (%d of %d fought)", banked, fought)
         else:
@@ -439,3 +439,84 @@ def hunt(cap, actor, log, play_combat, blacklist=(), max_fights=40,
             if relog:
                 relog()
     return fought, banked
+
+# --- the reward panel -----------------------------------------------------
+#
+# **A EUDEMON WIN DOES NOT LOOK LIKE A MISSION SUCCESS.** The farm and TP
+# banner is a wide landscape panel dismissed by a GREEN CHECK; a Eudemon boss
+# pays out on a TALL PORTRAIT panel dismissed by a RED X, and it carries a
+# `Share` button. Measured on a live win (`Izo`, XP 45,650 / Gold 45,650 plus
+# a materials drop):
+#
+#     mission_success   0.266      <- the farm banner does not match at all
+#     result_panel      0.524
+#     mission_start     0.668      <- the green check is not on this panel
+#     close_popup_x     0.951      <- the X that dismisses it, at (2132, 242)
+#
+# So `tp.close_out` cannot bank one: it waits for a check that is not there,
+# and the fight was reported `stalled` after a 90 s turn-gate timeout on a
+# mission that had been WON. The bot sat on the reward screen.
+#
+# **NEVER PRESS `Share`.** It publishes to a social feed, which this project
+# forbids doing unasked - the same rule as the TP "Share to wall" dialog. The
+# X is located BY TEMPLATE and the click is additionally required to be in the
+# panel's top-right, so a mis-match cannot wander onto the green button.
+REWARD_X_MIN_Y = 120
+REWARD_X_MAX_Y = 420
+REWARD_X_MIN_X = 1900
+REWARD_CLEARED_SETTLE = 2.5
+
+
+def reward_panel(frame):
+    """(x, y) of the reward panel's close X, or None.
+
+    Constrained to the panel's top-right corner. `close_popup_x` is a generic
+    template used on several screens, and an unconstrained match on a panel
+    that also carries a Share button is exactly the sort of loose targeting
+    this project has been bitten by.
+    """
+    from perceive import find
+    # THE GARDEN HAS ITS OWN CLOSE X, in the same corner - `close_popup_x`
+    # matched all three list pages. A reward panel is never the list, and
+    # `plates()` is a positive reading of the list, so this costs nothing and
+    # removes the whole class of confusion.
+    if plates(frame):
+        return None
+    t = tp._tpl("close_popup_x", 0.85)
+    if t is None:
+        return None
+    m, _c = find(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), t)
+    if not m.found:
+        return None
+    x, y = m.center
+    if not (REWARD_X_MIN_Y <= y <= REWARD_X_MAX_Y) or x < REWARD_X_MIN_X:
+        return None
+    return (int(x), int(y))
+
+
+def close_out(actor, cap, log, timeout=45):
+    """Acknowledge a Eudemon reward panel. True once it is gone.
+
+    Returns True only when the panel actually clears - the same rule the rest
+    of this project uses, that a reward is not banked until the screen moves
+    on.
+    """
+    t0 = time.time()
+    seen = False
+    while time.time() - t0 < timeout:
+        f = cap.frame(gray=False)
+        xy = reward_panel(f)
+        if xy is None:
+            if seen:
+                log.info("eudemon: reward panel acknowledged - banked")
+                return True
+            if in_garden(f):
+                return False        # never opened a panel; nothing to bank
+            time.sleep(1.0)
+            continue
+        seen = True
+        actor.click_pixel(*xy, why="eudemon: close the reward panel (X, "
+                                   "never Share)")
+        time.sleep(REWARD_CLEARED_SETTLE)
+    log.info("eudemon: the reward panel did not clear in %ds", timeout)
+    return False
