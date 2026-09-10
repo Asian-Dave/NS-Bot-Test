@@ -74,6 +74,12 @@ VIEWPORT = (1720, 720, 2)          # the ONE pinned geometry every template
 # S1..S8 are the skill slots (4 left bank, 4 right).
 SKILL_SLOTS = ["AT", "CH", "DO", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
 SKILLS_PATH = "run/skills.json"
+# The hunts carry their own rotation; see `battle_cfg`.
+HUNT_SKILLS_PATH = "run/hunt_skills.json"
+# Eudemon bosses to skip, as row FINGERPRINTS (see eudemon.rows).
+# Fingerprints rather than names or indices, because the list
+# re-pages and re-orders; a fingerprint survives that.
+EUDEMON_BLACKLIST_PATH = "run/eudemon_blacklist.json"
 FARM_PATH = "run/farm.json"
 GRADES = ["auto", "S", "A", "B", "C"]
 
@@ -300,6 +306,13 @@ class Runner:
         # Editable from the panel, and persisted OUTSIDE the tracked config so
         # experimenting with slots never dirties a versioned file.
         self.skills = _read_skills()
+        # A SECOND ROTATION, FOR THE HUNTS. Hunting House and Eudemon bosses
+        # are a different fight from a story mission - the operator asked for
+        # them to carry their own skill order, which is also how the reference
+        # bot is arranged (`HHSkill` and `EudemonSkill` sit beside the rest).
+        # Empty means "use the main order", so the feature costs nothing until
+        # it is used.
+        self.hunt_skills = _read_skills(HUNT_SKILLS_PATH)
         f = _read_json(FARM_PATH, {})
         self.grade = f.get("grade")          # None == auto
         self.pin_page = f.get("page")        # None == highest unlocked
@@ -456,6 +469,7 @@ class Runner:
                 "note": self.note, "tasks": TASKS, "log": self.log.lines[-10:],
                 "focus": self.focus_on,
                 "skills": self.skills, "skill_slots": SKILL_SLOTS,
+                "hunt_skills": self.hunt_skills,
                 "grades": GRADES, "grade": self.grade,
                 "viewports": VIEWPORTS, "viewport": self.viewport,
                 "renderers": RENDERERS,
@@ -536,6 +550,18 @@ class Runner:
             self.skills = []
             _write_skills(self.skills)
             self.log.info("operator: skill order cleared (Attack only)")
+        elif c == "hskill":
+            k = cmd.get("arg")
+            if k in SKILL_SLOTS:
+                self.hunt_skills.append(k)
+                _write_skills(self.hunt_skills, HUNT_SKILLS_PATH)
+                self.log.info("operator: HUNT skill order -> %s",
+                              " ".join(self.hunt_skills))
+        elif c == "hskill_clear":
+            self.hunt_skills = []
+            _write_skills(self.hunt_skills, HUNT_SKILLS_PATH)
+            self.log.info("operator: hunt skill order cleared (the main "
+                          "order will be used)")
         elif c == "grade":
             g = cmd.get("arg")
             self.grade = None if g == "auto" else (g if g in GRADES else self.grade)
@@ -1227,18 +1253,47 @@ class Runner:
         _write_json(FARM_PATH, {"grade": self.grade, "page": self.pin_page,
                                 "row": self.pin_row})
 
-    def battle_cfg(self):
+    def eudemon_blacklist(self):
+        """Row fingerprints the Eudemon hunt should skip.
+
+        Stored as plain lists of ints so the file stays readable and editable
+        by hand - the operator is the one who decides what goes in it.
+        SS rows are exempt from skipping regardless of what this returns;
+        `eudemon.blacklistable` enforces that, not this accessor.
+        """
+        import numpy as _np
+        raw = _read_json(EUDEMON_BLACKLIST_PATH, [])
+        out = []
+        for fp in raw if isinstance(raw, list) else []:
+            try:
+                a = _np.array(fp, dtype=_np.uint8)
+            except Exception:
+                continue
+            if a.ndim == 2 and a.size:
+                out.append(a)
+        return out
+
+    def battle_cfg(self, profile=None):
         """The config a mission should run with, including the panel's skills.
 
         The rotation is applied HERE rather than written into the config file, so
         what the operator picked in the panel is what the very next battle uses -
         that is the whole point of it being editable live. An empty order means
         Attack only, which is the documented safe default.
+
+        `profile="hunt"` prefers the HUNT order (Hunting House, Eudemon), and
+        FALLS BACK to the main one when it is empty rather than dropping to
+        Attack-only. A boss fight with no rotation would be the worst possible
+        default, and an operator who has not filled the second list in has not
+        asked for one.
         """
         cfg = dict(self.cfg)
-        if self.skills:
+        order = self.skills
+        if profile == "hunt" and self.hunt_skills:
+            order = self.hunt_skills
+        if order:
             b = dict(cfg.get("battle", {}))
-            b["rotation"] = list(self.skills)
+            b["rotation"] = list(order)
             cfg["battle"] = b
         m = dict(cfg.get("mission", {}))
         m["grade"] = self.grade
@@ -1246,14 +1301,16 @@ class Runner:
         cfg["mission"] = m
         return cfg
 
-    def _run_mission(self):
+    def _run_mission(self, profile=None):
         """Play a mission that is already under way."""
         import mission as mission_mod
         from gate import Gate
-        cfg = self.battle_cfg()
-        if self.skills:
-            self.log.info("using the panel's skill order: %s",
-                          " ".join(self.skills))
+        cfg = self.battle_cfg(profile)
+        order = cfg.get("battle", {}).get("rotation") or []
+        if order:
+            self.log.info("using the %s skill order: %s",
+                          "HUNT" if (profile == "hunt" and self.hunt_skills)
+                          else "panel's", " ".join(order))
         r = mission_mod.MissionRunner(
             Gate(self.cap, self.log, self.controls), self.actor, self.cap,
             self.tpls, cfg, self.log, self.controls)
@@ -1671,12 +1728,12 @@ def _write_json(rel, value):
         pass
 
 
-def _read_skills():
-    return [k for k in _read_json(SKILLS_PATH, []) if k in SKILL_SLOTS]
+def _read_skills(path=None):
+    return [k for k in _read_json(path or SKILLS_PATH, []) if k in SKILL_SLOTS]
 
 
-def _write_skills(order):
-    _write_json(SKILLS_PATH, order)
+def _write_skills(order, path=None):
+    _write_json(path or SKILLS_PATH, order)
 
 
 def _alive(pid):

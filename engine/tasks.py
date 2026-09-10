@@ -144,6 +144,40 @@ class SsTraining(Task):
         return f"SS pass: {played} started, {banked} banked"
 
 
+
+class EudemonHunt(Task):
+    """Farm the Eudemon Garden boss ladder until nothing will start.
+
+    The operator's shape for this: run every boss, with a BLACKLIST of ones to
+    skip, and keep going until each is exhausted. The blacklist covers only
+    the non-SS ranks - SS bosses are time limited, so `eudemon.blacklistable`
+    refuses to skip one whatever the blacklist says.
+
+    **Fights use the HUNT rotation** (`profile="hunt"`), which is a second
+    skill order the panel keeps beside the main one. Bosses are a different
+    fight from a story mission and the operator asked for them to be declared
+    separately; when that list is empty the main order is used rather than
+    dropping to Attack-only, because a boss fight with no rotation is the
+    worst possible default.
+
+    `needs_lobby` stays True: the garden is reached from the village, and the
+    resume ladder can always get there.
+    """
+
+    key, label = "eudemon_hunt", "Eudemon hunt"
+    oneshot = True
+
+    def run(self, rt):
+        import eudemon as eu
+        rt.note = "Eudemon hunt in flight - the panel pauses until it finishes"
+        rt.push()
+        fought, banked = eu.hunt(
+            rt.cap, rt.actor, rt.log,
+            play_combat=lambda: rt._run_mission(profile="hunt"),
+            blacklist=rt.eudemon_blacklist(),
+            relog=rt.relog)
+        return f"Eudemon: {fought} fought, {banked} banked"
+
 class FarmMissions(Task):
     """Farm story missions, one mission per lap.
 
@@ -287,7 +321,8 @@ class ExamKekkai(Task):
 
 # ORDER IS THE PANEL'S ORDER. `idle` sits last because it is the resting
 # choice, not the first thing an operator wants to reach for.
-REGISTRY = [ResumeToLobby(), TpTraining(), SsTraining(), FarmMissions(),
+REGISTRY = [ResumeToLobby(), TpTraining(), SsTraining(), EudemonHunt(),
+            FarmMissions(),
             ExamKekkai(), Idle()]
 BY_KEY = {t.key: t for t in REGISTRY}
 AS_DICTS = [t.as_dict() for t in REGISTRY]

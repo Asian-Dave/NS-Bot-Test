@@ -434,6 +434,15 @@ _BOOTSTRAP = r"""
       `<div class="d" id="v_skills" style="margin-bottom:5px"></div>` +
       `<div class="g4" id="v_slots"></div>` +
       `<div style="margin-top:5px">` + btn("skill_clear", "Clear order") + `</div>` +
+      // A SECOND ROTATION FOR THE HUNTS. Hunting House and Eudemon bosses are
+      // a different fight from a story mission, so they carry their own order
+      // - the same arrangement the reference bot uses (HHSkill, EudemonSkill).
+      // Empty means "use the main order", which is why the label says so
+      // rather than leaving the operator to infer it.
+      `<h4>Hunt skill order (Hunting House / Eudemon)</h4>` +
+      `<div class="d" id="v_hskills" style="margin-bottom:5px"></div>` +
+      `<div class="g4" id="v_hslots"></div>` +
+      `<div style="margin-top:5px">` + btn("hskill_clear", "Clear hunt order") + `</div>` +
       `<h4>View</h4><div style="margin-top:2px">` +
         btn("focus", "Focus mode") +
       `</div>` +
@@ -600,16 +609,24 @@ _BOOTSTRAP = r"""
     });
   };
 
-  const fillSlots = (slots) => {
+  // One filler for both banks - the hunt row is the same buttons sending a
+  // different command, so a slot added to one list can never leak into the
+  // other by copy-paste drift.
+  const fillSlotRow = (host, slots, cmd) => {
     const key = (slots || []).join(",");
-    if (!V.v_slots || V.v_slots.dataset.key === key) return;
-    V.v_slots.dataset.key = key;
-    V.v_slots.innerHTML = "";
+    if (!host || host.dataset.key === key) return;
+    host.dataset.key = key;
+    host.innerHTML = "";
     (slots || []).forEach(k => {
       const b = document.createElement("button");
-      b.dataset.cmd = "skill"; b.dataset.arg = k; b.textContent = k;
-      V.v_slots.appendChild(b);
+      b.dataset.cmd = cmd; b.dataset.arg = k; b.textContent = k;
+      host.appendChild(b);
     });
+  };
+
+  const fillSlots = (slots) => {
+    fillSlotRow(V.v_slots, slots, "skill");
+    fillSlotRow(V.v_hslots, slots, "hskill");
   };
 
   const fillTasks = (tasks) => {
@@ -666,6 +683,10 @@ _BOOTSTRAP = r"""
     setText("v_skills", ord.length
         ? ord.map((k, i) => `${i + 1}. ${k}`).join("   ")
         : "(none - Attack only)");
+    const hord = (s.hunt_skills || []);
+    setText("v_hskills", hord.length
+        ? hord.map((k, i) => `${i + 1}. ${k}`).join("   ")
+        : "(none - the main order above is used)");
 
     const mode = s.mode || "idle";
     setText("v_pill", mode,

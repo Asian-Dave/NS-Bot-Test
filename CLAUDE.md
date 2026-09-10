@@ -4091,6 +4091,95 @@ installs a fresh rAF chain per call without cancelling the previous one and
 they all increment the same counter: three calls read 119.6 / 239.3 / 359.8.
 The A/B harness only escapes it because each backend is preceded by a reload.
 
+## EUDEMON GARDEN — the boss ladder, and a second rotation for the hunts
+
+Village -> `Hunting House` label -> submenu -> `Eudemon Garden`. A paged list
+of bosses, each row carrying a name, `Level:N`, a RANK badge and an attempts
+counter `x N`; the bottom of the panel has `Material Market` and `Battle`.
+
+**The Hunting House sub-app is no longer stuck.** `docs/UI_MAP.md` recorded S8
+as NOT OBSERVED, stalled at "Loading... 3%" - it loads fine now, and so does
+the garden.
+
+Fourteen bosses over three pages on this account:
+
+    SS  Izo · Kyunoki's Right Hand & … · Mudo & Kyo · Kojima      Level:1
+    C   Kamaitachi 10 · Hell Horse 20
+    B   Kabutomushi Musha · Kinkaku & Ginkaku
+    A   Thunder Eagle 40 · Mammoth King 50
+    S   Oceans Queen 55 · Ghost Soldier 60 · Battle Angel 70 · Infernal Chimera
+
+Exactly TEN are non-SS, which is almost certainly why the reference bot's
+`EudemonBossSequence` is `Boss1..Boss10` - their ten are the permanent roster
+and SS sits on top. Their list is positional with no names and their build is
+a different private server, so nothing transfers: **there is no boss data to
+port.** The CMMhero source was deleted, only their `config.json` survives, and
+the SWF extraction is 129 PNGs plus a manifest - no strings, no
+ActionScript. The roster is read off the screen.
+
+### RANK IS A COLOUR, and SS is never blacklisted
+
+Measured medians over each badge's saturated pixels:
+
+    rank   hue    S     V     px
+    SS     120   255   196   ~4000
+    B      101   176   143   ~3100
+    A        5   213   233   ~2600
+    S       24   153   246   ~2350
+    C       39   146   143   ~2100
+
+SS and B are the closest in hue (120 vs 101) and are separated by SATURATION
+as well - SS is fully saturated where B is 176 - so neither test decides
+alone. That matters here specifically: confusing them would either exempt a
+farmable boss from the blacklist or let a time-limited one be skipped. All 14
+rows read correctly.
+
+The operator's rule is that the blacklist covers only the NON-SS ranks,
+because SS bosses are time limited. `blacklistable()` enforces it in the
+module rather than trusting the caller, so a stale blacklist entry cannot cost
+a limited boss.
+
+### THE COUNTER IS ADVISORY — Battle is the authority
+
+`x N` reads `x1` for SS and `x3` for the rest today, and whether those are
+daily maxima or today's remainder is UNKNOWN until a full cycle is watched.
+Nothing depends on knowing, because exhaustion is decided the way
+`tp.start_row` decides it: press Battle and ask whether the screen moved. A
+boss with no attempts left cannot start a fight, so a still screen is a
+POSITIVE reading of "finished" rather than an inference from a digit.
+
+That is deliberate insurance: the count digit merges with the panel border at
+the threshold that isolates it (measured 54x130 for a "1" whose true height is
+~90), so the reader can legitimately return None, and None must never be
+mistaken for zero.
+
+### `tp.row_fingerprint` IS WRONG FOR THIS LIST
+
+It samples x 1700..2500, which on a TP list is the row's own right-hand side
+but HERE is the shared boss PREVIEW PANE - repainted on selection and
+identical across the five rows of a page. Using it would hand back the same
+fingerprint for every row, so ONE blacklist entry would silently skip the
+whole page. `eudemon.row_fingerprint` samples the name plate (x 1033..1376)
+instead; verified 14 rows, zero collisions.
+
+General shape, and this file already records it for the character finder: a
+helper that is right for one screen is not automatically right for another
+that merely looks similar. Check what the coordinates actually land on.
+
+### A SECOND SKILL ROTATION, FOR THE HUNTS
+
+Bosses are a different fight from a story mission, so the panel keeps a hunt
+skill order beside the main one and `battle_cfg(profile="hunt")` prefers it.
+This is the arrangement the reference bot uses too - `HHSkill` and
+`EudemonSkill` sit beside `LevelingSkill`, `CWSkill` and the rest.
+
+**An empty hunt order falls back to the MAIN order, never to Attack-only.** A
+boss fight with no rotation is the worst possible default, and an operator who
+has not filled the second list in has not asked for one. The two lists live in
+different files so neither can overwrite the other, and the panel's two slot
+rows are built by one filler taking the command as an argument, so a slot
+added to one cannot leak into the other by copy-paste drift.
+
 ## RECRUITING A PARTY — and the one place a resize is justified
 
 Two party slots (`Team 0/2`), filled from the recruit rail. The operator wants

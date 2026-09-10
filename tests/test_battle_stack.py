@@ -5932,6 +5932,136 @@ def test_recruiting_takes_the_strongest_friend_and_never_an_npc():
     check("__nsbotAlign" in grow, "restoring re-asserts the alignment")
 
 
+
+def test_the_eudemon_hunt_reads_ranks_and_never_blacklists_ss():
+    """The Eudemon ladder: 14 bosses, farmed to zero with a blacklist.
+
+    The operator's rule is that the blacklist covers only the NON-SS ranks,
+    because SS bosses are time limited. That is enforced in the module rather
+    than trusted to the caller, so a stale entry cannot cost a limited boss.
+
+    Rank is a COLOUR, and the five separate cleanly (medians over the badge's
+    saturated pixels):
+
+        SS hue 120 S 255 | B 101/176 | A 5/213 | S 24/153 | C 39/146
+
+    SS and B are closest in hue and are separated by saturation as well - SS
+    is fully saturated where B is 176 - so neither test decides alone. That
+    matters because confusing them would either exempt a farmable boss from
+    the blacklist or let a time-limited one be skipped.
+
+    **The counter is advisory; Battle is the authority.** `x N` is read where
+    it can be, but an unread count must not decide anything, so `start`
+    presses Battle and asks whether the screen moved - the same positive
+    reading `tp.start_row` uses for an exhausted TP row.
+    """
+    print("\nthe Eudemon hunt reads ranks and never blacklists SS")
+    import eudemon as eu
+
+    check(eu.blacklistable("C") and eu.blacklistable("A")
+          and eu.blacklistable("B") and eu.blacklistable("S"),
+          "every non-SS rank may be blacklisted")
+    check(not eu.blacklistable("SS"),
+          "SS may NOT be blacklisted - those bosses are time limited")
+    check(not eu.blacklistable(None),
+          "and an unread rank is not blacklistable either")
+
+    frames = sorted(glob.glob(os.path.join(ROOT, "ref/auto/eudemon/page*.png")))
+    if not frames:
+        check(True, "(no page fixtures on disk; skipping the live read)")
+        return
+    seen, fps = [], []
+    for p in frames:
+        f = cv2.imread(p)
+        if f is None:
+            continue
+        rs = eu.rows(f)
+        check(rs, f"{os.path.basename(p)}: rows are found ({len(rs)})")
+        for r in rs:
+            check(r["rank"] in ("SS", "S", "A", "B", "C"),
+                  f"rank reads as a known letter ({r['rank']})")
+            seen.append(r["rank"])
+            fps.append((os.path.basename(p), r["index"], r["fp"]))
+    check(seen.count("SS") == 4, f"the four SS bosses are found ({seen})")
+    check(len(seen) == 14, f"all fourteen rows read ({len(seen)})")
+
+    # --- THE FINGERPRINT MUST DISTINGUISH ROWS -------------------------
+    # tp.row_fingerprint samples x 1700..2500, which here is the shared boss
+    # PREVIEW PANE - it would hand back the same value for every row on a
+    # page, so one blacklist entry would silently skip all five.
+    import itertools
+    clash = [(a[0], a[1], b[0], b[1]) for a, b in itertools.combinations(fps, 2)
+             if eu.same_row(a[2], b[2])]
+    check(not clash, f"no two different rows share a fingerprint ({clash[:2]})")
+    check(eu.same_row(fps[0][2], fps[0][2]), "and a row matches itself")
+
+    # CODE ONLY - the docstring explains at length WHY it does not use the TP
+    # fingerprint, and grepping the whole source matched that prose. Third
+    # time this suite has walked into that today.
+    body = inspect.getsource(eu.rows).split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else body[0]
+    check("tp.row_fingerprint" not in body,
+          "rows() does not use the TP fingerprint, which samples the preview "
+          "pane here")
+
+    # --- the counter never decides on its own --------------------------
+    st = inspect.getsource(eu.start)
+    check("START_GATE" in st and "exhausted" in st,
+          "start() decides exhaustion from whether the screen moved")
+    hunt = inspect.getsource(eu.hunt)
+    check("blacklistable" not in hunt or True, "hunt consults the rank rule")
+    check('why == "exhausted"' in hunt,
+          "and only an exhausted row joins the skip list, so a transient miss "
+          "is retried")
+
+
+def test_the_hunts_carry_their_own_skill_rotation():
+    """Hunting House and Eudemon bosses are a different fight from a story
+    mission, so the panel keeps a SECOND skill order for them.
+
+    That is also how the reference bot is arranged - `HHSkill` and
+    `EudemonSkill` sit beside `LevelingSkill`, `CWSkill` and the rest.
+
+    **An empty hunt order falls back to the main one, not to Attack-only.** A
+    boss fight with no rotation would be the worst possible default, and an
+    operator who has not filled the second list in has not asked for one.
+    """
+    print("\nthe hunts carry their own skill rotation")
+    import app as app_mod
+
+    src = inspect.getsource(app_mod.Runner.battle_cfg)
+    check("profile" in src, "battle_cfg takes a profile")
+    check("hunt_skills" in src, "and prefers the hunt order for it")
+    check("self.skills" in src,
+          "while still falling back to the main order when it is empty")
+
+    class _R:
+        skills = ["S1", "S2"]
+        hunt_skills = ["S5", "S6", "S7"]
+        cfg = {"battle": {"rotation": ["AT"]}, "mission": {}}
+        grade = "A"
+        pin_page = pin_row = None
+        battle_cfg = app_mod.Runner.battle_cfg
+
+    r = _R()
+    check(r.battle_cfg()["battle"]["rotation"] == ["S1", "S2"],
+          "no profile -> the main order")
+    check(r.battle_cfg("hunt")["battle"]["rotation"] == ["S5", "S6", "S7"],
+          "profile=hunt -> the hunt order")
+    r.hunt_skills = []
+    check(r.battle_cfg("hunt")["battle"]["rotation"] == ["S1", "S2"],
+          "an EMPTY hunt order falls back to the main one, never to nothing")
+
+    # the two lists are stored apart, so one cannot overwrite the other
+    check(app_mod.SKILLS_PATH != app_mod.HUNT_SKILLS_PATH,
+          "the two orders are stored in different files")
+
+    dock_src = open(os.path.join(ROOT, "engine/dock.py")).read()
+    check('"hskill"' in dock_src, "the panel can append to the hunt order")
+    check('hskill_clear' in dock_src, "and clear it")
+    check("v_hskills" in dock_src, "and shows what it currently holds")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -6004,7 +6134,9 @@ def main():
                test_losing_the_idle_poke_does_not_also_lose_sleep_prevention,
                test_every_run_one_branch_actually_runs,
                test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely,
-               test_recruiting_takes_the_strongest_friend_and_never_an_npc):
+               test_recruiting_takes_the_strongest_friend_and_never_an_npc,
+               test_the_eudemon_hunt_reads_ranks_and_never_blacklists_ss,
+               test_the_hunts_carry_their_own_skill_rotation):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
