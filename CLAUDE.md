@@ -2267,6 +2267,47 @@ window-size path does and for the same reason. It degrades safely: on a
 platform whose monotonic clock includes suspend time the difference stays ~0
 and the detector simply never fires.
 
+### LOSING THE IDLE POKE MUST NOT ALSO LOSE SLEEP PREVENTION
+
+`presence.KeepAwake` had ONE mechanism and it needs a permission. The fn-key
+poke goes through `osascript`, and on a machine without the Accessibility
+grant macOS refuses it — *"not allowed to send keystrokes (1002)"* — after
+which the handler disabled keep-awake **entirely**. That threw away the half
+that costs missions. Measured the morning after, from the bot's own log:
+
+    the machine was asleep for 1172s - the game session will not have
+    survived that; relogging          ... and again at 205s, 245s, 244s
+
+Every one of those is a lost in-flight mission, and it looked like a sleep
+problem the bot could not do anything about. It was a permission problem
+taking an unrelated guard down with it.
+
+Two concerns, and only one of them needs permission:
+
+    caffeinate -i -w <pid>   prevents idle SYSTEM SLEEP. No permission of any
+                             kind. This is what stops the suspend-and-relog
+                             loop above.
+    osascript key code 63    resets the HID idle timer, which is the only
+                             thing that keeps the screen unlocked and Teams
+                             off Away. Needs Accessibility.
+
+**`caffeinate` cannot substitute for the poke, and that is measured** — this
+file already records `caffeinate -u -t 1` moving the idle counter
+39.3s -> 40.4s, i.e. not resetting it at all. It is a power assertion, not an
+input event. So a machine with no Accessibility grant now farms through the
+night and still goes Away in Teams, which is the honest trade; the warning
+names which half is gone and which is still standing, instead of the old
+"keep-awake disabled" that implied both.
+
+**`-w <pid>` is what makes spawning a child acceptable at all.** This module
+explicitly rejects "shelling out to an external daemon" because `kill -9` on
+the bot — the operator's habit when a run wedges — skips every `finally` and
+would leave the machine awake indefinitely with nothing left to turn it off.
+`caffeinate -w` releases its assertion when the watched process exits, so the
+guarantee is structural rather than a promise about cleanup paths. Verified
+both directions: it holds while its target lives, and exits on its own when
+the target dies.
+
 **LOCK SCREEN IS A DIFFERENT ANIMAL — processes keep running.** macOS does not
 suspend on lock; the risk is Chrome, not the OS. Ruffle's render loop is
 `requestAnimationFrame`-driven, and Chrome suppresses rAF entirely for an

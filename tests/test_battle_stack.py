@@ -13,6 +13,7 @@ import inspect
 import logging
 import os
 import re
+import platform
 import sys
 import textwrap
 import time
@@ -5580,6 +5581,93 @@ def test_a_stage_dialog_is_a_solid_button_of_one_fixed_size():
                   f"{os.path.basename(p)}: never a dialog - Delete is there")
 
 
+
+def test_losing_the_idle_poke_does_not_also_lose_sleep_prevention():
+    """Keep-awake had ONE mechanism, and it needs a permission.
+
+    `presence.KeepAwake` poked the HID idle timer with an `osascript` fn-key
+    press, and on a machine without the Accessibility grant macOS refuses it:
+    "not allowed to send keystrokes (1002)". The handler then disabled
+    keep-awake ENTIRELY - throwing away the half that costs missions. Measured
+    the morning after, on this machine:
+
+        the machine was asleep for 1172s - the game session will not have
+        survived that; relogging          ... and again at 205s, 245s, 244s
+
+    Each of those is a lost in-flight mission. The two concerns are separate
+    and only one needs permission:
+
+        caffeinate -i -w <pid>   prevents idle SYSTEM sleep. No permission.
+        osascript key code 63    resets the HID idle timer, which is what
+                                 keeps the screen unlocked and Teams off
+                                 Away. Needs Accessibility.
+
+    And `caffeinate` genuinely cannot substitute for the poke - measured,
+    `caffeinate -u -t 1` moved the idle counter 39.3s -> 40.4s, so it did not
+    reset it at all. It is a power assertion, not an input event.
+
+    `-w <pid>` is what makes spawning a child acceptable here. The module
+    rejects "shelling out to an external daemon" because `kill -9` skips every
+    `finally` and would hold the machine awake for ever; `caffeinate -w`
+    releases when the watched process exits, so the guarantee is structural.
+    """
+    print("\nlosing the idle poke does not also lose sleep prevention")
+    import presence as pres
+
+    argv = pres._sleep_guard_argv(4321)
+    check(argv[0] == "caffeinate", f"the guard is caffeinate ({argv})")
+    check("-i" in argv, "asserting against IDLE SLEEP specifically")
+    check("-w" in argv and argv[argv.index("-w") + 1] == "4321",
+          "and tied to our pid with -w, so kill -9 cannot orphan it")
+    check("-t" not in argv,
+          "no -t timeout: the assertion must last as long as the bot does")
+
+    src = inspect.getsource(pres.KeepAwake)
+    start = inspect.getsource(pres.KeepAwake.start)
+    check("_sleep_guard_argv" in start, "start() raises the sleep guard")
+    check(start.index("_sleep_guard_argv") < start.index("threading.Thread"),
+          "before the poke thread - it is the half that needs no permission, "
+          "so it must not be skipped when the poke fails")
+
+    poke = inspect.getsource(pres.KeepAwake._poke)
+    check("caffeinate" in poke,
+          "the refusal message says the machine still will not sleep")
+    check("Accessibility" in poke,
+          "and names the grant that would restore the screen-awake half")
+    check("self._stop.set()" in poke,
+          "the poke still disables ITSELF rather than warning every interval")
+    check("self._caffeinate = None" not in poke,
+          "but it must NOT tear down the sleep guard")
+
+    stop = inspect.getsource(pres.KeepAwake.stop)
+    check("terminate" in stop, "stop() releases the guard promptly")
+
+    # --- it really runs, and really dies with its target ----------------
+    if platform.system() == "Darwin":
+        import subprocess as sp
+        target = sp.Popen([sys.executable, "-c", "import time; time.sleep(3)"])
+        guard = sp.Popen(pres._sleep_guard_argv(target.pid),
+                         stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+        try:
+            time.sleep(0.8)
+            check(guard.poll() is None,
+                  "the guard holds while its target lives")
+            target.wait(timeout=10)
+            for _ in range(24):
+                if guard.poll() is not None:
+                    break
+                time.sleep(0.25)
+            check(guard.poll() is not None,
+                  "and releases itself when the target exits, with no cleanup "
+                  "path involved")
+        finally:
+            for p_ in (target, guard):
+                if p_.poll() is None:
+                    p_.kill()
+    else:
+        check(True, "(the guard is macOS-only; not exercised here)")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -5648,7 +5736,8 @@ def main():
                test_lights_out_is_solved_over_gf2_and_the_rule_is_learned,
                test_an_ss_family_is_dispatched_by_looking_not_by_name,
                test_liveness_is_probed_without_killing_anything_on_windows,
-               test_a_stage_dialog_is_a_solid_button_of_one_fixed_size):
+               test_a_stage_dialog_is_a_solid_button_of_one_fixed_size,
+               test_losing_the_idle_poke_does_not_also_lose_sleep_prevention):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
