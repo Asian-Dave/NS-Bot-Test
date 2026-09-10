@@ -3697,6 +3697,36 @@ full frame answered it in one look.
   capture twice, so `tp.py` now SAVES IT when the check is not located.
 * **the kekkai digit exemplars**, above.
 
+### AN ENEMY ON A SLIVER IS INVISIBLE TO THE BAR FINDER
+
+Measured on a live Eudemon SS boss (`ref/auto/battle/party_boss_sliver.png`):
+`Izo` was plainly on screen at roughly 4% HP and `find_enemy_bars` returned
+NOTHING. Its bright-red run is **13 px** against the function's
+`min_run = 40`, so any enemy below about 13% HP drops out of the scan
+entirely.
+
+    battle: no enemy HP bar located this turn      x4 in a row, near the kill
+
+It fails SAFELY - the caller already refuses to feed the watchdog a fake
+reading, so a missing measurement can never trigger an abort - but the
+consequence is that `DamageWatchdog` goes blind exactly when a fight is nearly
+won, and a fight where every enemy is on a sliver shows no progress at all
+while being one hit from over. It also means flat HP readings near a kill are
+NOT evidence of a stall; they are the bar shrinking below the detection floor.
+
+**Do not simply lower `min_run`.** 40 is what keeps noise out of a scan that
+this file already records returning the player HUD as enemy bars. A fix wants
+the bar's TRACK (the dark empty channel is full length at any HP) to locate
+the bar, and the red run only to measure its fill - a different shape of
+detector, not a threshold nudge.
+
+Also worth recording from that frame, because it retires a worry rather than
+adding one: **teammates do not contaminate the scan.** The runner calls
+`find_enemy_bars` with `x0 = 55%` of the frame width, and the party stands on
+the LEFT with the player while enemies are on the right - three party-full
+frames each gave exactly one bar. The `enemies=4` reading seen once in the
+same fight was a transient, not the party.
+
 ## AN ACCIDENTAL SCROLL MUST NOT MOVE THE GAME — lock it in the PAGE
 
 The operator: "sometimes I accidentally scroll down which causes some kind of
