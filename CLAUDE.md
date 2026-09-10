@@ -4139,6 +4139,33 @@ because SS bosses are time limited. `blacklistable()` enforces it in the
 module rather than trusting the caller, so a stale blacklist entry cannot cost
 a limited boss.
 
+### A RANK COLOUR IS NOT AN ANCHOR — locate the LIST first
+
+The first version of `eudemon.rows` assumed the five row positions and read a
+rank badge at each. It matched **60 of 113 non-garden reference frames** -
+combat, the lobby, the village - so the hunt never called `to_garden`, paged an
+imaginary list and reported "every boss is blacklisted or finished" from the
+village.
+
+Saturated art is everywhere; a hue window over a small box says nothing about
+which SCREEN this is. The white NAME PLATES are structural and say it exactly:
+measured 343x67 at x=1033, evenly pitched (153, 158, 158, 157). `plates()`
+finds those and `rows()` reads ranks only where a plate actually is - 0 of 113
+false positives, all 14 rows still read.
+
+Two details that had to be measured rather than guessed:
+
+* **the plate WIDTH varies with the boss name** (325..425, because a long name
+  merges the plate with the art beside it), so height and x carry the test and
+  the width window is generous;
+* **a gap may be a MULTIPLE of the pitch** when one plate fails to segment, so
+  multiples are accepted rather than widening the pitch window - which would
+  let arbitrary pale bars through.
+
+This is the same lesson as `looks_like_mission_scene` and the SS `stage_dialog`
+firing on the lobby: a detector needs a POSITIVE reading of the screen it
+belongs to, not merely the absence of a reason to doubt.
+
 ### THE COUNTER IS ADVISORY — Battle is the authority
 
 `x N` reads `x1` for SS and `x3` for the rest today, and whether those are

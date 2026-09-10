@@ -217,8 +217,69 @@ def same_row(a, b, tol=FP_TOL):
     return float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean()) <= tol
 
 
+# The plate WIDTH varies with the boss name - measured 325..425, because a
+# long name merges the plate with the art beside it. Height and x are the
+# stable part, so the width window is generous and the pitch does the work.
+PLATE_W = (300, 470)
+PLATE_H = (50, 90)
+PLATE_MIN = 3          # a page always shows at least four rows
+PLATE_PITCH = (140, 175)
+PLATE_PITCH_MAX_SKIP = 3   # a row may fail to segment; allow a multiple
+
+
+def plates(frame):
+    """The white NAME PLATES, top to bottom - this is the garden's anchor.
+
+    **A RANK COLOUR IS NOT AN ANCHOR.** The first version assumed the five row
+    positions and read a rank at each, and matched 60 of 113 non-garden
+    reference frames - combat, the lobby, the village. Saturated art is
+    everywhere; a hue window over a small box proves nothing about what screen
+    this is. So the LIST is found first, structurally, and ranks are only read
+    at rows that a plate was actually found on.
+
+    Measured: 343x67 at x=1033, evenly pitched (153, 158, 158, 157).
+    """
+    fh, fw = frame.shape[:2]
+    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    m = ((g > 225).astype(np.uint8) * 255)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 25), np.uint8))
+    n, _lab, st, _ce = cv2.connectedComponentsWithStats(m)
+    found = []
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        if not (PLATE_W[0] <= w <= PLATE_W[1]):
+            continue
+        if not (PLATE_H[0] <= h <= PLATE_H[1]):
+            continue
+        if abs(int(x) - PLATE_X[0]) > 60:
+            continue
+        found.append(int(y))
+    found.sort()
+    if len(found) < PLATE_MIN:
+        return []
+    # EVENLY PITCHED, or it is not a list. Anything else that happens to draw
+    # three pale bars is rejected here rather than by a threshold nudge.
+    # EVENLY PITCHED, or it is not a list. A gap may be a MULTIPLE of the
+    # pitch when one plate fails to segment, so multiples are accepted rather
+    # than loosening the window - which would let arbitrary pale bars through.
+    def _spaced(gp):
+        for k in range(1, PLATE_PITCH_MAX_SKIP + 1):
+            if PLATE_PITCH[0] * k <= gp <= PLATE_PITCH[1] * k:
+                return True
+        return False
+
+    gaps = [b - a for a, b in zip(found, found[1:])]
+    if gaps and not all(_spaced(gp) for gp in gaps):
+        return []
+    return found
+
+
+def in_garden(frame):
+    return bool(plates(frame))
+
+
 def rows(frame):
-    """Every visible row: index, y, rank, count, and a reflow-safe fingerprint.
+    """Every visible row: y, rank, count, and a reflow-safe fingerprint.
 
     The fingerprint is keyed on a row's PIXELS, so a blacklist survives the
     list being re-paged or re-ordered where an index would not.
@@ -231,11 +292,8 @@ def rows(frame):
     plate instead, which is what actually differs per row.
     """
     out = []
-    for i, y in enumerate(ROW_Y):
-        r = rank_at(frame, y)
-        if r is None:
-            continue
-        out.append({"index": i, "y": y, "rank": r,
+    for i, y in enumerate(plates(frame)):
+        out.append({"index": i, "y": y, "rank": rank_at(frame, y),
                     "count": count_at(frame, y),
                     "fp": row_fingerprint(frame, y)})
     return out
