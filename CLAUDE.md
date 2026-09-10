@@ -4117,6 +4117,44 @@ Also: a stage ending is not instant. Both drivers tolerate a bounded run of
 frames with neither board nor dialog (`BLANK_TOLERANCE`), and only a sustained
 blank is a real loss.
 
+### A STAGE DIALOG IS A SOLID BUTTON OF ONE FIXED SIZE
+
+`stage_dialog` fired on the LOBBY. Found by peeking at a healthy village on a
+fresh launch: `stage_dialog -> ('fail', (1585, 1062))`. Both SS puzzle drivers
+check the dialog BEFORE anything else, so a false "fail" makes the bot click
+that spot and abandon a mission that is still running.
+
+Three gates, measured, and the first two do not suffice alone:
+
+    village sign      337x121  aspect 2.79  fill 0.19   area  7,631
+    character select  323x156  aspect 2.07  fill 0.65   area 32,686
+    TP mission list   445x105  aspect 4.24  fill 0.88   area 41,212
+    Stage Clear       351x108  aspect 3.25  fill 0.83   area 31,542
+    Mission Fail      352x108  aspect 3.26  fill 0.79   area 29,891
+
+FILL removes the village sign - an OK button is a filled rounded rect while
+village art is outlines and lettering. That is the same solid-not-outline test
+`find_confirm_point` needed, for the same reason.
+
+WIDTH and HEIGHT remove the other two, and they are legitimate here because
+the viewport is pinned, so the game draws this button at ONE size - the way
+the command discs are one size. Aspect cannot separate 2.07 / 3.25 / 4.24
+without being fitted to those three samples.
+
+**The character-select case is the one that matters.** `Delete` sits beside
+`Play`, which is the reason this project only ever clicks Play BY TEMPLATE; a
+red blob passing as an OK button there is exactly the click-by-offset that
+rule exists to forbid. The suite now asserts that no character-select frame is
+ever read as a dialog, and that a HOLLOW button of the right size is refused.
+
+Result: 0 of 102 reference frames read as a dialog, while both recorded button
+sizes are still accepted at their measured centres.
+
+**And note how it was found** - not by a failing test, but by pointing the
+detector at a screen it should say nothing about. Scoring a detector on
+frames it is supposed to REJECT is cheap and this project keeps finding real
+faults that way.
+
 ### CORRECTION — COMPLETED SS MISSIONS DROP OUT OF THE DAY'S LIST
 
 TP's do not: this file records that they stay listed and go GREY, and the whole

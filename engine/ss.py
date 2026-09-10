@@ -81,8 +81,44 @@ SS_ROW_XY = (2118, 1037)
 DIALOG_BAND = (1400, 850, 2100, 1150)      # x0, y0, x1, y1
 DIALOG_GREEN = ((35, 120, 90), (85, 255, 255))
 DIALOG_RED = ((0, 140, 90), (10, 255, 255))
-DIALOG_MIN_AREA = 2500
+DIALOG_MIN_AREA = 15000
 DIALOG_ASPECT = (1.5, 5.0)                 # a wide button, not a disc
+# AND IT MUST BE SOLID. The village has a red sign in this very band -
+# measured area 7631, 337x121, aspect 2.79 - which passed the old
+# area>=2500 gate and made `stage_dialog` report a MISSION FAIL on the
+# LOBBY. Both drivers check the dialog before anything else, so that would
+# have clicked the village and abandoned a mission that was still running.
+#
+# Bbox alone cannot separate them (337x121 against the real 352x108). FILL
+# can, and by a wide margin, because an OK button is a filled rounded rect
+# while village art is outlines and lettering:
+#
+#     Stage Clear  31542 / (351*108) = 0.83
+#     Mission Fail 29891 / (352*108) = 0.79
+#     village sign  7631 / (337*121) = 0.19
+#
+# Same solid-not-outline test that `find_confirm_point` needed for the same
+# reason - see the note there about a dark RING scoring as a disc.
+DIALOG_MIN_FILL = 0.55
+# AND IT IS ONE FIXED-SIZE ASSET. Fill alone still let two screens through,
+# and one of them is the dangerous one:
+#
+#     character select  323x156  aspect 2.07  fill 0.65   <- Delete is here
+#     TP mission list   445x105  aspect 4.24  fill 0.88
+#     Stage Clear       351x108  aspect 3.25  fill 0.83
+#     Mission Fail      352x108  aspect 3.26  fill 0.79
+#
+# A blind click on character select is the one this project has a hard rule
+# about - `Delete` sits beside `Play`, which is why Play is only ever clicked
+# BY TEMPLATE. A red blob passing as an OK button there is exactly the offset
+# click that rule forbids, so the gate is closed on measurement rather than on
+# aspect, which cannot separate 2.07/3.25/4.24 without being fitted to them.
+#
+# Width and height are independent and both discriminate: the viewport is
+# pinned, so the game draws this button at one size, the way the command discs
+# are one size.
+DIALOG_W = (300, 400)                      # measured 351, 352
+DIALOG_H = (85, 130)                       # measured 108, 108
 
 # --- THE HINTS PANEL, AND ITS BUTTON IS DRAWN BELOW THE VIEWPORT ---------
 #
@@ -168,9 +204,15 @@ def _button(frame, lo, hi):
     for i in range(1, n):
         a = st[i, cv2.CC_STAT_AREA]
         bw, bh = st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
-        if a < DIALOG_MIN_AREA or bh == 0:
+        if a < DIALOG_MIN_AREA or bh == 0 or bw == 0:
             continue
         if not (DIALOG_ASPECT[0] <= bw / bh <= DIALOG_ASPECT[1]):
+            continue
+        if not (DIALOG_W[0] <= bw <= DIALOG_W[1]):
+            continue
+        if not (DIALOG_H[0] <= bh <= DIALOG_H[1]):
+            continue
+        if a / float(bw * bh) < DIALOG_MIN_FILL:
             continue
         if best is None or a > best[0]:
             best = (a, int(ce[i][0]) + x0, int(ce[i][1]) + y0)

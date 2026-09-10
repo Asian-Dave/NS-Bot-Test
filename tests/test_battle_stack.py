@@ -5498,6 +5498,88 @@ def test_liveness_is_probed_without_killing_anything_on_windows():
           "and reads as dead once it has been reaped")
 
 
+
+def test_a_stage_dialog_is_a_solid_button_of_one_fixed_size():
+    """`stage_dialog` fired on the LOBBY, and worse, on CHARACTER SELECT.
+
+    Both SS puzzle drivers check the dialog before anything else, so a false
+    "fail" makes the bot click that spot and abandon a mission that is still
+    running. Found by peeking at a healthy village on a fresh launch:
+    `stage_dialog -> ('fail', (1585, 1062))`.
+
+    Three gates, each measured, and the first two are not enough on their own:
+
+        village sign      337x121  aspect 2.79  fill 0.19   area 7,631
+        character select  323x156  aspect 2.07  fill 0.65   area 32,686
+        TP mission list   445x105  aspect 4.24  fill 0.88   area 41,212
+        Stage Clear       351x108  aspect 3.25  fill 0.83   area 31,542
+        Mission Fail      352x108  aspect 3.26  fill 0.79   area 29,891
+
+    FILL removes the village sign - an OK button is a filled rounded rect and
+    village art is outlines and lettering, the same solid-not-outline test
+    `find_confirm_point` needed. WIDTH and HEIGHT remove the other two, and
+    they are legitimate here because the viewport is pinned and the game draws
+    this button at one size, the way the command discs are one size. Aspect
+    cannot separate 2.07 / 3.25 / 4.24 without being fitted to those samples.
+
+    **The character-select case is the one that matters most.** `Delete` sits
+    beside `Play`, which is why this project only ever clicks Play BY
+    TEMPLATE; a red blob passing as an OK button there is precisely the
+    click-by-offset that rule forbids.
+    """
+    print("\na stage dialog is a solid button of one fixed size")
+    import ss as ss_mod
+
+    # --- the real thing is still recognised, at both measured sizes -----
+    for label, bgr, want in (("Stage Clear", (60, 170, 60), "clear"),
+                             ("Mission Fail", (40, 40, 210), "fail")):
+        f = np.zeros((1440, 3440, 3), np.uint8)
+        cv2.rectangle(f, (1712 - 176, 991 - 54), (1712 + 176, 991 + 54),
+                      bgr, -1)
+        got = ss_mod.stage_dialog(f)
+        check(got is not None and got[0] == want,
+              f"{label} at its measured 352x108 reads {got}")
+        if got:
+            check(abs(got[1][0] - 1712) <= 4 and abs(got[1][1] - 991) <= 4,
+                  f"{label} centre is the button, not an edge ({got[1]})")
+
+    # --- a HOLLOW button of the same size is not a button ---------------
+    f = np.zeros((1440, 3440, 3), np.uint8)
+    cv2.rectangle(f, (1712 - 176, 991 - 54), (1712 + 176, 991 + 54),
+                  (60, 170, 60), 6)
+    check(ss_mod.stage_dialog(f) is None,
+          "an outline of the same size is refused (fill, not bbox)")
+
+    # --- and the two wrong sizes that got through before ----------------
+    for label, w, h in (("character select", 323, 156), ("TP list", 445, 105)):
+        f = np.zeros((1440, 3440, 3), np.uint8)
+        cv2.rectangle(f, (1712 - w // 2, 991 - h // 2),
+                      (1712 + w // 2, 991 + h // 2), (40, 40, 210), -1)
+        check(ss_mod.stage_dialog(f) is None,
+              f"a solid {w}x{h} blob ({label}'s size) is refused")
+
+    # --- nothing in the whole reference set is a dialog -----------------
+    frames = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer", "ss"):
+        frames += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    fires = [(os.path.basename(p), ss_mod.stage_dialog(im))
+             for p in sorted(frames)
+             if (im := cv2.imread(p)) is not None
+             and ss_mod.stage_dialog(im) is not None]
+    check(not fires,
+          f"none of {len(frames)} reference frames is read as a dialog "
+          f"({fires[:3]})")
+    # the safety rule this protects, stated where it can fail loudly
+    charsel = [p for p in frames if "charsel" in os.path.basename(p)]
+    check(charsel, "character-select frames are in the set at all")
+    for p in charsel:
+        im = cv2.imread(p)
+        if im is not None:
+            check(ss_mod.stage_dialog(im) is None,
+                  f"{os.path.basename(p)}: never a dialog - Delete is there")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -5565,7 +5647,8 @@ def main():
                test_balance_control_is_read_and_solved_as_a_subset_sum,
                test_lights_out_is_solved_over_gf2_and_the_rule_is_learned,
                test_an_ss_family_is_dispatched_by_looking_not_by_name,
-               test_liveness_is_probed_without_killing_anything_on_windows):
+               test_liveness_is_probed_without_killing_anything_on_windows,
+               test_a_stage_dialog_is_a_solid_button_of_one_fixed_size):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
