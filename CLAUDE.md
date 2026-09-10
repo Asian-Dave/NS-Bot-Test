@@ -4121,6 +4121,53 @@ installs a fresh rAF chain per call without cancelling the previous one and
 they all increment the same counter: three calls read 119.6 / 239.3 / 359.8.
 The A/B harness only escapes it because each backend is preceded by a reload.
 
+## THE LADDER WOULD HAVE SPENT TOKENS — a choice is not an acknowledgement
+
+The most serious defect found so far, and it was live.
+
+Losing a Eudemon boss raises **"Do you want to revive by using 50 token?
+(Revert 30% HP)"** with a GREEN CHECK and a RED X. The `confirm_dialog` rung
+acknowledges a lone green check generically - and it matched that check at
+**0.979**, with the check itself as its click target. The next ladder pass
+would have spent 50 of the premium currency this file's safety rules say must
+never be spent. Nothing was spent only because a relog happened to clear the
+dialog first.
+
+**The distinction the ladder was missing is structural, and needs no new
+template:**
+
+    one green check              an ACKNOWLEDGEMENT  -> pressing it is safe
+    a green check AND a red X    a CHOICE            -> pressing green ACCEPTS
+
+Measured on the live prompt (`ref/auto/battle/revive_prompt.png`):
+
+    green check  centre (1622, 847)  80x81
+    red X        centre (1897, 850)  82x83
+
+Same size, same row, 275 px apart. Everything the ladder already handles - the
+seal-broken dialog, Level Up, a Victory panel, a mission detail panel -
+carries a check ALONE.
+
+`perceive.choice_dialog` finds the pair and `Resumer.advance` presses the RED
+one. Three decisions worth keeping:
+
+* **The veto is consulted ONLY where a green check has already matched.** As a
+  free-standing detector it fired on 4 of 125 reference frames; scoped to the
+  one rung that clicks a check, that exposure disappears. A safety check that
+  fires on unrelated screens would licence clicking red things at random.
+* **The order is never assumed.** The function does not require green to be on
+  the left, because a variant with them swapped would otherwise go undetected
+  and fall straight through to the rung that clicks green.
+* **Declining is the safe direction.** A wrongly declined dialog costs one
+  retry; a wrongly accepted one costs tokens, and this project cannot buy them
+  back.
+
+**The general rule, and it generalises past this one prompt:** before pressing
+a control because it is the affirmative one, check whether the screen is
+OFFERING A CHOICE. The ladder's whole design is "the only control on this
+screen is the check, so pressing it is safe" - and that premise silently
+stopped being true the first time the game asked a question.
+
 ## EUDEMON GARDEN — the boss ladder, and a second rotation for the hunts
 
 Village -> `Hunting House` label -> submenu -> `Eudemon Garden`. A paged list

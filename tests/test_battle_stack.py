@@ -2933,6 +2933,12 @@ def test_sleep_is_told_apart_from_a_slow_iteration():
 
 
 
+def perceive_load_templates():
+    import json as _json
+    from perceive import load_templates as _lt
+    return _lt(_json.load(open(os.path.join(ROOT, "Configs/mission.json"))), _Log())
+
+
 class _Log:
     """A log that remembers, so a test can assert on WHY something stopped.
 
@@ -6221,6 +6227,92 @@ def test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby():
           "and the command refuses it server-side too")
 
 
+
+def test_a_two_button_dialog_is_declined_never_accepted():
+    """The resume ladder would have SPENT TOKENS.
+
+    Losing a Eudemon boss raises "Do you want to revive by using 50 token?
+    (Revert 30% HP)" with a green check and a red X. The `confirm_dialog` rung
+    acknowledges a lone green check generically - and it matched that check at
+    **0.979**, with the check itself as its click target. The next ladder pass
+    would have spent 50 of the premium currency this project must never spend.
+
+    The missing distinction is structural and needs no new template:
+
+        one green check              an ACKNOWLEDGEMENT -> safe to press
+        a green check AND a red X    a CHOICE           -> green ACCEPTS
+
+    Measured on the live prompt: green (1622, 847) 80x81, red (1897, 850)
+    82x83 - same size, same row, 275 px apart. Everything the ladder already
+    handles (seal-broken, Level Up, a Victory panel) carries a check ALONE.
+
+    The veto is consulted ONLY where a green check has already matched, which
+    is what keeps it off unrelated screens, and it presses the RED control -
+    declining is the safe direction.
+    """
+    print("\na two-button dialog is declined, never accepted")
+    import perceive as pmod
+    import resume as rmod
+
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/battle/revive_prompt.png"))
+    check(f is not None, "the revive-prompt fixture is on disk")
+    if f is None:
+        return
+    ch = pmod.choice_dialog(f)
+    check(ch is not None, f"the prompt is recognised as a choice ({ch})")
+    if ch:
+        gx, gy = ch["accept"]
+        rx, ry = ch["decline"]
+        check(abs(gy - ry) <= pmod.CHOICE_SAME_ROW,
+              f"the two controls share a row ({gy} vs {ry})")
+        check(abs(gx - rx) >= 180, f"and are a dialog's width apart ({abs(gx-rx)})")
+
+    # --- the ladder DECLINES, and does not go near the green ------------
+    was = pmod.get_renderer()
+    try:
+        pmod.set_renderer("webgl")
+        tpls = perceive_load_templates()
+
+        class _Cap:
+            def frame(self, gray=False):
+                return cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if gray else f
+
+        class _Actor:
+            def __init__(self):
+                self.clicks = []
+
+            def click_pixel(self, x, y, why=""):
+                self.clicks.append((x, y, why))
+
+        r = rmod.Resumer(_Cap(), _Actor(), tpls, _Log())
+        out, info = r.advance(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY))
+        check(info.get("step") == "declined_choice",
+              f"the ladder declines rather than acknowledging ({info})")
+        check(len(r.actor.clicks) == 1,
+              f"exactly one click ({r.actor.clicks})")
+        for x, y, _why in r.actor.clicks:
+            d = abs(x - ch["accept"][0]) + abs(y - ch["accept"][1])
+            check(d > 100,
+                  f"the click is far from the token-spending green check "
+                  f"(Manhattan {d})")
+            check((x, y) == ch["decline"],
+                  f"and lands on the red decline ({x},{y})")
+    finally:
+        if was:
+            pmod.set_renderer(was)
+        else:
+            pmod.clear_renderer()
+
+    # --- and the veto sits INSIDE the confirm rung ----------------------
+    src = inspect.getsource(rmod.Resumer.advance)
+    check("choice_dialog" in src, "advance consults the choice detector")
+    check('step.name == "confirm_dialog"' in src,
+          "only where a green check has already matched, which is what keeps "
+          "it off unrelated screens")
+    check(src.index("choice_dialog") < src.index("el = (time.time() - t0)"),
+          "and BEFORE the rung is allowed to act on the match")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -6297,7 +6389,8 @@ def main():
                test_the_eudemon_hunt_reads_ranks_and_never_blacklists_ss,
                test_the_hunts_carry_their_own_skill_rotation,
                test_a_eudemon_win_is_a_different_panel_from_a_mission_success,
-               test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby):
+               test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby,
+               test_a_two_button_dialog_is_declined_never_accepted):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

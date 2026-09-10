@@ -577,3 +577,97 @@ def load_templates(cfg, log):
         log.info("loaded %d templates%s", len(out),
                  f" (no {_RENDERER} variants)" if _RENDERER else "")
     return out
+
+# --- A TWO-BUTTON DIALOG IS A CHOICE, NOT AN ACKNOWLEDGEMENT --------------
+#
+# **This exists because the ladder would have spent tokens.** Losing a Eudemon
+# boss raises "Do you want to revive by using 50 token? (Revert 30% HP)" with a
+# green check and a red X. The `confirm_dialog` rung acknowledges a lone green
+# check generically, and it matched that check at **0.979** with the check
+# itself as its click target - so the next ladder pass would have spent 50 of
+# the premium currency this project must never spend.
+#
+# The distinction the ladder was missing is structural and needs no new
+# template:
+#
+#     one green check          an ACKNOWLEDGEMENT  -> pressing it is safe
+#     a green check AND a red X   a CHOICE         -> pressing green ACCEPTS
+#
+# Measured on the live prompt (`ref/auto/battle/revive_prompt.png`):
+#
+#     green check  centre (1622, 847)  80x81
+#     red X        centre (1897, 850)  82x83
+#
+# Same size, same row, 275 px apart. Everything the ladder already handles -
+# the seal-broken dialog, Level Up, a Victory panel - carries a check ALONE.
+#
+# **Declining is the safe direction, and the order is never assumed.** The
+# caller is handed both points and should press `decline`; this function does
+# not require green to be on the left, because a variant with them swapped
+# would otherwise go undetected and fall through to the rung that clicks
+# green.
+CHOICE_GREEN = ((38, 80, 80), (85, 255, 255))
+CHOICE_RED_LO = ((0, 120, 100), (10, 255, 255))
+CHOICE_RED_HI = ((170, 120, 100), (180, 255, 255))
+CHOICE_SIZE = (40, 140)
+CHOICE_MIN_AREA = 800
+CHOICE_SQUARE = 30          # a disc, not a bar
+CHOICE_SAME_ROW = 18        # measured 847 vs 850, i.e. 3
+CHOICE_APART = (180, 420)   # measured 275
+# Inside the game canvas only. A first version matched art at x=223,
+# which is desktop wallpaper - the game starts at 760.
+CHOICE_BAND_X = (760, 2680)
+
+
+def _choice_discs(frame_bgr, lo, hi, extra=None):
+    import numpy as _np
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    m = cv2.inRange(hsv, _np.array(lo, _np.uint8), _np.array(hi, _np.uint8))
+    if extra is not None:
+        m = m | cv2.inRange(hsv, _np.array(extra[0], _np.uint8),
+                            _np.array(extra[1], _np.uint8))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, _np.ones((7, 7), _np.uint8))
+    n, _lab, st, ce = cv2.connectedComponentsWithStats(m)
+    out = []
+    for i in range(1, n):
+        w, h = int(st[i, cv2.CC_STAT_WIDTH]), int(st[i, cv2.CC_STAT_HEIGHT])
+        if int(st[i, cv2.CC_STAT_AREA]) < CHOICE_MIN_AREA:
+            continue
+        if not (CHOICE_SIZE[0] <= w <= CHOICE_SIZE[1]):
+            continue
+        if not (CHOICE_SIZE[0] <= h <= CHOICE_SIZE[1]):
+            continue
+        if abs(w - h) > CHOICE_SQUARE:
+            continue
+        cx = int(ce[i][0])
+        if not (CHOICE_BAND_X[0] <= cx <= CHOICE_BAND_X[1]):
+            continue
+        out.append((cx, int(ce[i][1]), w, h))
+    return out
+
+
+def choice_dialog(frame_bgr):
+    """{"accept": (x,y), "decline": (x,y)} for a two-button dialog, or None.
+
+    ALWAYS press `decline`. See the note above: the one prompt this was built
+    for spends 50 tokens if accepted.
+    """
+    greens = _choice_discs(frame_bgr, *CHOICE_GREEN)
+    reds = _choice_discs(frame_bgr, *CHOICE_RED_LO, extra=CHOICE_RED_HI)
+    best = None
+    for gx, gy, gw, gh in greens:
+        for rx, ry, rw, rh in reds:
+            if abs(gy - ry) > CHOICE_SAME_ROW:
+                continue
+            dx = abs(gx - rx)
+            if not (CHOICE_APART[0] <= dx <= CHOICE_APART[1]):
+                continue
+            # the two controls of one dialog are drawn the same size
+            if abs(gw - rw) > 25 or abs(gh - rh) > 25:
+                continue
+            if best is None or dx < best[0]:
+                best = (dx, (gx, gy), (rx, ry))
+    if best is None:
+        return None
+    return {"accept": best[1], "decline": best[2]}
+
