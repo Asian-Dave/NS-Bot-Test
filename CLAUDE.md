@@ -3964,6 +3964,57 @@ battle-between-turns, seal-broken dialog, Level Up, and now a result panel
 under a different renderer. **A byte-identical detector coordinate across
 passes is always a static object, never a character.**
 
+### THE WHOLE RESULT-PANEL CHAIN VERIFIED ON webgl
+
+Reported from Windows: *"the victory screen was stuck there as it couldn't
+see the check button."* Not reproducible on this machine with current code. A
+full Grade-A mission on webgl, end to end:
+
+    battle 1 -> victory   result_panel conf=1.000
+                green check found at scale 1.2  -> dismissed (0.970)
+    battle 2 -> victory   result_panel conf=1.000  -> dismissed (0.970)
+    battle 3 -> victory   ended in a cutscene
+                mission_success recognised, check at scale 1.8 -> (0.970)
+    SUCCESS after 3 battles, closed out to the lobby, banked
+
+Both check sizes the panels use — 1.2 for a mid-mission Victory and 1.8 for
+Mission Success — are found at 0.970 on webgl with the DEFAULT crop. That is
+consistent with what this file already measured: only TEXT loses its stroke
+between backends, and the check is art, which is pixel-identical.
+
+**So the Windows symptom is most likely the missing commit, not the check.**
+That machine was tested while `75053db` was unpushed, and without
+`tpl/webgl/` the `result_panel` variant does not exist — measured 0.341 on a
+webgl Victory. The panel is then not recognised AT ALL, and this file already
+records what that produces: the runner treats the reward panel as scenery and
+"traverses" on top of it. From outside that is indistinguishable from being
+stuck on the victory screen unable to press the check.
+
+### AND TWO FIXTURES THAT WERE LYING ABOUT THEMSELVES
+
+Diagnosing the above, two saved frames produced a confident wrong answer:
+
+    success_panel_webgl.png            is the SPECIAL TAB
+    success_check_missing_...png       is the VILLAGE
+
+The second is an artefact of the re-capture bug this file already documents
+("save the frame you SCORED, never a fresh capture") — it was written before
+that fix. Scoring the check glyph on them gave 0.543 and 0.633, which looked
+exactly like the reported failure and is in fact a CORRECT NEGATIVE on screens
+containing no check.
+
+This is the same lesson as `tp_training_row` measuring 0.282 on the Mission
+Room: **scoring a template on a screen that does not contain it proves
+nothing.** Check what a fixture actually shows before quoting a number off it.
+Both are renamed for what they are.
+
+A second self-inflicted error in the same pass: `result_panel [webgl]`
+appeared to false-positive on 89 frames, which would have been serious. It was
+an invented 21-scale 0.95..1.95 sweep applied to a 47x183 crop. At its
+CONFIGURED scales it matches exactly one frame in the whole reference set, the
+real webgl Victory, at 1.000. **A template's scale list is part of the
+template**; overriding it and then judging the result measures the override.
+
 ### A SATURATION GATE IS PER-RENDERER TOO — and webgl has no calibration
 
 Template variants fix template anchors. They do nothing for the detectors that
