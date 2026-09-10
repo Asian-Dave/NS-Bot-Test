@@ -4169,6 +4169,52 @@ because SS bosses are time limited. `blacklistable()` enforces it in the
 module rather than trusting the caller, so a stale blacklist entry cannot cost
 a limited boss.
 
+### THE LAP: RECRUIT, FIGHT, RETURN — and recruit BEFORE choosing a target
+
+The operator's shape for a Eudemon lap: fill the party, enter the garden,
+start a boss, win or lose, be back in the village, repeat.
+
+**Recruiting belongs INSIDE the loop.** The recruit panel says so itself -
+"Teammates will leave your group after each mission or boss" - so a party
+filled once at the start is gone by the second fight.
+
+**And it must happen BEFORE the target is chosen.** A first version recruited
+after picking a target, then walked back into the garden and re-found that row
+on PAGE 1 only. A target from page 2 or 3 would have kept a stale `y` and the
+next click would have landed on a different boss. Recruiting first makes the
+ordering irrelevant.
+
+A failed recruit is NOT fatal. A party is help, not a precondition, and a boss
+can be attempted solo - so it is logged and the hunt goes on.
+
+### THE PANEL'S BLACKLIST — keys matched by fingerprint, never by hash
+
+The dock lists every boss the hunt has seen (`SS-1`, `A-2`, ...) and the
+operator clicks the ones to skip. Two decisions worth keeping:
+
+* **Identity is matched with `same_row`, not by hashing the fingerprint.** A
+  hash changes whenever any pixel does, which is the opposite of what a stable
+  identity needs; `same_row` already compares with tolerance and is what the
+  rest of the module uses. Verified: re-harvesting the same three pages adds
+  nothing to a roster of 14.
+* **An SS boss is shown but NOT clickable**, and the command refuses it
+  server-side as well. Showing a checkable box for a boss that will never be
+  skipped would mislead the operator into thinking a time-limited boss had
+  been excluded. `blacklistable` remains the single place that rule lives.
+
+The roster is persisted, because the panel has to offer the bosses BEFORE a
+hunt runs - an operator picks what to skip and then presses Run, not the other
+way round.
+
+### `x0` MEANS NO TRIES LEFT — but only when it actually READ
+
+A row reading `x0` is skipped outright. `count_at` returns None where it could
+not read, and **None is not zero** - the count digit merges with the panel
+border at the threshold that isolates it, so unreadable is the common case.
+The authority therefore stays `start()`: press Battle and ask whether the
+screen moved. That costs one wasted click per exhausted boss per sweep and
+needs no digit at all.
+
 ### A EUDEMON WIN IS A DIFFERENT PANEL FROM A MISSION SUCCESS
 
 The first live boss was WON and the bot reported `stalled`. Measured on the

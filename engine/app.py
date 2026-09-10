@@ -80,6 +80,9 @@ HUNT_SKILLS_PATH = "run/hunt_skills.json"
 # Fingerprints rather than names or indices, because the list
 # re-pages and re-orders; a fingerprint survives that.
 EUDEMON_BLACKLIST_PATH = "run/eudemon_blacklist.json"
+# What the hunt has SEEN (key + rank), and which keys to skip.
+EUDEMON_ROSTER_PATH = "run/eudemon_roster.json"
+EUDEMON_SKIP_PATH = "run/eudemon_skip.json"
 FARM_PATH = "run/farm.json"
 GRADES = ["auto", "S", "A", "B", "C"]
 
@@ -470,6 +473,7 @@ class Runner:
                 "focus": self.focus_on,
                 "skills": self.skills, "skill_slots": SKILL_SLOTS,
                 "hunt_skills": self.hunt_skills,
+                "eudemon": self.eudemon_roster(),
                 "grades": GRADES, "grade": self.grade,
                 "viewports": VIEWPORTS, "viewport": self.viewport,
                 "renderers": RENDERERS,
@@ -557,6 +561,28 @@ class Runner:
                 _write_skills(self.hunt_skills, HUNT_SKILLS_PATH)
                 self.log.info("operator: HUNT skill order -> %s",
                               " ".join(self.hunt_skills))
+        elif c == "eu_skip":
+            key = str(cmd.get("arg") or "")
+            roster = self.eudemon_roster()
+            entry = next((e for e in roster if e["key"] == key), None)
+            if entry is None:
+                return
+            # SS IS NEVER SKIPPABLE. `eudemon.blacklistable` enforces it at the
+            # point of use as well; refusing here too means the panel cannot
+            # even show a checked box for one, so the operator is never misled
+            # into thinking a time-limited boss has been excluded.
+            if entry["rank"] == "SS":
+                self.log.info("operator: %s is SS and cannot be skipped - "
+                              "those bosses are time limited", key)
+                return
+            skip = {str(k) for k in _read_json(EUDEMON_SKIP_PATH, [])}
+            if key in skip:
+                skip.discard(key)
+            else:
+                skip.add(key)
+            _write_json(EUDEMON_SKIP_PATH, sorted(skip))
+            self.log.info("operator: Eudemon skip list -> %s",
+                          ", ".join(sorted(skip)) or "(nothing)")
         elif c == "hskill_clear":
             self.hunt_skills = []
             _write_skills(self.hunt_skills, HUNT_SKILLS_PATH)
@@ -1252,6 +1278,50 @@ class Runner:
     def _save_farm(self):
         _write_json(FARM_PATH, {"grade": self.grade, "page": self.pin_page,
                                 "row": self.pin_row})
+
+    def eudemon_roster_fps(self):
+        """The stored roster with fingerprints as numpy arrays, for matching."""
+        import numpy as _np
+        out = []
+        for e in _read_json(EUDEMON_ROSTER_PATH, []) or []:
+            try:
+                fp = _np.array(e["fp"], dtype=_np.uint8)
+            except Exception:
+                continue
+            if fp.ndim == 2 and fp.size:
+                out.append({"key": str(e["key"]), "rank": e.get("rank") or "?",
+                            "fp": fp})
+        return out
+
+    def eudemon_skip_keys(self):
+        return {str(k) for k in _read_json(EUDEMON_SKIP_PATH, []) or []}
+
+    def save_eudemon_roster(self, roster):
+        """Persist what the hunt has seen, so the panel can offer it later."""
+        try:
+            _write_json(EUDEMON_ROSTER_PATH,
+                        [{"key": e["key"], "rank": e["rank"],
+                          "fp": e["fp"].tolist()} for e in roster])
+        except Exception as ex:
+            self.log.warning("could not save the Eudemon roster: %s", ex)
+
+    def eudemon_roster(self):
+        """[{key, rank, skipped}] - what the panel offers to blacklist.
+
+        The roster is harvested by the hunt as it pages the list and cached in
+        `run/eudemon_roster.json`, because the panel must be able to show the
+        bosses BEFORE a hunt is running - an operator picks what to skip and
+        then presses Run, not the other way round.
+        """
+        seen = _read_json(EUDEMON_ROSTER_PATH, [])
+        skip = {str(k) for k in _read_json(EUDEMON_SKIP_PATH, [])}
+        out = []
+        for e in seen if isinstance(seen, list) else []:
+            if not isinstance(e, dict) or "key" not in e:
+                continue
+            out.append({"key": str(e["key"]), "rank": e.get("rank") or "?",
+                        "skipped": str(e["key"]) in skip})
+        return out
 
     def eudemon_blacklist(self):
         """Row fingerprints the Eudemon hunt should skip.

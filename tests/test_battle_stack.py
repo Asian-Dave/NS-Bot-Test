@@ -6144,6 +6144,74 @@ def test_a_eudemon_win_is_a_different_panel_from_a_mission_success():
           "hunt() banks with the Eudemon close-out, not the TP one")
 
 
+
+def test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby():
+    """The operator's shape for a lap: recruit, enter, fight, win or lose, be
+    back in the village, repeat - with a panel-chosen blacklist and `x0`
+    meaning no tries left.
+
+    **Recruiting happens BEFORE the target is chosen**, and that ordering is
+    load-bearing. An earlier version recruited after picking a target and then
+    re-found that row on PAGE 1 only, so a target from page 2 or 3 kept a
+    stale y and the next click would have landed on a different boss.
+
+    Teammates leave after every boss - the recruit panel says so outright - so
+    it belongs inside the loop rather than once at the start.
+    """
+    print("\nthe Eudemon lap recruits, fights, and returns to the lobby")
+    import eudemon as eu
+
+    src = inspect.getsource(eu.hunt)
+    check(src.index("recruit_party") < src.index("target = None"),
+          "the party is filled BEFORE a target is chosen")
+    check("close(actor, cap, log)" in src,
+          "and the lap ends back in the village, win or lose")
+    check('r["count"] == 0' in src, "a boss reading x0 is skipped")
+    check("blacklistable" in src,
+          "the panel's skip list is filtered through the SS rule")
+
+    rp = inspect.getsource(eu.recruit_party)
+    check("except Exception" in rp,
+          "a failed recruit is not fatal - a party is help, not a "
+          "precondition")
+
+    # --- keys are stable and matched by fingerprint, never by hash ------
+    roster = []
+    for n in (1, 2, 3):
+        f = cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{n}.png"))
+        if f is not None:
+            eu.harvest_roster(f, roster)
+    check(len(roster) == 14, f"all fourteen bosses are keyed ({len(roster)})")
+    keys = [e["key"] for e in roster]
+    check(len(set(keys)) == len(keys), f"keys are unique ({keys})")
+    check(sum(1 for e in roster if e["rank"] == "SS") == 4,
+          "the four SS bosses are in the roster")
+
+    # re-harvesting the same pages must not duplicate anything
+    for n in (1, 2, 3):
+        f = cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{n}.png"))
+        if f is not None:
+            eu.harvest_roster(f, roster)
+    check(len(roster) == 14,
+          f"re-harvesting matches by fingerprint and adds nothing ({len(roster)})")
+
+    hv = inspect.getsource(eu.harvest_roster).split('"""')
+    hv = hv[0] + "".join(hv[2:]) if len(hv) > 2 else hv[0]
+    check("hash" not in hv,
+          "identity is not a hash of the fingerprint - a hash changes with "
+          "any pixel, which is the opposite of a stable identity")
+
+    # --- the panel refuses to even offer an SS box ---------------------
+    dock_src = open(os.path.join(ROOT, "engine/dock.py")).read()
+    check('"eu_skip"' in dock_src, "the panel can toggle a boss")
+    check('e.rank === "SS"' in dock_src and "disabled" in dock_src,
+          "and an SS boss is shown but not clickable, so the operator is "
+          "never misled into thinking one was excluded")
+    app_src = open(os.path.join(ROOT, "engine/app.py")).read()
+    check('entry["rank"] == "SS"' in app_src,
+          "and the command refuses it server-side too")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -6219,7 +6287,8 @@ def main():
                test_recruiting_takes_the_strongest_friend_and_never_an_npc,
                test_the_eudemon_hunt_reads_ranks_and_never_blacklists_ss,
                test_the_hunts_carry_their_own_skill_rotation,
-               test_a_eudemon_win_is_a_different_panel_from_a_mission_success):
+               test_a_eudemon_win_is_a_different_panel_from_a_mission_success,
+               test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

@@ -299,6 +299,30 @@ def rows(frame):
     return out
 
 
+def row_key(rank, n):
+    """A short, stable label for the panel: `SS-1`, `A-2`, ..."""
+    return "%s-%d" % (rank, n)
+
+
+def harvest_roster(frame, roster):
+    """Add any unseen row to `roster` (a list of dicts). Returns it.
+
+    Keys are assigned in DISCOVERY ORDER and matched back by FINGERPRINT, not
+    by hashing one. A hash of a pixel fingerprint changes whenever any pixel
+    does, which is the opposite of what a stable identity needs; `same_row`
+    already compares with tolerance and is what the rest of this module uses.
+    """
+    for r in rows(frame):
+        if r["rank"] is None or r["fp"] is None:
+            continue
+        if any(same_row(r["fp"], e["fp"]) for e in roster):
+            continue
+        n = sum(1 for e in roster if e["rank"] == r["rank"]) + 1
+        roster.append({"key": row_key(r["rank"], n), "rank": r["rank"],
+                       "fp": r["fp"]})
+    return roster
+
+
 def blacklistable(rank):
     """SS is never blacklistable - those bosses are time limited."""
     return rank is not None and rank != SS
@@ -384,8 +408,41 @@ def start(actor, cap, log, row):
     return True, "started"
 
 
+VILLAGE_RECRUIT = (1078, 913)      # the village's "Recruit Friends" plaque
+PANEL_CLOSE = (2597, 192)
+RECRUIT_SETTLE = 3.0
+
+
+def recruit_party(cap, actor, cdp, log, want=2):
+    """Fill the party from the village, then close the panel. Levels taken.
+
+    **TEAMMATES LEAVE AFTER EVERY BOSS** - the recruit panel says so outright
+    ("Teammates will leave your group after each mission or boss") - so this
+    belongs INSIDE the loop, before each fight, not once at the start.
+
+    A failure here is not fatal: a party is help, not a precondition, and a
+    boss can be attempted solo. It is logged and the hunt goes on.
+    """
+    if cdp is None:
+        return []
+    try:
+        import roster
+        actor.click_pixel(*VILLAGE_RECRUIT, why="village: Recruit Friends")
+        time.sleep(RECRUIT_SETTLE)
+        took = roster.recruit(cap, actor, cdp, log, want=want)
+        actor.click_pixel(*PANEL_CLOSE, why="close the team panel")
+        time.sleep(2.0)
+        return took
+    except Exception as e:
+        log.warning("eudemon: recruiting failed (%s: %s) - fighting with "
+                    "whoever is already in the party",
+                    type(e).__name__, e)
+        return []
+
+
 def hunt(cap, actor, log, play_combat, blacklist=(), max_fights=40,
-         relog=None, skip_ss=False):
+         relog=None, skip_ss=False, cdp=None, recruit=True,
+         roster=None, skip_keys=(), on_roster=None):
     """Farm every non-blacklisted boss until nothing will start.
 
     `blacklist` holds row FINGERPRINTS (see `rows`). SS rows are never
@@ -395,19 +452,55 @@ def hunt(cap, actor, log, play_combat, blacklist=(), max_fights=40,
     fought = banked = 0
     exhausted = list(blacklist or [])
     for sweep in range(max_fights):
-        if not rows(cap.frame(gray=False)):
+        # RECRUIT FIRST, FROM THE VILLAGE, and before choosing a target.
+        # The party empties after every boss - the panel says so outright -
+        # so this belongs inside the loop. Doing it before the search matters:
+        # an earlier version recruited after picking a target and then re-found
+        # that row on PAGE 1 only, so a target from page 2 or 3 kept a stale y
+        # and the next click would have landed on the wrong boss.
+        if recruit and cdp is not None and close(actor, cap, log):
+            took = recruit_party(cap, actor, cdp, log)
+            if took:
+                log.info("eudemon: party filled with Lv%s",
+                         ", Lv".join(str(t) for t in took))
+
+        if not in_garden(cap.frame(gray=False)):
             if not to_garden(actor, cap, log):
                 log.info("eudemon: cannot reach the garden - stopping")
                 break
+
         target = None
         for page in (1, 2, 3):
             found = goto_page(actor, cap, log, page)
+            if roster is not None:
+                before = len(roster)
+                harvest_roster(cap.frame(gray=False), roster)
+                if on_roster and len(roster) != before:
+                    on_roster(roster)
             log.info("eudemon: page %d has %d row(s): %s", page, len(found),
                      [f"{r['rank']}x{r['count']}" for r in found])
             for r in found:
                 if any(same_row(r["fp"], fp) for fp in exhausted):
                     continue
                 if skip_ss and r["rank"] == SS:
+                    continue
+                # THE PANEL'S SKIP LIST. Matched by fingerprint against the
+                # harvested roster, and SS is exempt whatever the list says -
+                # `blacklistable` is the single place that rule lives.
+                if roster is not None and skip_keys:
+                    hit = next((e for e in roster
+                                if same_row(r["fp"], e["fp"])), None)
+                    if hit and hit["key"] in skip_keys \
+                            and blacklistable(r["rank"]):
+                        continue
+                # A COUNT OF ZERO IS NO TRIES LEFT. It is only trusted when it
+                # actually READ - `count_at` returns None where it could not,
+                # and None is not zero. The authority stays `start`, which
+                # presses Battle and asks whether the screen moved.
+                if r["count"] == 0:
+                    log.info("eudemon: the %s boss reads x0 - no tries left",
+                             r["rank"])
+                    exhausted.append(r["fp"])
                     continue
                 target = r
                 break
@@ -417,6 +510,7 @@ def hunt(cap, actor, log, play_combat, blacklist=(), max_fights=40,
             log.info("eudemon: every boss is blacklisted or finished "
                      "(%d fought, %d banked)", fought, banked)
             break
+
         started, why = start(actor, cap, log, target)
         if not started:
             if why == "exhausted":
@@ -429,6 +523,9 @@ def hunt(cap, actor, log, play_combat, blacklist=(), max_fights=40,
         except Exception as e:
             log.warning("eudemon: the battle runner raised %s: %s",
                         type(e).__name__, e)
+        # WIN OR LOSE, GET BACK TO THE LOBBY. close_out banks a win; whether
+        # it banked or not, the lap ends in the village so the next one can
+        # recruit and start again.
         if close_out(actor, cap, log):
             banked += 1
             log.info("eudemon: banked (%d of %d fought)", banked, fought)

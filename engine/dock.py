@@ -443,6 +443,13 @@ _BOOTSTRAP = r"""
       `<div class="d" id="v_hskills" style="margin-bottom:5px"></div>` +
       `<div class="g4" id="v_hslots"></div>` +
       `<div style="margin-top:5px">` + btn("hskill_clear", "Clear hunt order") + `</div>` +
+      // EUDEMON BLACKLIST. Populated as the hunt pages the list, so it can
+      // be empty until one has run - the label says so rather than showing a
+      // bare empty box. SS entries are shown but not clickable: those bosses
+      // are time limited and must never be skipped.
+      `<h4>Eudemon bosses (click to skip)</h4>` +
+      `<div class="d" id="v_eu_none" style="margin-bottom:4px"></div>` +
+      `<div class="g4" id="v_eudemon"></div>` +
       `<h4>View</h4><div style="margin-top:2px">` +
         btn("focus", "Focus mode") +
       `</div>` +
@@ -629,6 +636,27 @@ _BOOTSTRAP = r"""
     fillSlotRow(V.v_hslots, slots, "hskill");
   };
 
+  const fillEudemon = (list) => {
+    const key = (list || []).map(e => e.key + (e.skipped ? "!" : "")).join(",");
+    if (!V.v_eudemon || V.v_eudemon.dataset.key === key) return;
+    V.v_eudemon.dataset.key = key;
+    V.v_eudemon.innerHTML = "";
+    setText("v_eu_none", (list || []).length ? ""
+        : "(none seen yet - run the hunt once and they appear here)");
+    (list || []).forEach(e => {
+      const b = document.createElement("button");
+      b.textContent = e.key + (e.skipped ? " x" : "");
+      if (e.rank === "SS") {
+        b.disabled = true;
+        b.title = "SS bosses are time limited and are never skipped";
+      } else {
+        b.dataset.cmd = "eu_skip"; b.dataset.arg = e.key;
+      }
+      setOn(b, !!e.skipped);
+      V.v_eudemon.appendChild(b);
+    });
+  };
+
   const fillTasks = (tasks) => {
     const key = (tasks || []).map(t => t.key).join(",");
     if (!V.v_tasks || V.v_tasks.dataset.key === key) return;
@@ -679,6 +707,7 @@ _BOOTSTRAP = r"""
     setText("v_pin", s.pin || "highest unlocked");
     el.querySelectorAll('[data-cmd="grade"]').forEach(b =>
       setOn(b, b.dataset.arg === (s.grade || "auto")));
+    fillEudemon(s.eudemon);
     const ord = (s.skills || []);
     setText("v_skills", ord.length
         ? ord.map((k, i) => `${i + 1}. ${k}`).join("   ")

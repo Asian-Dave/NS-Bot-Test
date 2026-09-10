@@ -171,11 +171,14 @@ class EudemonHunt(Task):
         import eudemon as eu
         rt.note = "Eudemon hunt in flight - the panel pauses until it finishes"
         rt.push()
+        roster = rt.eudemon_roster_fps()
         fought, banked = eu.hunt(
             rt.cap, rt.actor, rt.log,
             play_combat=lambda: rt._run_mission(profile="hunt"),
             blacklist=rt.eudemon_blacklist(),
-            relog=rt.relog)
+            relog=rt.relog, cdp=rt.cdp,
+            roster=roster, skip_keys=rt.eudemon_skip_keys(),
+            on_roster=rt.save_eudemon_roster)
         return f"Eudemon: {fought} fought, {banked} banked"
 
 class FarmMissions(Task):
