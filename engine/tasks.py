@@ -110,6 +110,40 @@ class TpTraining(Task):
         return f"TP pass: {played} started, {banked} banked"
 
 
+class SsTraining(Task):
+    """One SS pass: play the whole day's SS list, then hand back.
+
+    THE NEXT TIER UP FROM TP, and the operator asked for it as its own button
+    rather than something reached through the farm. That is not only
+    convenience: an SS mission that turns out to be COMBAT used to leave the
+    supervisor in `farm_missions`, which then went off and started a story
+    mission - "it always returns to farm mission after combat".
+
+    Same shape as TpTraining: a one-shot over the day's list, terminating when
+    every row is played or measured to be greyed out rather than on a count.
+
+    SS MIXES PUZZLES AND FIGHTS, and which is which is read off the screen:
+    `Sage Power Seal` is the rune Mastermind, `Twins Unicorn` is two Lv 80
+    enemies. Combat is handed to the supervisor's OWN mission runner, so SS
+    fights inherit the whole battle stack - the panel's rotation, the
+    greyed-slot skip, cooldown learning, the stun fallback to Dodge and
+    DamageWatchdog - instead of a second copy of it.
+    """
+
+    key, label = "ss_training", "SS training"
+    oneshot = True
+
+    def run(self, rt):
+        import ss as ss_mod
+        rt.note = "SS run in flight - the panel pauses until it finishes"
+        rt.push()
+        played, banked = ss_mod.run_all(rt.cap, rt.actor, rt.log,
+                                        tpls=rt.tpls,
+                                        play_combat=rt._run_mission,
+                                        relog=rt.relog)
+        return f"SS pass: {played} started, {banked} banked"
+
+
 class FarmMissions(Task):
     """Farm story missions, one mission per lap.
 
@@ -181,9 +215,80 @@ class FarmMissions(Task):
         return f"farm: {started} started, {banked} banked"
 
 
+class ExamKekkai(Task):
+    """Solve an exam's rune puzzle from wherever the operator has got to.
+
+    WHAT WAS ALREADY DONE, AND WHY THIS IS SMALL. The reference bot solved this
+    puzzle for the Jounin and Sage exams and never for TP - the opposite of us -
+    and porting "the exams" turned out to need almost no new machinery, because
+    every piece of the path is already context-free:
+
+      * `minigame.classify` reads the family OFF THE SCREEN rather than from a
+        configured label, so an exam seal is recognised as a kekkai already;
+      * `kekkai_play` contains no TP assumptions at all;
+      * `hunt_and_solve` COUNTS THE SEAL'S NODES and uses that as the code
+        length (2..6), which is exactly the range the exam uses - four
+        coordinate tables keyed 2..5 in their bot. TP only ever showed 3 and 5.
+      * `kekkai.candidates` is generic in the length, being a plain product over
+        the six runes.
+
+    So the puzzle is supported. WHAT IS NOT is the navigation to reach an exam,
+    and that cannot be written without seeing the screens - inventing templates
+    for a menu nobody has looked at is the eyeball mistake this project keeps
+    paying for. `needs_lobby` is False for the same reason the farm can start
+    mid-mission: the resume ladder deliberately cannot name an exam screen, so
+    demanding the lobby first would make this unusable.
+
+    Until the navigation exists the division of labour is: the operator gets to
+    the exam, presses Run, and the bot plays the puzzle. When it finds nothing
+    it SAVES THE SCREEN, which is how the navigation gets taught - the same
+    trick that eventually solved the mission list, the between-turns battle and
+    the Level Up panel.
+    """
+
+    key, label = "exam_kekkai", "Exam (rune puzzle)"
+    oneshot = True
+    needs_lobby = False
+
+    def preflight(self, rt):
+        import minigame as mg
+        frame = rt.cap.frame(gray=False)
+        kind, ev = mg.classify(frame)
+        rt.state = f"exam:{kind}"
+
+        if kind == mg.KEKKAI:
+            rt.note = "exam rune puzzle on screen - solving"
+            rt.log.info("%s (%s)", rt.note, ev)
+            rt.push()
+            kind, ok = mg.solve(rt.cap, rt.actor, rt.log, frame=frame)
+            rt.note = ("exam puzzle solved" if ok else
+                       "exam puzzle not completed - see the log")
+            rt.log.info("%s", rt.note)
+            return True
+
+        # Nothing playable here. Say so precisely, and keep the frame: an exam
+        # screen we cannot name is one anchor away from navigable, and the hard
+        # part is always CATCHING it.
+        rt.note = (f"no rune puzzle on this screen ({kind}) - navigate to the "
+                   f"exam and press Run")
+        rt.log.info("%s", rt.note)
+        rt.log.info("exam navigation is not implemented: it needs the exam's own "
+                    "screens, which nobody has captured yet. Saving this frame "
+                    "so it can be taught.")
+        try:
+            rt._save_for_teaching()
+        except Exception as e:
+            rt.log.warning("could not save the frame: %s", e)
+        return True
+
+    def run(self, rt):
+        return None
+
+
 # ORDER IS THE PANEL'S ORDER. `idle` sits last because it is the resting
 # choice, not the first thing an operator wants to reach for.
-REGISTRY = [ResumeToLobby(), TpTraining(), FarmMissions(), Idle()]
+REGISTRY = [ResumeToLobby(), TpTraining(), SsTraining(), FarmMissions(),
+            ExamKekkai(), Idle()]
 BY_KEY = {t.key: t for t in REGISTRY}
 AS_DICTS = [t.as_dict() for t in REGISTRY]
 

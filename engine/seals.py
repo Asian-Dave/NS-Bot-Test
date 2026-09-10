@@ -172,9 +172,9 @@ def anchor_offset(frame, log=None, origin=(0, 0)):
 
 
 def _hud():
-    from perceive import Template
-    p = os.path.join(ROOT, "tpl", "tp_seal_hud.png")
-    return Template("tp_seal_hud", p, threshold=0.88) if os.path.exists(p) else None
+    import perceive
+    # `perceive.template` so the active renderer's variant is used.
+    return perceive.template("tp_seal_hud", threshold=0.88)
 
 
 def board_present(frame):
@@ -317,6 +317,184 @@ def slots_revealed(frame, slots=None, off=(0, 0)):
         m = blue_mask(slot_crop(frame, i, ss))
         out.append(0.0 if m is None else float((m > 0).mean()))
     return (bool(out) and all(v >= SLOT_REVEALED_BLUE for v in out)), out
+
+
+# THE HUD IS THE GAME'S OWN VERDICT — hearts and the round counter
+#
+# Both boxes are ANCHOR-RELATIVE to the "Skill :" HUD, never absolute, because
+# the whole panel moves (measured 111 px on one reload, and the page scroll
+# used to drift it further).
+#
+#     counter   the "N / 4" digits, immediately right of "Skill :"
+#     hearts    the row directly below it
+#
+# WHY THIS EXISTS. Whether a tile click REGISTERED could not be answered from
+# the slot art: after a correct pick the slot shows that seal in the same
+# rendering we memorised, so it is byte-identical to the prompt we captured -
+# `d=0.000` - and after a click that never landed the slot is ALSO still
+# showing that prompt, giving exactly the same 0.000. The two opposite
+# outcomes are indistinguishable there. The HUD is not ambiguous:
+#
+#     hearts dropped     a WRONG answer was submitted -> the clicks DID land
+#     counter changed    the round advanced -> the clicks landed and were right
+#     neither moved      nothing was submitted -> the clicks did NOT land
+#
+# No digit recognition is needed. Hearts are counted as red blobs, and the
+# counter is compared as an IMAGE against the earlier snapshot - a change is
+# all the signal required, and it sidesteps the digit-exemplar problem that
+# has blocked this project elsewhere.
+HUD_COUNTER = (60, -6, 190, 32)      # dx0, dy0, dx1, dy1 from the HUD anchor
+HUD_HEARTS = (-60, 42, 250, 108)
+HEART_AREA = (800, 8000)             # measured 2738..2742 per heart, 67x56
+
+
+def hud_state(frame, off=None):
+    """(hearts, counter_image) for the board's own HUD, or (None, None).
+
+    None means the HUD could not be located - the caller must treat that as
+    UNKNOWN and never as "no change".
+    """
+    if frame is None:
+        return None, None
+    if off is None:
+        off = anchor_offset(frame)
+        if off is None:
+            return None, None
+    hx, hy = HUD_REF[0] + off[0], HUD_REF[1] + off[1]
+    h, w = frame.shape[:2]
+
+    def _crop(box):
+        a, b, c, d = box
+        x0, y0, x1, y1 = hx + a, hy + b, hx + c, hy + d
+        if x0 < 0 or y0 < 0 or x1 > w or y1 > h or x1 <= x0 or y1 <= y0:
+            return None
+        return frame[y0:y1, x0:x1]
+
+    hearts_img, counter = _crop(HUD_HEARTS), _crop(HUD_COUNTER)
+    if hearts_img is None or counter is None:
+        return None, None
+    hsv = cv2.cvtColor(hearts_img, cv2.COLOR_BGR2HSV)
+    red = (((hsv[:, :, 0] < 10) | (hsv[:, :, 0] > 170))
+           & (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 90))
+    n, _lab, stats, _c = cv2.connectedComponentsWithStats(
+        red.astype(np.uint8), 8)
+    lo, hi = HEART_AREA
+    hearts = sum(1 for i in range(1, n)
+                 if lo <= int(stats[i, cv2.CC_STAT_AREA]) <= hi)
+    return hearts, counter.copy()
+
+
+def hud_verdict(before, after, log, what="the answer"):
+    """Did the game react? Reads the board rather than our own belief.
+
+    Returns "advanced", "heart-lost", "no-change" or "unknown".
+    """
+    hb, cb = before
+    ha, ca = after
+    if hb is None or ha is None or cb is None or ca is None:
+        log.info("   HUD could not be read - cannot say whether %s registered",
+                 what)
+        return "unknown"
+    if ha < hb:
+        log.info("   HUD: hearts %d -> %d, so %s WAS submitted and was WRONG",
+                 hb, ha, what)
+        return "heart-lost"
+    if cb.shape == ca.shape:
+        d = float(cv2.absdiff(cv2.cvtColor(cb, cv2.COLOR_BGR2GRAY),
+                              cv2.cvtColor(ca, cv2.COLOR_BGR2GRAY)).mean())
+    else:
+        d = 999.0
+    if d > 2.0:
+        log.info("   HUD: the round counter CHANGED (mean |diff| %.1f) and "
+                 "hearts held at %d - %s registered and advanced the board",
+                 d, ha, what)
+        return "advanced"
+    log.info("   HUD: hearts %d unchanged and the counter is identical "
+             "(mean |diff| %.2f) - NOTHING was submitted", ha, d)
+    return "no-change"
+
+
+def wait_input_phase(cap, log, want, slots, timeout=20.0, poll=0.4):
+    """Block until the LOOK phase is over and the board is taking input.
+
+    WHY THIS HAS TO EXIST. The sequence is read during the LOOK phase, and in
+    that phase the tiles are face up but GREYED - a click on a greyed tile does
+    nothing at all. The round reader went straight from "recorded 2 of 2
+    sign(s)" to clicking about two seconds later, so every click landed in the
+    look phase and was discarded. Measured live:
+
+        15:05:12  look phase: recorded 2 of 2 sign(s), in order
+        15:05:14  CLICK hand sign 0 = tile 1
+        15:05:15  CLICK hand sign 1 = tile 8
+        ...
+        the board still read `Skill : 1 / 4` WITH ALL THREE HEARTS
+
+so nothing had been submitted, right or wrong - and the next pass then found
+    the round "PARKED", which is how a click-timing fault got mistaken for the
+    known prompt-versus-input ambiguity.
+
+    TWO SIGNALS, AND THEY MUST BOTH HOLD.
+
+    `tiles_live()` is the documented blue-glove check and it is the right
+    primary signal on wgpu, where greying drives the glove's blue fraction to
+    exactly 0.000. **It cannot be used alone, because webgl does not apply the
+    grey-out filter at all**: the glove keeps its blue and the tiles read LIVE
+    throughout the look phase, so a wait on it returns instantly and fixes
+    nothing. That is the same divergence measured independently on the skill
+    slots, where webgl greying left saturation at 0.397..0.748 against 0.000 on
+    wgpu - greying is a COLOUR operation, and colour is what this backend
+    renders differently.
+
+    The signal that does not care about colour is the SLOTS. During the look
+    phase they display the required seals; when input opens they flip back to
+    NINJA SAGA card backs - a completely different image, not a recoloured one.
+    So "the slots have stopped showing what we memorised" is renderer-
+    independent, and it is measured with the same `same_seal` comparison used
+    everywhere else.
+
+    Requiring BOTH is what makes this correct on either backend: on wgpu the
+    two agree, and on webgl the always-true tiles check reduces the condition
+    to the slot signal.
+    """
+    end = time.time() + timeout
+    said = False
+    while time.time() < end:
+        f = cap.frame(gray=False)
+        if board_present(f) is False:
+            log.info("   the board went away while waiting for the input phase")
+            return False
+        off = anchor_offset(f) or (0, 0)
+        live, _ = tiles_live(f, off)
+        # Have the slots stopped showing the prompt? Any slot that has flipped
+        # away from the seal we memorised is enough - they flip together.
+        flipped = False
+        for si in range(len(want)):
+            if want[si] is None:
+                continue
+            got = slot_crop(f, si, slots)
+            if got is None:
+                continue
+            same, _d = same_seal(want[si], got)
+            if not same:
+                flipped = True
+                break
+        if live and flipped:
+            if said:
+                log.info("   the prompt has been withdrawn and the tiles are "
+                         "live - entering the answer now")
+            return True
+        if not said:
+            log.info("   waiting for the look phase to end before clicking "
+                     "(a greyed tile swallows the click)")
+            said = True
+        time.sleep(poll)
+    # TIMED OUT. Do NOT click anyway: this game strands a round permanently
+    # once the look phase has passed, so a click at the wrong moment is not a
+    # cheap mistake - but neither is clicking into a phase that is still
+    # showing the prompt, which is exactly what produced 0 rounds from 5
+    # missions. Say so and let the caller stop.
+    log.info("   the board never reached its input phase within %.0fs", timeout)
+    return False
 
 
 def same_seal(a, b, gate=0.12):
@@ -607,11 +785,11 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
     # live seal. It concluded a round was already running, never pressed Start,
     # and sat out the whole look phase.
     # tp_seal_start: 1.000 positive, 0.248 worst negative.
-    from perceive import Template, find as _find
-    sp = os.path.join(ROOT, "tpl", "tp_seal_start.png")
-    if os.path.exists(sp):
-        m, sc = _find(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY),
-                      Template("tp_seal_start", sp, threshold=0.88))
+    import perceive
+    from perceive import find as _find
+    _start = perceive.template("tp_seal_start", threshold=0.88)
+    if _start is not None:
+        m, sc = _find(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), _start)
         if m.found:
             log.info("pressing Start (%.3f)", sc)
             actor.click_pixel(*m.center, why="Start the hand-seal round")
@@ -737,6 +915,11 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
         by_cat = [tile_id.get(r[0]) if r else None for r in sign_id]
         if all(x is not None for x in by_cat) and len(set(by_cat)) == len(by_cat):
             log.info("catalogue: signs -> tiles %s", by_cat)
+            # THE LOOK PHASE MUST BE OVER FIRST - a greyed tile swallows the
+            # click and the round is then stranded with the prompt gone.
+            if not wait_input_phase(cap, log, want, slots):
+                return False
+            hud_cat = hud_state(cap.frame(gray=False))
             for si, choice in enumerate(by_cat):
                 r = sign_id[si]
                 log.info("sign %d = seal %d -> tile %d (d=%.3f, margin %.2fx)",
@@ -753,11 +936,27 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
                                   TILES[choice][1] + now[1],
                                   why=f"hand sign {si} = seal {r[0]}")
                 time.sleep(0.18)
-            log.info("played %s from the catalogue", by_cat)
-            return True
+            time.sleep(1.2)
+            v = hud_verdict(hud_cat, hud_state(cap.frame(gray=False)), log,
+                            f"the answer {by_cat}")
+            log.info("played %s from the catalogue - %s", by_cat, v)
+            return v == "advanced"
         log.info("catalogue could not place every sign (%s) - falling back to "
                  "cross-rendering matching",
                  [None if r is None else r[0] for r in sign_id])
+
+    # SAME HERE. The sequence was read during the look phase, when the tiles
+    # are face up but GREYED; clicking then does nothing, and the vacuous
+    # d=0.000 check below then reported success. See `wait_tiles_live`.
+    if not wait_input_phase(cap, log, want, slots):
+        return False
+
+    # THE BOARD'S OWN STATE, BEFORE WE TOUCH ANYTHING. The slot art cannot say
+    # whether a click landed (see `hud_state`), so record hearts and the round
+    # counter now and ask the HUD afterwards.
+    hud_before = hud_state(cap.frame(gray=False))
+    if hud_before[0] is not None:
+        log.info("   board before answering: %d heart(s)", hud_before[0])
 
     picked, ok_all = [], True
     for si in range(len(want)):
@@ -818,9 +1017,47 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
         after = cap.frame(gray=False)
         got = slot_crop(after, si, slots)
         verdict, dd = same_seal(want[si], got)
-        log.info("   filled slot %d %s (d=%.3f)", si,
-                 "MATCHES the sign shown" if verdict else "does NOT match",
-                 dd)
+        # A DISTANCE OF EXACTLY ZERO MEANS NOTHING HAPPENED.
+        #
+        # This file already recorded the caution and the code still trusted it:
+        # "a distance of exactly zero between two captures means nothing
+        # happened, and should be treated as a failed observation rather than a
+        # match". Live, both slots read d=0.000 and the round was declared
+        # "both signs verified" while the board still said `Skill : 1 / 4` with
+        # three hearts - nothing had been submitted at all. The slot was simply
+        # still showing the look-phase seal we had memorised, so we were
+        # comparing a crop with itself.
+        #
+        # BUT ZERO IS AMBIGUOUS, AND CALLING IT A FAILURE WAS TOO STRONG.
+        #
+        # Two different things produce exactly 0.000, and they are opposite:
+        #
+        #   nothing happened      the slot is STILL showing the prompt we
+        #                         memorised, so we compared a crop with itself
+        #   a CORRECT pick        the slot now shows that seal drawn as slot
+        #                         art - the very rendering we memorised - so it
+        #                         is identical for the right reason
+        #
+        # Measured both. Clicking during the look phase gave 0.000 with the
+        # board left at `Skill : 1 / 4` and three hearts, i.e. nothing
+        # submitted. After `wait_input_phase` was added the clicks went out in
+        # the input phase and still read 0.000 - which is what a correct
+        # placement looks like, and treating it as "wrong" aborted a round that
+        # may well have been right.
+        #
+        # So it is UNKNOWN, and this project's rule for unknown is to say so
+        # rather than decide. The round is NOT failed on it; the board's own
+        # progress is the verdict, exactly as the memory game trusts the
+        # cleared count over its own metric.
+        if verdict and dd <= 1e-9:
+            log.info("   slot %d reads d=0.000 - IDENTICAL pixels, which is "
+                     "either a correct placement or a click that never landed. "
+                     "Not deciding from this; the board's own progress is the "
+                     "verdict.", si)
+        else:
+            log.info("   filled slot %d %s (d=%.3f)", si,
+                     "MATCHES the sign shown" if verdict else "does NOT match",
+                     dd)
         if not verdict:
             ok_all = False
         if save_crops:
@@ -834,9 +1071,22 @@ def play_round(cap, actor, log, save_crops=False, commit=True,
                         tile_crop(tf, choice, toff))
         picked.append(choice)
 
-    log.info("played %s - %s", picked,
-             "both signs verified" if ok_all else "at least one sign was wrong")
-    return ok_all
+    # ASK THE BOARD. Give it a moment to react first - the counter and the
+    # hearts are drawn by the game, not by us, and a snapshot taken in the
+    # same instant as the last click would read the pre-click frame.
+    time.sleep(1.2)
+    verdict = hud_verdict(hud_before, hud_state(cap.frame(gray=False)), log,
+                          f"the answer {picked}")
+    log.info("played %s - %s", picked, {
+        "advanced": "the board ADVANCED - the answer was accepted",
+        "heart-lost": "the board took a heart - the answer was wrong",
+        "no-change": "THE CLICKS DID NOT REGISTER - nothing was submitted",
+        "unknown": "could not read the board's reaction",
+    }[verdict])
+    # ONLY THE BOARD'S OWN PROGRESS COUNTS. Our slot-art check cannot tell a
+    # correct placement from a click that never landed - both read d=0.000 -
+    # so it is not allowed to decide this.
+    return verdict == "advanced"
 
 
 def play(cap, actor, log, max_rounds=12, save_crops=False):

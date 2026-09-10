@@ -253,6 +253,20 @@ class BattleRunner:
             # battle stalled. A cutscene is an end condition, not a stall.
             if "cutscene_continue" in self.conditions:
                 waits.append(self.conditions["cutscene_continue"])
+            # AND IT CAN END STRAIGHT INTO MISSION SUCCESS, with no Victory
+            # panel and no dialogue - the last fight of a mission simply ends
+            # and the reward screen is what appears. Measured on SS "Twins
+            # Unicorn": the enemies fell, this gate waited out its full timeout
+            # for a turn that could never come, and reported
+            #
+            #     mission: battle 1 -> stalled {'rounds': 13, 'acted': 13}
+            #
+            # about a fight it had just WON - the very next thing the mission
+            # runner did was dismiss a Mission Success panel at 0.969 and bank
+            # it. Exactly the same shape as the cutscene case above: an ending
+            # that is not in the wait list reads as a stall.
+            if "mission_success" in self.conditions:
+                waits.append(self.conditions["mission_success"])
             waits.append(self.conditions["command_bar"])
 
             fired = self.gate.wait_for_any(waits, self.turn_timeout,
@@ -262,6 +276,14 @@ class BattleRunner:
                               rounds)
                 return VICTORY, {"rounds": rounds, "acted": acted,
                                  "ended": "cutscene"}
+            if fired and fired.name == "mission_success":
+                # The mission is over and won. Leave the panel ALONE - banking
+                # it is the mission runner's job, and it requires the green
+                # check plus the lobby before it will call it a success.
+                self.log.info("battle: the mission ended in success after %d "
+                              "round(s)", rounds)
+                return VICTORY, {"rounds": rounds, "acted": acted,
+                                 "ended": "mission_success"}
             if isinstance(fired, Stopped):
                 return STOPPED, {"rounds": rounds, "acted": acted}
             if not fired:

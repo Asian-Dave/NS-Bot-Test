@@ -84,6 +84,110 @@ def get_search_band():
     return _BAND
 
 
+# ---------------------------------------------------------------------------
+# PER-RENDERER TEMPLATE VARIANTS — because the same SWF does NOT draw the same
+# pixels on every Ruffle backend.
+#
+# Measured live, same session, same screen, minutes apart, only `renderMode`
+# changed:
+#
+#     mission_room_entry   wgpu-webgl 0.997   webgl 0.531   (gate 0.88)
+#     lobby_rail_fortune   wgpu-webgl 1.000   webgl 0.895
+#
+# The farm could not leave the village on `webgl` at all: `mission_room_entry`
+# is the single door both farm and TP use to enter the Mission Room, and 0.531
+# sits INSIDE the negative distribution (other anchors score 0.39..0.53 on that
+# frame), so no threshold tweak can recover it. The cause is visible in the
+# crop: on `webgl` this Ruffle build draws the label's text WITHOUT its stroke,
+# in a different, thinner face at a different baseline, and shifts some element
+# colours (a gold button beside the plaque renders purple). Everything outside
+# the text band is pixel-identical - mean |diff| 3..7, with the whole
+# difference confined to the text rows.
+#
+# So a template carrying text is renderer-specific, and that cannot be fixed by
+# recutting ONE crop for both: the two renderings genuinely do not correspond.
+#
+# WHY MODULE STATE AND NOT AN ARGUMENT. There are four independent
+# `load_templates` call sites - app.py, farm.farm, tp._recover_to_lobby and
+# renderer_ab - and this file already records what happens when one idea is
+# reached through several callers with their own arguments: "ONE CALLER WITH
+# DIFFERENT ARGUMENTS IS THE SAME BUG AS TWO IMPLEMENTATIONS", which is how the
+# character finder came to disagree with itself. A `renderer=` parameter would
+# be threaded through three of them and forgotten in the fourth. The search
+# band above is module state for exactly this reason, so this follows it.
+#
+# A process that never calls `set_renderer` behaves precisely as before.
+_RENDERER = None
+
+# Variants live in `tpl/<renderer>/<name>.png` and OVERRIDE the default crop.
+# A directory per backend, rather than a suffix per file, so `ls tpl/webgl/`
+# answers "what has actually been recut for this backend" - which is the
+# question anyone maintaining this will have.
+VARIANT_DIR = "tpl"
+
+
+def set_renderer(name):
+    """Name the Ruffle backend whose variants should win, e.g. "webgl".
+
+    Take this from `browser.renderer_info(...)["requested"]` - the value
+    Ruffle really loaded with, read off `loadedConfig`. NOT from the canvas
+    context type, which cannot tell `wgpu-webgl` from `webgl` because both
+    draw through WebGL2.
+    """
+    global _RENDERER
+    _RENDERER = (name or "").strip().lower() or None
+    return _RENDERER
+
+
+def clear_renderer():
+    global _RENDERER
+    _RENDERER = None
+
+
+def get_renderer():
+    return _RENDERER
+
+
+def variant_path(name, default_path, renderer=None):
+    """`tpl/<renderer>/<name>.png` when it exists, else `default_path`.
+
+    Absent variants fall through SILENTLY and that is the whole point: a
+    backend needs a recut only for the templates measured to move on it, so
+    `tpl/webgl/` holds a handful of files rather than a second copy of all 60.
+    """
+    r = renderer if renderer is not None else _RENDERER
+    if not r:
+        return default_path
+    p = os.path.join(ROOT, VARIANT_DIR, r, f"{name}.png")
+    return p if os.path.exists(p) else default_path
+
+
+def template(name, threshold=0.88, scales=None):
+    """The Template for `name`, honouring the active renderer. None if absent.
+
+    THE ONE WAY TO BUILD A TEMPLATE BY NAME, and it exists because the variant
+    mechanism was defeated by its own success. `load_templates` was taught to
+    swap in `tpl/<renderer>/` crops, the log said "4 recut for webgl", and the
+    farm STILL could not enter the Mission Room - because `farm._tpl` built
+    `Template(name, "tpl/<name>.png")` directly and never went near
+    `load_templates`. Nine live modules did the same thing:
+
+        farm._tpl   minigame._tpl   tp._tpl   cards._HUD
+        kekkai_play (three sites)   seals (two sites)
+
+    Measured at the time: the webgl variant scored 1.000 on ten fresh lobby
+    frames while the running bot logged "could not reach the grade panel" on
+    every lap. A template mechanism that covers only some template loads is
+    the half-applied correction this project already has a rule about - "one
+    coordinate space, or none" - in a new costume.
+    """
+    p = os.path.join(ROOT, "tpl", f"{name}.png")
+    if not os.path.exists(p):
+        return None
+    return Template(name, variant_path(name, p), threshold=threshold,
+                    scales=scales)
+
+
 # 2. REJECT NEGATIVES AT HALF RESOLUTION. A negative costs exactly as much as a
 #    positive, and almost everything scored is a negative - "no anchor matched"
 #    is the common case and the expensive one. So score at half scale first and
@@ -428,8 +532,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # second `__main__` that could attach to the same game as the live bot.
 
 def load_templates(cfg, log):
-    """Load every template the config names, skipping any that are absent."""
-    out, missing = {}, []
+    """Load every template the config names, skipping any that are absent.
+
+    Honours `set_renderer`: where `tpl/<renderer>/<name>.png` exists it wins
+    over the default crop, because this Ruffle build does not draw the same
+    pixels on every backend. See the note beside `set_renderer`.
+    """
+    out, missing, swapped = {}, [], []
+
+    def _add(name, path, threshold):
+        use = variant_path(name, path)
+        if use != path:
+            swapped.append(name)
+        out[name] = Template(name, use, threshold=threshold)
+
     for name, spec in cfg.get("templates", {}).items():
         if name.startswith("_"):
             continue
@@ -437,17 +553,27 @@ def load_templates(cfg, log):
         if not os.path.exists(path):
             missing.append(name)
             continue
-        out[name] = Template(name, path, threshold=spec.get("threshold", 0.88))
-    # anything in tpl/ that the config forgot is still worth scoring
+        _add(name, path, spec.get("threshold", 0.88))
+    # anything in tpl/ that the config forgot is still worth scoring. Note the
+    # `.png` test also skips the `tpl/<renderer>/` variant DIRECTORIES, which
+    # must never be walked as templates in their own right.
     tpl_dir = os.path.join(ROOT, "tpl")
     for f in sorted(os.listdir(tpl_dir)):
         if not f.endswith(".png") or f.startswith("_"):
             continue
         n = f[:-4]
         if n not in out:
-            out[n] = Template(n, os.path.join(tpl_dir, f), threshold=0.88)
+            _add(n, os.path.join(tpl_dir, f), 0.88)
     if missing:
         log.warning("config names %d template(s) with no file: %s",
                     len(missing), ", ".join(missing))
-    log.info("loaded %d templates", len(out))
+    if swapped:
+        # SAY SO. A silently substituted template is indistinguishable from a
+        # mis-cut one when a match later goes wrong, and this project has
+        # already paid for beliefs about page state that were never printed.
+        log.info("loaded %d templates (%d recut for %s: %s)",
+                 len(out), len(swapped), _RENDERER, ", ".join(sorted(swapped)))
+    else:
+        log.info("loaded %d templates%s", len(out),
+                 f" (no {_RENDERER} variants)" if _RENDERER else "")
     return out

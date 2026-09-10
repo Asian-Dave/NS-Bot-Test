@@ -116,6 +116,25 @@ VIEWPORTS = [
 ]
 VIEWPORT_PATH = "run/viewport.json"
 
+# THE GAME'S OWN RENDER SETTING. These are the values the SITE uses, not
+# Ruffle's full backend list: its emulator page reads `localStorage.renderMode`
+# on every load and defaults to `wgpu-webgl` on desktop (`webgl` on iOS).
+#
+# Offered because the operator reports wgpu/WebGL is the lightest but shows
+# graphical glitches, so switching and comparing is the prerequisite for
+# chasing those. Labels say what each one costs, since that is why anyone
+# picks one.
+#
+# NOTHING IS CACHED ON OUR SIDE. The site stores and reuses the choice itself,
+# so a second copy here would be a stale duplicate of the truth - a mistake
+# this project has already made with cached page state.
+RENDERERS = [
+    {"key": "wgpu-webgl", "label": "wgpu/WebGL (default)"},
+    {"key": "webgl",      "label": "WebGL"},
+    {"key": "webgpu",     "label": "WebGPU"},
+    {"key": "canvas",     "label": "Canvas2D (slow)"},
+]
+
 # The panel's task list comes from the registry, so a task is declared in
 # exactly one place - see engine/tasks.py. It used to be declared here AND
 # handled in two separate branches of `step`.
@@ -245,6 +264,10 @@ class Runner:
         self._last_beat = 0.0
         self.viewport = _read_json(VIEWPORT_PATH, {}).get(
             "key", VIEWPORTS[0]["key"])
+        # Read from the game, never remembered here. The site is the single
+        # source of truth for these.
+        self._game = {}          # {settings, servers, selected_server, ...}
+        self._renderer_live = None
         # Every capture is both evidence the bot is alive AND our chance to read
         # the operator's buttons - see `on_capture`.
         self.cap.on_activity = self.on_capture
@@ -297,6 +320,103 @@ class Runner:
         s = int(time.time() - self.t0)
         return f"{s//3600}h {s%3600//60}m" if s >= 3600 else f"{s//60}m {s%60}s"
 
+    def _refresh_renderer_live(self):
+        """Read which context Ruffle actually got, for the panel and the log.
+
+        Refreshed only when it can have CHANGED - at startup and after a
+        switch - rather than on every push. It is a CDP round trip and the
+        renderer cannot change while the document stays put.
+        """
+        try:
+            info = browser.renderer_info(self.cdp)
+        except Exception:
+            info = {}
+        self._renderer_live = info.get("live")
+        return info
+
+    def _refresh_game_settings(self):
+        """Re-read the game's own settings and server list from the page."""
+        self._game = browser.read_game_settings(self.cdp) or {}
+        return self._game
+
+    def _apply_game_setting(self, key, value, label):
+        """Write one of the game's settings and reload so it takes effect.
+
+        The write is VERIFIED by reading the key back, and the reload is what
+        makes the site pick it up - it reads these on every load. Anything less
+        than a verified write plus a reload is how the previous attempt at this
+        ended up offering a switch that silently did nothing.
+        """
+        if not browser.write_game_setting(self.cdp, key, value):
+            self.log.error("could not store %s=%s - the setting did NOT change",
+                           key, value)
+            return False
+        self.log.info("stored %s=%s; reloading so the game picks it up",
+                      key, value)
+        self.mode = "stopped"
+        _write_control("stop")
+        self.relog()
+        # A different backend or server redraws everything, so a cached
+        # geometry hint or drift measurement describes the old pixels.
+        self.cap._off_at = 0.0
+        self.focus_aligned = False
+        self._refresh_game_settings()
+        info = self._refresh_renderer_live()
+        msg, warn = browser.describe_renderer(info)
+        (self.log.warning if warn else self.log.info)("%s", msg)
+        # A NEW BACKEND MAY NEED DIFFERENT CROPS, so swap them here too and not
+        # only at startup. Without this, switching the renderer from the panel
+        # left the process matching the previous backend's templates - which is
+        # how "the graphics changed and the bot stopped recognising things"
+        # happens with nothing in the log to explain it.
+        _reload_templates_for_renderer(info, self.tpls, self.cfg, self.log)
+        got = (self._game.get("settings") or {}).get(key)
+        if str(got) != str(value):
+            self.log.warning("%s reads back as %s after the reload, not %s",
+                             key, got, value)
+        return True
+
+    def ensure_renderer_templates(self):
+        """Load the live backend's templates once the game exists.
+
+        THE COLD START HAD NO RENDERER TO READ. `main` asks for the backend at
+        startup, but a cold SWF takes 25-30 s to load, so on a fresh launch
+        there is no `ruffle-player` yet and the probe returns nothing:
+
+            renderer: no canvas context yet (no ruffle-player)
+            renderer unknown, so the default templates stand
+
+        Nothing re-asked. So a session that started before the game finished
+        loading ran on the WRONG template set for its entire life - and on
+        webgl that means the farm cannot leave the village, which is the exact
+        failure the variants exist to fix. It only came right in practice
+        because the operator happened to switch the renderer by hand, which
+        reloads and re-reads.
+
+        This is one cheap CDP evaluate per cycle and it stops asking the moment
+        it gets an answer, so the steady-state cost is nothing. It deliberately
+        does NOT re-ask once known: the renderer cannot change while the
+        document stays put, and `_apply_game_setting` already handles the case
+        where it does.
+        """
+        if getattr(self, "_renderer_templates_for", None):
+            return
+        try:
+            info = browser.renderer_info(self.cdp)
+        except (OSError, CDPError) as e:
+            raise Disconnected(str(e))
+        except Exception:
+            return
+        want = (info or {}).get("requested")
+        if not want:
+            return                      # still loading; ask again next cycle
+        self._renderer_templates_for = want
+        self._renderer_live = info.get("live")
+        msg, warn = browser.describe_renderer(info)
+        (self.log.warning if warn else self.log.info)(
+            "the game is up - %s", msg)
+        _reload_templates_for_renderer(info, self.tpls, self.cfg, self.log)
+
     def _refresh_no_click_zone(self):
         """Re-read where the panel actually is, every cycle.
 
@@ -338,6 +458,12 @@ class Runner:
                 "skills": self.skills, "skill_slots": SKILL_SLOTS,
                 "grades": GRADES, "grade": self.grade,
                 "viewports": VIEWPORTS, "viewport": self.viewport,
+                "renderers": RENDERERS,
+                "renderer": (self._game.get("settings") or {}).get("renderMode")
+                            or self._game.get("default_render"),
+                "renderer_live": self._renderer_live,
+                "servers": self._game.get("servers") or [],
+                "server": self._game.get("selected_server"),
                 "viewport_label": next(
                     (v["label"] for v in VIEWPORTS if v["key"] == self.viewport),
                     self.viewport or ""),
@@ -478,6 +604,41 @@ class Runner:
                                   self.task, was)
                 else:
                     self.log.info("operator: task -> %s", self.task)
+        elif c == "renderer":
+            rd = next((r for r in RENDERERS if r["key"] == cmd.get("arg")), None)
+            if rd is None:
+                return
+            # The dock confirms before sending, because this reloads the game
+            # and returns to character select - same as the window size.
+            self.log.info("operator: renderer -> %s", rd["label"])
+            try:
+                self._apply_game_setting("renderMode", rd["key"], rd["label"])
+            except (OSError, CDPError) as e:
+                raise Disconnected(str(e))
+            except Exception as e:
+                self.log.error("could not apply the renderer: %s", e)
+        elif c == "server":
+            try:
+                idx = int(cmd.get("arg"))
+            except (TypeError, ValueError):
+                return
+            servers = self._game.get("servers") or []
+            sv = next((s for s in servers if s.get("index") == idx), None)
+            if sv is None:
+                self.log.info("no server %s in the game's own list", idx)
+                return
+            # A SHARPER WARNING THAN THE OTHERS, and the dock says so too. The
+            # renderer only changes how pixels are drawn; this points the
+            # client at a different game host, and whether that is the same
+            # world is not something this bot can determine from here.
+            self.log.info("operator: server -> %s (index %d) - this reconnects "
+                          "to a different game host", sv.get("name"), idx)
+            try:
+                self._apply_game_setting("ns_server_index", idx, sv.get("name"))
+            except (OSError, CDPError) as e:
+                raise Disconnected(str(e))
+            except Exception as e:
+                self.log.error("could not apply the server: %s", e)
         elif c == "viewport":
             vp = next((v for v in VIEWPORTS if v["key"] == cmd.get("arg")), None)
             if vp is None:
@@ -906,6 +1067,13 @@ class Runner:
 
         gray = cv2.cvtColor(self.cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
         out, info = self.resumer.advance(gray)
+        # THE LADDER'S OWN VERDICT, TAKEN BEFORE ANYTHING RELABELS IT.
+        #
+        # `info["step"]` is "unknown" exactly when no rung matched, and that is
+        # the only honest input to the unknown-streak guard below. It has to be
+        # read HERE because `_name_screen()` overwrites `self.state` a few
+        # lines down with a diagnostic label - and a label is not progress.
+        ladder_blind = info.get("step") == "unknown"
         self.state = info.get("step", out)
 
         # A LEVEL-UP MOVES THE MISSION CEILING, and nothing else can tell the
@@ -944,7 +1112,26 @@ class Runner:
             # that meant 52 consecutive "no anchor matched" cycles on a screen
             # the ladder could not read - a bot spinning silently is worse than
             # one that stops and says why.
-            if self.state in ("unknown",) or out == "unknown":
+            # COUNT WHAT THE LADDER DID, NOT WHAT WE MANAGED TO CALL IT.
+            #
+            # This guard has now been defeated twice by the same mistake, and
+            # this file's own rule names it: a guard bounded by a counter is
+            # only as good as the event that CLEARS the counter, so clear it on
+            # evidence of progress and never on something merely correlated.
+            #
+            # The previous test was `self.state == "unknown"`, and `self.state`
+            # is overwritten a few lines above by `_name_screen()`, which
+            # deliberately recognises the TP minigame HUDs. So on a hand-seal
+            # board - a screen the ladder cannot climb from - the label came
+            # back "seal_entry", the counter reset to 0 EVERY CYCLE, and the
+            # relog and pause never fired. Measured live: the Resumer's own
+            # `unknown_streak` reached **634** while this counter sat at zero,
+            # about ten minutes of spinning on one screen.
+            #
+            # `ladder_blind` is the Resumer's own answer, captured before the
+            # relabel, so naming a screen for the operator can no longer be
+            # mistaken for making progress on it.
+            if ladder_blind:
                 self.unknown += 1
             else:
                 self.unknown = 0
@@ -1248,6 +1435,35 @@ class Runner:
                 self.focus_aligned = True
             except Exception:
                 pass
+            # SAY WHEN A SCROLL WAS UNDONE.
+            #
+            # The page-side lock snaps the scroll back within a frame, which is
+            # the whole point - but a silent fix teaches nobody anything, and
+            # "sometimes I accidentally scroll and the bot misbehaves" was
+            # exactly the report. Counting the snaps turns an accidental wheel
+            # into a line in the log instead of a mystery drift.
+            #
+            # Only the CHANGE is logged, and only between cycles, because the
+            # count is read from the page and the beat runs several times a
+            # second.
+            try:
+                locked, snaps, y = self.dock.scroll_state()
+                if not locked:
+                    self.dock.scroll_lock(True)
+                    self.log.info("scroll lock re-applied (the page had lost it)")
+                if snaps > getattr(self, "_scroll_snaps", 0):
+                    self.log.info("scroll: %d accidental scroll(s) snapped back "
+                                  "(the game did not move)",
+                                  snaps - getattr(self, "_scroll_snaps", 0))
+                self._scroll_snaps = snaps
+                if y:
+                    self.log.warning("scroll: the page is at y=%d despite the "
+                                     "lock - geometry may be off by %d captured "
+                                     "px", y, y * 2)
+            except (OSError, CDPError) as e:
+                raise Disconnected(str(e))
+            except Exception:
+                pass
             return
         try:
             if not self.dock.game_ready():
@@ -1359,6 +1575,7 @@ class Runner:
                     break
                 self.ensure_dock()
                 self.ensure_focus()
+                self.ensure_renderer_templates()
                 self.pump()
                 if self.mode == "running":
                     try:
@@ -1407,6 +1624,35 @@ class Runner:
         self.log.info("quit")
 
 
+def _reload_templates_for_renderer(info, tpls, cfg, log):
+    """Point `perceive` at the live backend and refresh `tpls` IN PLACE.
+
+    The backend name comes from `loadedConfig` (`info["requested"]`), never
+    from the canvas context type - both `wgpu-webgl` and `webgl` draw through
+    WebGL2, so the context cannot tell them apart, and a log line that trusted
+    it once reported our own override back as fact.
+
+    `tpls` is MUTATED rather than replaced: the same dict was already handed to
+    `attach`, the Capture, the Actor and the Runner, so rebinding a local name
+    would leave every one of them holding the old set. One template space, or
+    none.
+
+    Returns the backend name, or None when it could not be read - in which
+    case the default crops stand, which is exactly today's behaviour.
+    """
+    import perceive as _p
+    want = (info or {}).get("requested")
+    if not want:
+        log.info("renderer unknown, so the default templates stand")
+        return None
+    if _p.set_renderer(want) is None:
+        return None
+    fresh = load_templates(cfg, log)
+    tpls.clear()
+    tpls.update(fresh)
+    return want
+
+
 def _read_json(rel, default):
     try:
         with open(os.path.join(ROOT, rel)) as f:
@@ -1433,10 +1679,84 @@ def _write_skills(order):
     _write_json(SKILLS_PATH, order)
 
 
-def _proc_cmd(pid):
-    """The command line of `pid`, or "" if it cannot be read."""
+def _alive(pid):
+    """Is `pid` a live process? NON-DESTRUCTIVE on every platform.
+
+    **`os.kill(pid, 0)` IS NOT A PROBE ON WINDOWS - IT IS A KILL.** CPython's
+    `os.kill` only sends a real signal for `CTRL_C_EVENT` and
+    `CTRL_BREAK_EVENT`; for anything else it calls
+    `TerminateProcess(handle, sig)`. So the POSIX idiom `os.kill(pid, 0)`
+    terminates the target with exit code 0 there.
+
+    That was not theoretical. `_respawn` releases the pid lock by asking
+    `_lock_holder(lock) == os.getpid()` - which probed OUR OWN pid - so on
+    Windows pressing Stop made the process kill itself before it could spawn
+    its replacement. Reported exactly as observed: "when I clicked stop it did
+    not immediately reconnect the panel and just died."
+
+    Windows has no zombies, so a handle that signals means the process is
+    finished, and `WaitForSingleObject(h, 0)` answers liveness directly:
+
+        WAIT_TIMEOUT  (0x102)  still running
+        WAIT_OBJECT_0 (0x000)  exited, handle merely not yet closed
+
+    `SYNCHRONIZE` is the least access right that permits the wait, so this
+    cannot modify the target even by accident.
+    """
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+        except Exception:
+            return True                   # unknown: assume alive, never kill
     try:
-        import subprocess
+        import ctypes
+        SYNCHRONIZE, WAIT_TIMEOUT = 0x00100000, 0x00000102
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not h:
+            return False                  # no such process (or already gone)
+        try:
+            return k.WaitForSingleObject(h, 0) == WAIT_TIMEOUT
+        finally:
+            k.CloseHandle(h)
+    except Exception:
+        # Cannot tell. Say ALIVE: a false "alive" costs a refused launch the
+        # operator can resolve, while a false "dead" lets two bots click one
+        # game - which this file records happening eight instances over.
+        return True
+
+
+def _proc_cmd(pid):
+    """The command line of `pid`, or "" if it cannot be read.
+
+    `ps` is POSIX-only, so on Windows this returned "" for every pid - and
+    `_lock_holder` reads an unreadable command line as "not the holder we
+    recorded" and DROPS THE LOCK. The one guard against two bots clicking one
+    game was therefore inert on Windows, every single launch.
+    """
+    import subprocess
+    if os.name == "nt":
+        # PowerShell first: `wmic` is deprecated and absent on recent Windows.
+        for argv in (
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\")"
+             f".CommandLine"],
+            ["wmic", "process", "where", f"processid={int(pid)}",
+             "get", "commandline", "/value"],
+        ):
+            try:
+                out = subprocess.run(argv, capture_output=True, text=True,
+                                     timeout=8).stdout or ""
+            except Exception:
+                continue
+            out = out.replace("CommandLine=", "").strip()
+            if out:
+                return out
+        return ""
+    try:
         out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=3)
         return (out.stdout or "").strip()
@@ -1467,9 +1787,7 @@ def _lock_holder(path, marker="app.py"):
             pid, saved = 0, ""
     if not pid:
         return None
-    try:
-        os.kill(pid, 0)                       # raises unless it is alive
-    except (ProcessLookupError, PermissionError, OSError):
+    if not _alive(pid):
         _drop_lock(path)
         return None
     cmd = _proc_cmd(pid)
@@ -1516,14 +1834,15 @@ def _dead(pid):
     This is the same trap this project already recorded for the pid lock: a
     bare pid proves something exists, never that it is alive and ours.
     """
-    try:
-        os.kill(pid, 0)
-    except OSError:
+    if not _alive(pid):
         return True                       # no such process
-    except Exception:
+    if os.name == "nt":
+        # `_alive` already distinguishes finished from running on Windows -
+        # there are no zombies there - and shelling out to `ps` would only
+        # raise FileNotFoundError, be swallowed, and report "not dead" for
+        # ever, so every wait burned its full timeout.
         return False
-    # It exists. A zombie is finished, so ask the OS for its state. No `ps` on
-    # Windows, where a finished process's handle simply goes away instead.
+    # It exists. A zombie is finished, so ask the OS for its state.
     try:
         out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=5).stdout
@@ -1688,7 +2007,48 @@ def main():
         log.info("game %s, dock %s", geo.get("game"), geo.get("dock"))
         log.info("dock is a no-click zone for the bot: %s", dock.dock_rect())
 
+    # SAY WHICH RENDERER IS LIVE, every launch.
+    #
+    # Ruffle chooses one at startup and never announces it, and a fall back to
+    # canvas2d is documented in docs/BENCHMARK.md as SILENT. Every template and
+    # colour threshold in this project was calibrated against a GL backend, so
+    # a switch changes the pixels under a perception layer that cannot tell -
+    # and the symptom is "the bot stopped recognising things" with nothing in
+    # the log to explain it. One line at startup turns that into a fact.
+    _info = browser.renderer_info(c)
+    _msg, _warn = browser.describe_renderer(_info)
+    (log.warning if _warn else log.info)("%s", _msg)
+
+    # AND LOAD THAT BACKEND'S OWN TEMPLATES.
+    #
+    # Not every crop survives a backend change: measured live on one screen,
+    # `mission_room_entry` reads 0.997 on wgpu-webgl and 0.531 on webgl, which
+    # stopped the farm leaving the village entirely. `perceive.set_renderer`
+    # makes `tpl/<renderer>/` variants win for the templates that need one.
+    #
+    # The set is refreshed IN PLACE rather than rebound, because `tpls` was
+    # already handed to `attach` and is shared by reference - rebinding here
+    # would leave the capture and actor holding the pre-renderer set, which is
+    # precisely the "half-applied correction" this project has been burned by.
+    _startup_renderer = _reload_templates_for_renderer(_info, tpls, cfg, log)
+
     r = Runner(c, cap, actor, tpls, cfg, log, controls, dock, port=a.port)
+    # If the game was not up yet there is nothing to key on, so the loop keeps
+    # asking (see `Runner.ensure_renderer_templates`). Recording it here is
+    # what stops it asking once the answer is in.
+    r._renderer_templates_for = _startup_renderer
+
+    # READ THE GAME'S OWN SETTINGS. The site stores and reuses these itself,
+    # so there is nothing for us to re-apply at startup - only to report.
+    r._refresh_game_settings()
+    r._refresh_renderer_live()
+    _st = (r._game.get("settings") or {})
+    log.info("game settings: renderMode=%s quality=%s server=%s (of %d)",
+             _st.get("renderMode") or f"unset -> {r._game.get('default_render')}",
+             _st.get("gameQuality") or "unset -> high",
+             _st.get("ns_server_index") or "unset -> 0",
+             len(r._game.get("servers") or []))
+
     try:
         r.loop()
     except KeyboardInterrupt:

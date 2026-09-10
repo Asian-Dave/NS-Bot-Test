@@ -13,7 +13,10 @@ import inspect
 import logging
 import os
 import re
+import platform
+import random
 import sys
+import textwrap
 import time
 
 import cv2
@@ -919,44 +922,69 @@ def test_kekkai_digits():
     print("\n[14] kekkai feedback digits")
     import kekkai_play as kp
 
+    # THE MASK CHANGED, AND SO DID WHAT COUNTS AS AN EXEMPLAR.
+    #
+    # `digit_mask` used to threshold BRIGHT pixels, because on wgpu the glyph is
+    # a dark digit with a WHITE OUTLINE. webgl draws no outline - the same
+    # missing text stroke that broke seven templates - so on webgl the bright
+    # mask collapsed: the green disc's "0" vanished (bright fraction 0.08) and
+    # the gold disc's "1" became a dark HOLE in a white disc (0.375). The
+    # kekkai stopped after guess 1 every time.
+    #
+    # It now keys on the DARK INK, which is dark in both renderings, inside a
+    # disc-shaped window so the parchment and the disc rim are excluded.
     lib = kp.load_exemplars()
     check(bool(lib), "digit exemplars load")
-    check(set(lib) >= {0, 1, 2},
-          f"library covers 0, 1 and 2 (has {sorted(lib)})")
     check(all(set(np.unique(i)) <= {0, 255} for v in lib.values() for i in v),
-          "exemplars are binarised the same way the live patch is")
+          "exemplars are stored as masks, exactly as digit_mask produces them")
 
     # Tight-cropping must actually shrink the glyph, or it is doing nothing.
     any_trimmed = any(kp.tight_glyph(i).shape != i.shape
                       for v in lib.values() for i in v)
     check(any_trimmed, "tight_glyph trims the exemplar below the patch size")
 
-    # Every exemplar must classify as its own digit against the whole library,
-    # comfortably above the gate.
-    d = os.path.join(ROOT, "ref/auto/tp/digits")
-    worst = 1.0
-    for f in sorted(glob.glob(os.path.join(d, "*.png"))):
-        base = os.path.basename(f)
-        head = os.path.splitext(base)[0].split("_")[0]
-        if not head.isdigit():
-            continue
-        want = int(head)
-        g = cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2GRAY)
-        patch = cv2.threshold(g, 200, 255, cv2.THRESH_BINARY)[1]
-        best, got = 0.0, None
-        for val, imgs in lib.items():
-            for img in imgs:
-                t = kp.tight_glyph(img)
-                if t.shape[0] > patch.shape[0] or t.shape[1] > patch.shape[1]:
-                    continue
-                m = float(cv2.minMaxLoc(
-                    cv2.matchTemplate(patch, t, cv2.TM_CCOEFF_NORMED))[1])
-                if m > best:
-                    best, got = m, val
-        worst = min(worst, best)
-        check(got == want and best >= 0.80,
-              f"{base} reads as {want} ({got} @ {best:.3f})")
-    check(worst >= 0.95, f"weakest self-match across the library {worst:.3f}")
+    # --- THE INK LIBRARY IS SELF-CONSISTENT -----------------------------
+    frame = os.path.join(ROOT, "ref/auto/tp/digits/UNREAD_frame_1788876295.png")
+    if os.path.exists(frame):
+        f14 = cv2.imread(frame)
+        # Read off that saved panel by eye and overlaid to confirm placement:
+        # the green disc shows 0 and the gold disc shows 1.
+        for want, xy in ((0, (1997, 292)), (1, (2083, 292))):
+            got, conf = kp.read_digit(f14, xy, lib)
+            check(got == want and conf >= 0.80,
+                  f"the live webgl {'green' if want == 0 else 'gold'} disc "
+                  f"reads {want} (got {got} @ {conf:.3f})")
+
+        # --- AN UNSEEN DIGIT IS REFUSED, NOT MIS-ASSIGNED ---------------
+        #
+        # The ink library is deliberately incomplete - only the two digits that
+        # could be labelled with certainty from a saved panel - so the gate has
+        # to reject the rest rather than round them to the nearest exemplar. A
+        # wrong counter corrupts the solver's model silently.
+        for true, xy in ((0, (1997, 292)), (1, (2083, 292))):
+            without = {k: v for k, v in lib.items() if k != true}
+            if not without:
+                continue
+            got, conf = kp.read_digit(f14, xy, without)
+            check(got is None,
+                  f"with only {sorted(without)} available, a {true} is REFUSED "
+                  f"(got {got} @ {conf:.3f})")
+
+    # --- THE OUTLINE SET IS NOT LOADED, AND MUST NOT BE MERGED IN --------
+    #
+    # Measured: scored against ink masks of a known 0 and 1, every one of the
+    # sixteen outline exemplars sat at 0.33..0.63 distance and the ink "1"
+    # matched `2.png` best - a wrong answer. An outline and a silhouette of the
+    # same glyph are different shapes. They live on in `digits/` as the record
+    # of what wgpu draws; loading them would quietly reintroduce that.
+    check("digits_ink" in kp.INK_DIR,
+          f"exemplars come from a separate ink directory ({kp.INK_DIR})")
+    src14 = inspect.getsource(kp.load_exemplars)
+    check("INK_DIR" in src14 and '"ref/auto/tp/digits/*.png"' not in src14,
+          "load_exemplars reads the ink directory, not the outline one")
+    check("THRESH_BINARY" not in src14,
+          "and does NOT re-binarise - a mask re-thresholded is a mask no "
+          "longer comparable to the live one")
 
     # An unreadable counter must return None, never a silent zero.
     blank = np.zeros((68, 68), np.uint8)
@@ -2976,7 +3004,8 @@ def test_tp_pass_is_bounded_by_the_list_not_by_a_count():
                 for i in range(8)]
         pending = list(rows)
 
-        def pick(actor, cap, lg, skip=(), max_pages=3, done=None):
+        def pick(actor, cap, lg, skip=(), max_pages=3, done=None,
+                 label="TP"):
             for r in list(pending):
                 if any(tp_mod.same_row(r[2], sk) for sk in skip):
                     continue
@@ -3767,18 +3796,54 @@ def test_a_greyed_skill_is_never_clicked():
 
     # S2 was the only coloured tile; S1, S3 and S4 were grey with 7, 22 and 10
     # printed on them.
+    #
+    # THE EXPECTATION BELONGS TO THE FRAMES IT WAS MEASURED ON, not to whatever
+    # the glob happens to match. `_keep_failed_frame` writes new refusal frames
+    # during live play, and once the operator switched to webgl it harvested
+    # six more - so this loop started asserting one battle's slot states about
+    # a different battle on a different renderer, and failed. A fixture set
+    # that GROWS at runtime cannot carry a hardcoded expectation.
     expect = {"S1": True, "S2": False, "S3": True, "S4": True}
     centres = {"S1": 1232, "S2": 1340, "S3": 1445, "S4": 1552}
+    CALIBRATED = ("cooldown_msg_S1_1788358748.png",
+                  "cooldown_msg_S3_1788358754.png")
+    seen = 0
     for path in frames:
+        if os.path.basename(path) not in CALIBRATED:
+            continue
         img = cv2.imread(path)
         if img is None:
             continue
+        seen += 1
         for slot, want in expect.items():
-            got = combat.slot_cooling(img, (centres[slot], 964))
+            got = combat.slot_cooling(img, (centres[slot], 964),
+                                      renderer="wgpu-webgl")
             check(got is want,
                   f"{os.path.basename(path)[:22]} {slot}: "
                   f"{'cooling' if got else 'ready'} (wanted "
                   f"{'cooling' if want else 'ready'})")
+    check(seen == len(CALIBRATED),
+          f"both calibrated wgpu frames are present ({seen}/{len(CALIBRATED)})")
+
+    # AND AN UNCALIBRATED BACKEND MUST SAY UNKNOWN, NOT GUESS.
+    #
+    # Measured on the webgl refusal frames, frac(sat > 60) inside the tile:
+    #
+    #     wgpu    cooling 0.000        ready 0.905      cleanly bimodal
+    #     webgl   0.397, 0.748         0.865, 0.904     continuous
+    #
+    # With the wgpu gate applied, ALL FOUR webgl tiles read READY - including
+    # the slot that had just visibly refused - so the bot clicks a cooling
+    # skill and pays a ~6 s resolve timeout, twice a turn. That is a confident
+    # wrong answer where this project's rule is to fail safe to unknown.
+    img = cv2.imread(frames[0])
+    for slot, cx in centres.items():
+        check(combat.slot_cooling(img, (cx, 964), renderer="webgl") is None,
+              f"webgl is uncalibrated, so {slot} reads UNKNOWN rather than ready")
+    check(combat.cooling_gate("wgpu-webgl") == combat.COOLING_FRAC,
+          "the calibrated backend keeps its measured gate")
+    check(combat.cooling_gate(None) == combat.COOLING_FRAC,
+          "and no renderer at all keeps the historical behaviour exactly")
 
     # FAIL SAFE TO UNKNOWN, never to a decision.
     img = cv2.imread(frames[0])
@@ -4000,7 +4065,8 @@ def test_a_completed_tp_row_reflows_and_must_not_poison_its_slot():
     missions = [f"m{i}" for i in range(5)]
     done_names = []
 
-    def fake_pick(actor, cap, log, skip=(), max_pages=3, done=None):
+    def fake_pick(actor, cap, log, skip=(), max_pages=3, done=None,
+                  label="TP"):
         remaining = [m for m in missions if m not in done_names]
         for page in range(2):
             for i, name in enumerate(remaining[page * 3:(page + 1) * 3]):
@@ -4442,6 +4508,1365 @@ def test_the_go_badge_blinks_so_its_position_is_remembered():
           or "keeping our heading" in src[i_reach:i_reach + 600],
           "and at that range it keeps the heading instead of turning back")
 
+
+def test_the_exam_rune_puzzle_needs_no_new_machinery():
+    """Porting "the exams" turned out to be almost nothing, and that is the point.
+
+    The reference bot solved this puzzle for the Jounin and Sage exams and never
+    for TP - the exact opposite of us. Porting it needed no new solver because
+    every piece of the path is already context-free:
+
+      * `minigame.classify` reads the family OFF THE SCREEN, not from a label
+      * `kekkai_play` contains no TP assumptions
+      * `hunt_and_solve` COUNTS the seal's nodes and uses that as the code
+        length, which is the whole of the difference between an exam and TP
+      * `kekkai.candidates` is generic in the length
+
+    What is NOT ported is the navigation to reach an exam, and that cannot be
+    written without seeing the screens. The task therefore plays a puzzle from
+    wherever the operator has got to, and saves the frame when it finds none.
+    """
+    print("\nthe exam rune puzzle needs no new machinery")
+    import random
+    import kekkai as K
+    import tasks as tasks_mod
+    import minigame as mg
+    import kekkai_play as kp
+
+    # --- the solver is generic over the exam's code lengths ---------------
+    # Their bot keyed four coordinate tables 2..5; TP only ever showed 3 and 5,
+    # so 2 and 4 had never been exercised on this side at all.
+    random.seed(7)
+    for length, want in ((2, None), (3, 24), (4, 12), (5, 8)):
+        pool = K.candidates(length)
+        check(len(pool) == 6 ** length,
+              f"length {length} has {6 ** length} candidates ({len(pool)})")
+        secrets = pool if want is None else random.sample(pool, want)
+        unsolved = []
+        for secret in secrets:
+            hist = []
+            for _ in range(14):
+                g = K.next_guess(length, hist)
+                if g is None:
+                    break
+                cp, wp = K.score(g, secret)
+                hist.append((g, cp, wp))
+                if cp == length:
+                    break
+            else:
+                unsolved.append(secret)
+                continue
+            if not hist or hist[-1][1] != length:
+                unsolved.append(secret)
+        check(not unsolved,
+              f"every length-{length} secret solves ({len(secrets)} tried, "
+              f"{len(unsolved)} failed)")
+
+    # --- the code length comes from the SEAL, not from a default ----------
+    # A 3-node triangle is a 3-rune code and a 5-node pentagon is 5; counting
+    # after opening the puzzle returns nothing and silently falls back to the
+    # default, which once had a 5-node seal solved as a 3-rune code.
+    src = inspect.getsource(kp.hunt_and_solve)
+    check("count_nodes" in src, "the node count is read from the seal")
+    i = src.find("count_nodes")
+    window = src[i:i + 400]
+    check("use_len" in window or "nodes if nodes" in window,
+          "and it OVERRIDES the default length rather than being logged only")
+    check("2 <=" in window,
+          "with a sanity range, so a miscount cannot pick an absurd length")
+
+    # --- nothing in the path assumes TP ----------------------------------
+    for mod in (kp, mg):
+        body = inspect.getsource(mod)
+        for marker in ("tp_training_row", "special_tab", "TP Training"):
+            check(marker not in body,
+                  f"{mod.__name__} does not assume TP ({marker})")
+
+    # --- the task plays what is there and teaches what is not -------------
+    t = tasks_mod.get("exam_kekkai")
+    check(t.key == "exam_kekkai", "the exam task is registered")
+    check(t.oneshot, "it is a one-shot - an exam is not a farm loop")
+    check(not t.needs_lobby,
+          "and it does NOT demand the lobby: the resume ladder cannot name an "
+          "exam screen, so requiring it would make the task unusable")
+    pf = inspect.getsource(type(t).preflight)
+    check("classify" in pf, "it identifies the screen rather than assuming")
+    check("_save_for_teaching" in pf,
+          "and saves the frame when there is no puzzle, which is how the "
+          "missing navigation eventually gets taught")
+    check("KEKKAI" in pf, "a recognised rune puzzle is played")
+
+
+def test_the_game_settings_are_chosen_from_the_panel():
+    """Renderer, and server, via the settings the SITE already reads.
+
+    THREE ATTEMPTS AIMED AT THE WRONG LAYER, and the record matters because the
+    wasted work all looked plausible:
+
+      * patching `RufflePlayer.config.preferredRenderer` - lost, because a
+        per-load config overrides the global one
+      * wrapping the element's `load(options)` - did nothing, because the site
+        calls `player.load(swfUrl)` with a bare STRING
+      * that prototype wrap never applied at all
+
+    Measured throughout: the global said "webgl" while `loadedConfig` said
+    "wgpu-webgl", so asking for `canvas` still produced a WebGL2 context and
+    the operator correctly reported that nothing had changed.
+
+    The site has a gear icon for all of it - which FOCUS MODE HIDES, which is
+    why it was never seen - and its emulator page reads three localStorage keys
+    on every load. Writing one and reloading is the whole mechanism. Verified
+    live: renderMode=canvas gave `loadedConfig.preferredRenderer == "canvas"`
+    and a `2d` context, where every previous attempt stayed on webgl2.
+    """
+    print("\nthe game settings are chosen from the panel")
+    import app as app_mod
+    import browser as br
+    import dock as dock_mod
+
+    # --- the keys are the site's, and junk is refused --------------------
+    for k in ("renderMode", "gameQuality", "ns_server_index"):
+        check(k in br.GAME_SETTING_KEYS, f"{k} is a known game setting")
+    try:
+        br.write_game_setting(None, "notAKey", "x")
+        check(False, "an unknown setting key is refused")
+    except ValueError:
+        check(True, "an unknown setting key is refused")
+
+    # --- the offered renderers are the site's values ---------------------
+    keys = [r["key"] for r in app_mod.RENDERERS]
+    check("wgpu-webgl" in keys and "webgl" in keys and "canvas" in keys,
+          f"the site's own render values are offered ({keys})")
+    check(any("default" in r["label"] for r in app_mod.RENDERERS),
+          "and the site's default is labelled as such")
+    check(any("slow" in r["label"].lower() for r in app_mod.RENDERERS),
+          "canvas2d is labelled slow, which is why nobody would pick it blind")
+
+    # --- NOTHING is cached on our side ----------------------------------
+    # The site stores and reuses these itself; a second copy here would be a
+    # stale duplicate of the truth, which this project has been bitten by.
+    app_src = inspect.getsource(app_mod)
+    check("RENDERER_PATH" not in app_src,
+          "we keep no copy of the renderer choice - the site is the source "
+          "of truth and reads it on every load")
+    check("read_game_settings" in app_src,
+          "the panel shows what the GAME has stored")
+
+    # --- a write must be VERIFIED, not assumed ---------------------------
+    w = inspect.getsource(br.write_game_setting)
+    check("getItem" in w,
+          "the write reads the key back - an unverified write is how the last "
+          "attempt offered a switch that silently did nothing")
+
+    # --- applying reloads, and re-reads afterwards ------------------------
+    ap = inspect.getsource(app_mod.Runner._apply_game_setting)
+    check("relog()" in ap, "applying reloads, which is how the site picks it up")
+    check("_off_at" in ap and "focus_aligned" in ap,
+          "and clears the drift cache, since a different backend or host "
+          "redraws everything the hints describe")
+    check("reads back as" in ap,
+          "and warns if the setting did not survive the reload")
+
+    # --- both commands exist, keyed to the right storage -----------------
+    a = inspect.getsource(app_mod.Runner._apply)
+    for cmd, key in (('c == "renderer"', "renderMode"),
+                     ('c == "server"', "ns_server_index")):
+        i = a.find(cmd)
+        check(i != -1, f"the {cmd} command is handled")
+        check(key in a[i:i + 1400], f"and writes {key}")
+
+    # The server list comes from the GAME, not a hardcoded table that could
+    # drift from whatever the site actually offers.
+    check("_game.get(\"servers\")" in a or '_game.get("servers")' in a,
+          "the server list is read from the game's own array")
+
+    # --- the panel: two-press confirm on both, sharper words for server --
+    d = inspect.getsource(dock_mod)
+    for el in ("v_renderers", "v_rend_warn", "v_servers", "v_srv_warn"):
+        check(el in d, f"the panel has {el}")
+    check('send("renderer"' in d and 'send("server"' in d,
+          "and sends both commands")
+    check("armedRend" in d and "armedSrv" in d,
+          "each with its own two-press confirm")
+    i_srv = d.find("armedSrv = v.index")
+    check("different" in d[i_srv:i_srv + 700].lower(),
+          "and the server warning says it reconnects to a different host - "
+          "not just a graphics change")
+
+
+def test_a_template_is_recut_per_renderer_where_the_backend_differs():
+    """The same SWF does not draw the same pixels on every Ruffle backend.
+
+    Measured live, same session, same screen, minutes apart, only `renderMode`
+    changed:
+
+        mission_room_entry   wgpu-webgl 0.997   webgl 0.531   (gate 0.88)
+        char_slot_level      wgpu-webgl 0.965   webgl 0.677   canvas 0.678
+        character_select     wgpu-webgl 0.865   webgl 0.442   canvas 0.436
+        play_btn             (on Play)  0.878   webgl 0.878   -> variant 1.000
+        result_panel         wgpu       1.000   webgl 0.341
+
+    THE SPLIT IS NOT "LEGACY WEBGL IS BROKEN". webgl and canvas agree with each
+    other to 0.001 and both disagree with wgpu, which draws text WITH its
+    stroke where the other two draw a thinner unstroked face at a different
+    baseline. Every template here was cut against wgpu-webgl, so this project
+    is calibrated against the outlier - and one variant set serves both of the
+    others.
+
+    Under webgl the farm could not leave the village at all: 0.531 sits INSIDE
+    the negative distribution (other anchors read 0.39..0.53 on that frame), so
+    no threshold tuning recovers it.
+    """
+    print("\na template is recut per renderer where the backend differs")
+    import perceive as p
+    import json as _json
+
+    cfg = _json.load(open(os.path.join(ROOT, "Configs/mission.json")))
+
+    class _L:
+        def __init__(self):
+            self.lines = []
+
+        def info(self, m, *a):
+            self.lines.append((m % a) if a else m)
+        warning = error = info
+
+    def _paths(renderer):
+        p.clear_renderer()
+        if renderer:
+            p.set_renderer(renderer)
+        log = _L()
+        t = p.load_templates(cfg, log)
+        return {n: os.path.relpath(x.path, ROOT) for n, x in t.items()}, log.lines
+
+    try:
+        base, base_log = _paths(None)
+
+        # --- an unset or unknown renderer changes NOTHING ------------------
+        for r in (None, "no-such-backend"):
+            got, _ = _paths(r)
+            check(got == base,
+                  f"renderer {r!r}: the default crops stand unchanged")
+
+        # --- the variants that exist win, and only for their own name -----
+        var_dir = os.path.join(ROOT, p.VARIANT_DIR, "webgl")
+        have = sorted(f[:-4] for f in os.listdir(var_dir)
+                      if f.endswith(".png")) if os.path.isdir(var_dir) else []
+        check(bool(have), f"webgl variants exist: {have}")
+        got, lines = _paths("webgl")
+        swapped = sorted(n for n in got if got[n] != base.get(n))
+        check(swapped == have,
+              f"exactly the {len(have)} variant(s) are swapped in, nothing else")
+        check(any("recut for webgl" in l for l in lines),
+              "the log SAYS which templates were substituted")
+
+        # A silently substituted template is indistinguishable from a mis-cut
+        # one when a match later goes wrong.
+        for n in have:
+            check(os.path.join("tpl", "webgl", n + ".png") == got[n],
+                  f"{n} loads from tpl/webgl/")
+
+        # --- the variant DIRECTORY is never a template in its own right ---
+        check("webgl" not in got, "tpl/webgl/ is not itself loaded as a template")
+
+        # --- a typo'd variant filename would silently do nothing ----------
+        for n in have:
+            check(os.path.exists(os.path.join(ROOT, "tpl", f"{n}.png")),
+                  f"variant {n} names a real default template")
+
+        # --- A VARIANT MUST NOT MOVE THE CLICK ----------------------------
+        #
+        # The match CENTRE is what gets clicked, so a variant may only differ
+        # from its default by EQUAL, EVEN padding on both axes - that is what
+        # `recut.py` produces and what keeps the centre put. An asymmetric
+        # recut would shift every click that anchor drives, silently, which is
+        # the half-applied coordinate correction this project already paid for.
+        #
+        # A DETECTOR-ONLY anchor is exempt, because nothing clicks its centre -
+        # but the exemption is VERIFIED against resume.py rather than trusted:
+        # such a rung must name a different `target=` to click.
+        rsrc = open(os.path.join(ROOT, "engine", "resume.py")).read()
+        for n in have:
+            d = cv2.imread(os.path.join(ROOT, "tpl", f"{n}.png"))
+            v = cv2.imread(os.path.join(ROOT, "tpl", "webgl", f"{n}.png"))
+            dw, dh = d.shape[1], d.shape[0]
+            vw, vh = v.shape[1], v.shape[0]
+            gx, gy = vw - dw, vh - dh
+            symmetric = gx == gy and gx >= 0 and gx % 2 == 0
+            if symmetric:
+                check(True, f"{n}: variant is the default plus equal even "
+                            f"padding ({dw}x{dh} -> {vw}x{vh})")
+                continue
+            # Asymmetric: prove the centre is never the click target.
+            step = re.search(r'Step\(\s*"[^"]+"\s*,\s*"' + re.escape(n)
+                             + r'"\s*,\s*"click"\s*,\s*target="([^"]+)"', rsrc)
+            check(step is not None and step.group(1) != n,
+                  f"{n}: asymmetric variant is allowed only because its rung "
+                  f"clicks {step.group(1) if step else 'UNKNOWN'}, not itself")
+    finally:
+        p.clear_renderer()
+
+    # --- EVERY TEMPLATE LOAD PATH MUST HONOUR IT ---------------------------
+    #
+    # This is the mistake that made the whole mechanism inert once already.
+    # `load_templates` was taught to swap crops, the log said "4 recut for
+    # webgl", and the farm still could not enter the Mission Room - because
+    # `farm._tpl` built `Template(name, "tpl/<name>.png")` directly and never
+    # went near `load_templates`. Nine live sites did the same. Measured at the
+    # time: the variant scored 1.000 on ten fresh lobby frames while the
+    # running bot logged "could not reach the grade panel" every lap.
+    #
+    # Asserted by READING THE SOURCE, so a new bare path is caught the moment
+    # it is written rather than the next time a backend changes.
+    bare = re.compile(r'Template\(\s*[^,]+,\s*os\.path\.join\(\s*ROOT\s*,\s*["\']tpl')
+    for mod in ("farm", "minigame", "tp", "cards", "seals", "kekkai_play",
+                "resume", "mission", "battle"):
+        src_path = os.path.join(ROOT, "engine", f"{mod}.py")
+        if not os.path.exists(src_path):
+            continue
+        src = open(src_path).read()
+        check(not bare.search(src),
+              f"{mod}.py builds no Template straight from tpl/ - it goes "
+              f"through perceive.template")
+
+    # And the factory really does apply the variant for each of them.
+    import perceive as p
+    import farm as farm_mod
+    import minigame as mg_mod
+    import tp as tp_mod
+    try:
+        p.set_renderer("webgl")
+        for lbl, t in (("farm", farm_mod._tpl("mission_room_entry")),
+                       ("minigame", mg_mod._tpl("mission_room_entry")),
+                       ("tp", tp_mod._tpl("mission_room_entry"))):
+            check("webgl" in os.path.relpath(t.path, ROOT),
+                  f"{lbl}._tpl returns the webgl variant")
+        # a name with no variant still resolves, and scales still pass through
+        check("webgl" not in os.path.relpath(farm_mod._tpl("grade_tab").path, ROOT),
+              "a template with no variant falls through to the default")
+        t = tp_mod._tpl("mission_start", 0.80, [0.95, 1.0])
+        check(t.scales == [0.95, 1.0], "scales survive the factory")
+    finally:
+        p.clear_renderer()
+
+    # --- THE SUPERVISOR WIRES IT, at startup AND after a switch ------------
+    import app as app_mod
+    src = inspect.getsource(app_mod)
+    check("_reload_templates_for_renderer" in src,
+          "app.py has one place that points perceive at the live backend")
+    check(src.count("_reload_templates_for_renderer(") >= 3,
+          "it is called at startup AND after a renderer switch, not just once")
+    fn = inspect.getsource(app_mod._reload_templates_for_renderer)
+    check('"requested"' in fn or "'requested'" in fn,
+          "the backend name comes from loadedConfig, not the canvas context "
+          "type - both wgpu-webgl and webgl draw through WebGL2")
+    check("tpls.clear()" in fn and "tpls.update(" in fn,
+          "the template set is refreshed IN PLACE, since capture, actor and "
+          "runner all hold the same dict by reference")
+
+    # --- SAFETY: Delete sits beside Play ----------------------------------
+    #
+    # The standing rule is that Play is whitelisted BY TEMPLATE and never by
+    # offset. A recut of `play_btn` therefore has to be checked against the
+    # Delete button explicitly, on a real frame.
+    fixture = os.path.join(ROOT, "ref/auto/renderer/webgl_charsel.png")
+    var = os.path.join(ROOT, "tpl/webgl/play_btn.png")
+    if os.path.exists(fixture) and os.path.exists(var):
+        from perceive import find as _find
+        g = cv2.cvtColor(cv2.imread(fixture), cv2.COLOR_BGR2GRAY)
+        pv = Template("play_btn", var, threshold=0.88)
+        dl = Template("delete_btn", os.path.join(ROOT, "tpl/delete_btn.png"),
+                      threshold=0.88)
+        mp, cp = _find(g, pv)
+        md, cd = _find(g, dl)
+        check(cp >= 0.88, f"the webgl Play variant matches Play ({cp:.3f})")
+        check(mp.center != md.center,
+              f"and its centre {mp.center} is NOT Delete's {md.center}")
+        if mp.center and md.center:
+            gap = abs(mp.center[0] - md.center[0]) + abs(mp.center[1] - md.center[1])
+            check(gap > 200, f"Play and Delete are {gap} px apart")
+        # Scored on Delete's OWN button, the Play variant must stay far below.
+        x, y = md.center
+        sub = g[max(0, y - pv.h // 2):y + pv.h // 2,
+                max(0, x - pv.w // 2):x + pv.w // 2]
+        if sub.shape[0] >= pv.h and sub.shape[1] >= pv.w:
+            _, c = _find(sub, pv)
+            check(c < 0.88 - 0.18,
+                  f"the Play variant does not fire on the Delete button ({c:.3f})")
+
+    # --- THE RECUT TOOL REFUSES A FLAT CROP -------------------------------
+    #
+    # Cutting the same region out of a webgl frame gives self 1.000 and a worst
+    # negative of 0.907 against an 0.88 gate, because stripping the stroked
+    # text out of that plaque leaves smooth pink and a low-variance template
+    # correlates with any large smooth region. The tool must reject that rather
+    # than write it - the same trap as `close_popup_x_large` ("flat 0.547 at
+    # every scale. Bad crop").
+    import recut
+    check(recut.NEG_SLACK >= 0.15,
+          f"negatives must clear the gate by {recut.NEG_SLACK} - calibrated to "
+          f"the 0.37..0.66 margins this project's real anchors achieve")
+    check(recut.MIN_SEPARATION >= 0.30,
+          "and a crop needs real separation, not merely a sub-gate negative")
+    check(0 in recut.PADS,
+          "pad 0 is always reported, so the naive cut's badness is on record")
+    src = inspect.getsource(recut.cmd_cut)
+    check("centre MOVED" in src,
+          "a crop that moves the match centre is rejected outright")
+
+
+def test_an_accidental_scroll_cannot_move_the_game():
+    """The page scroll is REMOVED while the bot runs, not corrected later.
+
+    Every minigame's geometry is absolute, so a displaced game breaks all of
+    them at once - measured previously, scrollY 60 put the game at -236
+    captured px and the memory board's rows measured -237 out, and each
+    subsystem then blamed itself. `__nsbotAlign` did put the scroll back, but
+    it is only called from `ensure_focus` BETWEEN CYCLES, and a mission blocks
+    for minutes, so an accidental scroll stood for the whole of it.
+
+    Verified live: `scrollTo(0,400)` snapped back to 0 and was counted, a real
+    wheel event dispatched through the Input domain moved nothing at all, a
+    five-event flick likewise, and the dock's own log pane still scrolled
+    (0 -> 40).
+    """
+    print("\nan accidental scroll cannot move the game")
+    import dock as dock_mod
+
+    src = inspect.getsource(dock_mod)
+
+    # --- all three layers are present -----------------------------------
+    check("__nsbotScrollLock" in src, "the page owns a scroll lock")
+    check("overflow:hidden !important" in src,
+          "layer 1: the scroll is REMOVED by an !important stylesheet, which "
+          "the site's inline styles cannot undo")
+    check('addEventListener("scroll"' in src,
+          "layer 2: a scroll listener snaps back what still gets through")
+    check('addEventListener("wheel"' in src and "preventDefault" in src,
+          "layer 3: the wheel gesture is stopped before it scrolls")
+    check("passive: false" in src,
+          "the wheel listener is non-passive, or preventDefault is ignored")
+
+    # --- THE DOCK'S OWN LOG PANE MUST STILL SCROLL ----------------------
+    check("inDock" in src,
+          "events inside the dock are exempt - the operator reads that log")
+
+    # --- keys are deliberately left alone -------------------------------
+    check('addEventListener("keydown"' not in src,
+          "keys are NOT blocked: this is a Flash game and the SWF may want "
+          "them, and layer 2 covers a keyboard scroll after the fact")
+
+    # --- IT RIDES WITH FOCUS MODE ---------------------------------------
+    #
+    # With focus ON the game is pinned and any scroll is an accident. With
+    # focus OFF the bot scrolls ON PURPOSE - `Capture.scroll_game` is the
+    # documented fallback for the hidden 119 px band and the resume ladder
+    # alternates it. Locking there would break the one path that needs it.
+    i_focus = src.find("window.__nsbotFocusOn = !!on;")
+    i_lock = src.find("window.__nsbotScrollLock(!!on)")
+    check(i_focus > 0 and i_lock > i_focus,
+          "focus mode applies the lock when it turns on and lifts it when off")
+    import capture as cap_mod
+    sg = inspect.getsource(cap_mod.scroll_game) if hasattr(
+        cap_mod, "scroll_game") else inspect.getsource(cap_mod.Capture.scroll_game)
+    check("focus" in sg.lower(),
+          "and scroll_game already no-ops under focus mode, so the deliberate "
+          "scroll path is unaffected")
+
+    # --- a reload drops the listeners, so align() re-asserts it ---------
+    check("__nsbotScrollLocked" in src and "__nsbotAlign" in src,
+          "align() re-asserts the lock, because a navigation drops the "
+          "injected style and its listeners")
+    ali = src[src.find("window.__nsbotAlign"):]
+    ali = ali[:ali.find("window.__nsbotScrollLock") + 40] if \
+        "__nsbotScrollLock" in ali else ali[:2000]
+    check("__nsbotScrollLock" in ali,
+          "the re-assertion is inside align, which runs every cycle")
+
+    # --- snaps are COUNTED, and the count comes FROM THE PAGE ------------
+    check("__nsbotScrollSnaps" in src,
+          "snaps are counted, so an accidental wheel is loggable rather than "
+          "a mystery drift")
+    check(hasattr(dock_mod.Dock, "scroll_lock")
+          and hasattr(dock_mod.Dock, "scroll_state"),
+          "Python can apply and READ the lock (read, never remember)")
+    st = inspect.getsource(dock_mod.Dock.scroll_state)
+    check("evaluate" in st,
+          "scroll_state asks the page rather than trusting a cached flag")
+
+    import app as app_mod
+    ef = inspect.getsource(app_mod.Runner.ensure_focus)
+    check("scroll_state" in ef and "scroll_lock" in ef,
+          "the runner re-applies the lock if the page has lost it")
+    check("snapped back" in ef,
+          "and says so when a scroll was undone")
+
+
+def test_the_unknown_streak_counts_the_ladder_not_our_label():
+    """A guard is only as good as the event that CLEARS it - fourth instance.
+
+    `Runner.step` drives `Resumer.advance()`, which has no `max_unknown` of its
+    own (only `Resumer.run()` does), so the runner bounds the streak itself.
+    That guard was written after 52 consecutive unrecognised cycles, and it was
+    then defeated by a label:
+
+        self.state = info.get("step", out)          # "unknown" from the ladder
+        ...
+        if self.state == "unknown":
+            self.state = self._name_screen() or "unknown"    # -> "seal_entry"
+        ...
+        if self.state == "unknown": self.unknown += 1 else: self.unknown = 0
+
+    `_name_screen` deliberately recognises the TP minigame HUDs, so on a
+    hand-seal board - a screen the ladder cannot climb from - the label came
+    back non-unknown and the counter RESET EVERY CYCLE. Measured live: the
+    Resumer's own `unknown_streak` reached **634** while the runner's counter
+    sat at zero, roughly ten minutes spinning on one screen with no relog and
+    no pause.
+
+    The fix reads the ladder's own verdict before anything relabels it.
+    """
+    print("\nthe unknown streak counts the ladder, not our label")
+    import app as app_mod
+    import ast
+
+    src = inspect.getsource(app_mod.Runner.step)
+    tree = ast.parse(textwrap.dedent(src))
+
+    # --- the verdict is captured, and BEFORE the relabel -----------------
+    assigns = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Assign)
+               and any(getattr(t, "id", "") == "ladder_blind" for t in n.targets)]
+    names = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", "") == "_name_screen"]
+    reads = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Name)
+             and n.id == "ladder_blind" and isinstance(n.ctx, ast.Load)]
+    check(bool(assigns), "step() captures the ladder's own verdict")
+    check(bool(names), "and still labels the screen for the operator")
+    check(bool(reads), "and the guard reads that verdict")
+    if assigns and names and reads:
+        check(assigns[0] < names[0],
+              "the verdict is taken BEFORE _name_screen can overwrite it")
+        check(reads[0] > names[0],
+              "and used after, so the label cannot be mistaken for progress")
+
+    # --- the defeated test must not come back ---------------------------
+    check('self.state in ("unknown",)' not in src,
+          "the counter no longer keys on self.state, which _name_screen "
+          "overwrites")
+
+    # --- and it is derived from what the Resumer actually reports --------
+    import resume as resume_mod
+    rsrc = inspect.getsource(resume_mod.Resumer.advance)
+    check('"step": "unknown"' in rsrc,
+          'the Resumer reports step="unknown" when no rung matched')
+    check("self.unknown_streak = 0" in inspect.getsource(resume_mod.Resumer),
+          "and resets its own streak when a rung IS recognised")
+
+    # --- the bound still exists at all ----------------------------------
+    check("self.unknown += 1" in src, "a blind cycle still counts")
+    check("relog_after_unknown" in src or "self.max_unknown" in src
+          or "max_unknown" in src,
+          "and the count still drives a relog / pause")
+
+
+def test_the_ss_hints_panel_is_dismissed_by_a_button_below_the_fold():
+    """Two SS families open on a hints panel with NO X, and its only exit is
+    drawn off the bottom of the viewport.
+
+    `open_puzzle` swept three X templates and pressed nothing, so the mission
+    was abandoned as unrecognised and the family could never be learned.
+    Measured on the saved frames, no X-shaped anchor comes close:
+
+        close_popup_x      0.608 / 0.665
+        close_popup_x_menu 0.620 / 0.610
+        close_promo_x      0.466 / 0.454
+        mission_start      0.598 / 0.502
+
+    The exit is a wide green button, and the game is 839 CSS px tall in a 720
+    px viewport, so its bottom 238 captured px are hidden and the button lands
+    there: tops at y=1404 and y=1410 against a frame ending at 1440. Only a
+    30..36 px sliver is on screen, which is why the click aims near the blob's
+    top - the centre of a clipped button is off screen entirely.
+    """
+    print("\nthe SS hints panel is dismissed by a button below the fold")
+    import ss as ss_mod
+
+    # NAMED, NOT GLOBBED. `ss.run_one` writes new frames into this very
+    # directory during live play, so a glob of it cannot carry a hardcoded
+    # expectation - the moment a Lights Out BOARD was saved there, this test
+    # asserted that a board offers a hints button and failed on correct code.
+    # This project already records that trap for the cooldown fixtures.
+    frames = sorted(glob.glob(os.path.join(ROOT, "ref/auto/ss/hints_*.png")))
+    check(len(frames) >= 4, f"named hints frames on disk ({len(frames)})")
+
+    hits = 0
+    for p in frames:
+        im = cv2.imread(p)
+        if im is None:
+            continue
+        xy = ss_mod.hints_button(im)
+        if xy is None:
+            continue
+        hits += 1
+        x, y = xy
+        check(isinstance(x, int) and isinstance(y, int),
+              f"{os.path.basename(p)}: the point is plain ints, not numpy "
+              f"(CDP serialises it)")
+        check(y >= 1400 and y < im.shape[0],
+              f"{os.path.basename(p)}: the click is in the visible sliver "
+              f"(y={y}, frame ends at {im.shape[0]})")
+        check(x < 2680, f"{os.path.basename(p)}: and clear of the dock (x={x})")
+    check(hits == len(frames),
+          f"every saved SS screen offers a button ({hits}/{len(frames)})")
+
+    # --- IT MUST NOT FIRE ANYWHERE ELSE --------------------------------
+    # The same green range catches the puzzle's own artwork at y=1300 (884x43
+    # and 440x101), so a width window alone is not enough - the band floor is
+    # what separates them.
+    others = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer"):
+        others += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    # the puzzle boards themselves have no hints panel on them
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/lights_*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/balance_board*.png"))
+    false_fires = []
+    for p in sorted(others):
+        im = cv2.imread(p)
+        if im is None:
+            continue
+        if ss_mod.hints_button(im) is not None:
+            false_fires.append(os.path.basename(p))
+    check(not false_fires,
+          f"and on none of the {len(others)} other reference frames "
+          f"({false_fires[:3]})")
+
+    # --- the dismissal is actually wired in -----------------------------
+    src = inspect.getsource(ss_mod.open_puzzle)
+    check("hints_button" in src, "open_puzzle consults it")
+    check("close_popup_x" in src,
+          "and still tries the X, which the rune family does have")
+
+
+
+def test_balance_control_is_read_and_solved_as_a_subset_sum():
+    """SS `Balance Control`: two columns, a circle per row that SWAPS its pair.
+
+    A swap moves a value from one column to the other and back, so the grand
+    total is invariant - which FORCES the target to be half of it, and that is
+    what makes the puzzle a subset sum rather than a search:
+
+        d_i = right_i - left_i          pressing row i moves left by d_i
+        want = total // 2 - left_sum    choose S with sum(d_i for i in S) == want
+
+    Measured live, stage 1 of one mission (169 s on the clock):
+
+        17 18  7 12 = 54    5 24 15  2 = 46    target 50   swap {0,2} or {1,3}
+
+    Both of those work, so `solve` returns the SMALLEST set; four rows is
+    sixteen subsets and brute force is the whole algorithm.
+
+    **STAGE 2 HIDES THE SUMS** - they read `??` - so they are COMPUTED from the
+    rows and the printed values are only a cross-check when present. A reader
+    that depended on them stopped dead on the second stage of every mission.
+    """
+    print("\nBalance Control is read and solved as a subset sum")
+    import balance as bal
+
+    # --- the algebra, independent of any pixels -------------------------
+    rows = [(17, 5), (18, 24), (7, 15), (12, 2)]
+    pick = bal.solve(rows, 54, 46)
+    check(pick is not None, "stage 1's real board has a solution")
+    if pick:
+        moved = 54 + sum(rows[i][1] - rows[i][0] for i in pick)
+        check(moved == 50, f"the chosen swaps land on the target ({moved})")
+        check(len(pick) == 2, f"and it is the shortest set ({pick})")
+    check(bal.solve([(1, 1), (1, 1)], 2, 2) == [],
+          "an already balanced board needs no swaps")
+    check(bal.solve([(1, 2)], 1, 2) is None,
+          "an odd total is refused rather than half-solved")
+
+    # exhaustive: any board whose total is even and reachable must be solved
+    import random
+    rnd = random.Random(7)
+    tried = solved = 0
+    for _ in range(400):
+        n = rnd.choice((3, 4, 5))
+        rs = [(rnd.randint(1, 60), rnd.randint(1, 60)) for _ in range(n)]
+        ls, rss = sum(r[0] for r in rs), sum(r[1] for r in rs)
+        want = bal.solve(rs, ls, rss)
+        # brute force the truth independently
+        truth = None
+        for bits in range(1 << n):
+            idx = [i for i in range(n) if bits >> i & 1]
+            if (ls + rss) % 2 == 0 and \
+                    ls + sum(rs[i][1] - rs[i][0] for i in idx) == (ls + rss) // 2:
+                if truth is None or len(idx) < len(truth):
+                    truth = idx
+        tried += 1
+        if (want is None) == (truth is None) and \
+                (want is None or len(want) == len(truth)):
+            solved += 1
+    check(solved == tried,
+          f"400 random boards agree with brute force ({solved}/{tried})")
+
+    # --- reading a real board -------------------------------------------
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/ss/balance_board_stage1.png"))
+    check(f is not None, "the stage-1 fixture is on disk")
+    if f is not None:
+        geom = bal.locate(f)
+        check(geom is not None, f"the board is located ({geom})")
+        board = bal.read_board(f)
+        check(board is not None, "and it reads")
+        if board:
+            got, ls, rs, _g = board
+            check(list(got) == rows, f"the numbers read correctly ({got})")
+            check((ls, rs) == (54, 46), f"and so do the sums ({ls}/{rs})")
+            check(ls + rs == 2 * ((ls + rs) // 2),
+                  "the total is even, so a target exists")
+        # the circle for a row sits between the two columns
+        if geom:
+            cx, _cy = bal.circle_xy(geom, 0, 4)
+            check(geom[0] < cx < geom[1],
+                  f"a circle is between the columns ({cx})")
+
+    # --- IT MUST NOT FIRE ON ANYTHING ELSE ------------------------------
+    # Red text is everywhere in this game, and a size filter alone let 31 of
+    # 94 combat and lobby frames pass as a balance board.
+    others = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer"):
+        others += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/hints_*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/lights_*.png"))
+    fires = [os.path.basename(p) for p in sorted(others)
+             if (im := cv2.imread(p)) is not None
+             and bal.board_present(im) is not None]
+    check(not fires, f"board_present fires on none of {len(others)} other "
+                     f"frames ({fires[:3]})")
+
+    # --- the hidden-sum glyph is a positive reading, not a fallback -----
+    check("?" in bal.exemplars(),
+          "the `??` glyph has an exemplar, so a hidden sum is READ as hidden "
+          "rather than mistaken for an unrecognised digit")
+    have = {d for d in bal.exemplars() if d.isdigit()}
+    check(have == set("0123456789"),
+          f"all ten digits are harvested ({sorted(have)})")
+
+
+def test_lights_out_is_solved_over_gf2_and_the_rule_is_learned():
+    """SS `Sage Sealed Boxes`: a 3x3 Lights Out, cleared in five presses.
+
+    Pressing a sphere toggles a neighbourhood of it and the goal is all-off,
+    which over GF(2) is a 9x9 linear system. The plus rule's matrix is
+    invertible, so every board has exactly one solution - verified here
+    against ALL 512 states rather than a sample.
+
+    The rule is nevertheless LEARNED from play: every press is read before and
+    after, so it reports which cells it toggled and the model corrects itself
+    from moves that were going to be made anyway. Nothing is spent probing,
+    which matters because this project has already lost an SS mission to a
+    diagnostic sweep that ate the budget it was diagnosing.
+
+    Two of the nine cells defeat a centroid, and both were measured:
+
+        a LIT sphere    masks 232x222 against a grey one's 274x274
+        the BOTTOM ROW  is clipped by the viewport, masking 274x196
+
+    so centres come from `left + R` / `top + R`, with R from the whole spheres
+    on that frame.
+    """
+    print("\nLights Out is solved over GF(2) and the rule is learned")
+    import lights as lo
+
+    cols = lo.matrix(lo.PLUS)
+    bad = []
+    for bits in range(1 << lo.CELLS):
+        lit = [bool(bits >> i & 1) for i in range(lo.CELLS)]
+        mv = lo.solve(lit, cols)
+        if mv is None:
+            bad.append(bits)
+            continue
+        acc = 0
+        for j in mv:
+            acc ^= cols[j]
+        if acc != bits:
+            bad.append(bits)
+    check(not bad, f"all 512 board states solve exactly ({len(bad)} wrong)")
+    check(lo.solve([False] * lo.CELLS, cols) == [],
+          "a dark board needs no presses")
+
+    # --- the rule is learned from an observed press ---------------------
+    # A deliberately different rule: the cell plus its diagonal neighbours.
+    cross = ((0, 0), (-1, -1), (-1, 1), (1, -1), (1, 1))
+    truth = lo.matrix(cross)
+    model = lo.matrix(lo.PLUS)
+    before = [False] * lo.CELLS
+    after = [bool(truth[4] >> i & 1) for i in range(lo.CELLS)]
+    changed = lo.learn(model, 4, before, after)
+    check(changed, "an unexpected toggle set corrects the model")
+    check(model[4] == truth[4],
+          "and the corrected column is exactly what was observed")
+    check(not lo.learn(model, 4, before, after),
+          "re-observing the same press changes nothing")
+
+    # --- reading real boards --------------------------------------------
+    for name, want in (("lights_board.png", "......O.."),
+                       ("lights_board_lit0.png", "O........")):
+        f = cv2.imread(os.path.join(ROOT, "ref/auto/ss", name))
+        check(f is not None, f"{name} is on disk")
+        if f is None:
+            continue
+        geom = lo.locate(f)
+        check(geom is not None, f"{name}: the 3x3 grid is located")
+        if geom is None:
+            continue
+        xs, ys = geom
+        check(len(xs) == 3 and len(ys) == 3,
+              f"{name}: nine cells ({xs} {ys})")
+        # THE CLIPPED BOTTOM ROW must still be reconstructed and on screen.
+        check(abs((ys[1] - ys[0]) - (ys[2] - ys[1])) <= 12,
+              f"{name}: the rows are evenly pitched ({ys})")
+        check(ys[2] + lo.LIT_R < f.shape[0],
+              f"{name}: the derived bottom row can still be sampled "
+              f"({ys[2]} + {lo.LIT_R} < {f.shape[0]})")
+        st = lo.state(f, geom)
+        check(st is not None and lo._grid(st) == want,
+              f"{name}: state reads {lo._grid(st) if st else None}, want {want}")
+        if st:
+            mv = lo.solve(st, lo.matrix())
+            check(mv is not None and len(mv) == 5,
+                  f"{name}: solved in {len(mv) if mv else None} presses")
+
+    # --- and on nothing else --------------------------------------------
+    others = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer"):
+        others += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/hints_*.png"))
+    others += glob.glob(os.path.join(ROOT, "ref/auto/ss/balance_board*.png"))
+    fires = [os.path.basename(p) for p in sorted(others)
+             if (im := cv2.imread(p)) is not None and lo.locate(im) is not None]
+    check(not fires, f"locate fires on none of {len(others)} other frames "
+                     f"({fires[:3]})")
+
+
+def test_an_ss_family_is_dispatched_by_looking_not_by_name():
+    """`ss.identify` names the four families off the screen, and the drivers
+    do not decide whether anything banked.
+
+    The pixels win - the rule this project records for TP and then had to
+    re-learn for SS. And a one-stage mission ends straight on `Mission
+    Success!` with no stage dialog, so `mission_over` exists: without it the
+    Lights Out driver waited out its blank tolerance and reported "lost" while
+    `Mission Success! 10,000 gold` was on screen, and `run_one` threw the win
+    away.
+    """
+    print("\nan SS family is dispatched by looking, not by name")
+    import ss as ss_mod
+
+    cases = (("ref/auto/ss/lights_board.png", "lights"),
+             ("ref/auto/ss/lights_board_lit0.png", "lights"),
+             ("ref/auto/ss/balance_board_stage1.png", "balance"),
+             ("ref/auto/tp/kekkai_puzzle.png", "rune"))
+    for rel, want in cases:
+        f = cv2.imread(os.path.join(ROOT, rel))
+        if f is None:
+            check(False, f"{rel} is on disk")
+            continue
+        got = ss_mod.identify(f)
+        check(got == want, f"{os.path.basename(rel)} -> {got} (want {want})")
+
+    # a hints panel is NOT a puzzle - it must be dismissed, not played
+    for p in sorted(glob.glob(os.path.join(ROOT, "ref/auto/ss/hints_*.png"))):
+        f = cv2.imread(p)
+        if f is None:
+            continue
+        check(ss_mod.identify(f) is None,
+              f"{os.path.basename(p)}: a hints panel names no family")
+        check(ss_mod.hints_button(f) is not None,
+              f"{os.path.basename(p)}: but it does offer its button")
+
+    src = inspect.getsource(ss_mod.run_one)
+    check("close_out" in src, "run_one closes out")
+    # Only the PUZZLE branch changed. The rune path keeps its own veto, and
+    # asserting about the whole function would have read that as the failure.
+    for opener, label in (('if kind == "rune":', "rune"),
+                          ('elif kind in ("balance", "lights"):', "puzzle")):
+        branch = src.split(opener)[1].split("elif kind ==")[0]
+        check('if outcome not in ("cleared", "failed"):' not in branch,
+              f"the {label} driver's verdict no longer vetoes close_out, "
+              f"which is the measurement that establishes a banked mission")
+
+    # ALL THREE DRIVERS, not just the two written together. The rune family
+    # was left without this and lost a mission it had solved: guess 6 cleared
+    # the stage, `Mission Success!` was up three seconds later, and the driver
+    # reported "lost" in the gap - so run_all recorded "mission did not
+    # complete" about a win. A fix applied to the drivers that happened to be
+    # written that day is the recurring shape this file calls "a recovery path
+    # that exists in two places, only one of which was taught the new trick".
+    for drv in (ss_mod.play, ss_mod.play_balance, ss_mod.play_lights):
+        d = inspect.getsource(drv)
+        check("mission_over" in d,
+              f"{drv.__name__} stops on the reward panel")
+        check("blank <= BLANK_TOLERANCE" in d,
+              f"{drv.__name__} tolerates the gap between stages")
+        check(d.index("= stage_dialog(f)") < d.index("blank += 1"),
+              f"{drv.__name__} checks the dialog BEFORE counting a frame as "
+              f"blank")
+        check(d.index("mission_over(f)") < d.index("blank += 1"),
+              f"{drv.__name__} checks the reward panel before that too")
+
+
+
+def test_liveness_is_probed_without_killing_anything_on_windows():
+    """`os.kill(pid, 0)` is a PROBE on POSIX and a KILL on Windows.
+
+    CPython's `os.kill` only sends a real signal for `CTRL_C_EVENT` and
+    `CTRL_BREAK_EVENT`; for every other value it calls
+    `TerminateProcess(handle, sig)`. So the POSIX idiom terminates the target
+    with exit code 0 there.
+
+    That is not theoretical. `_respawn` releases the pid lock by asking
+    `_lock_holder(lock) == os.getpid()`, which probed OUR OWN pid - so on
+    Windows pressing Stop made the bot kill itself before it could spawn its
+    replacement, leaving the injected panel with no receiver. Reported from a
+    Windows machine as: "when I clicked stop it did not immediately reconnect
+    the panel and just died."
+
+    Two more POSIX-only assumptions sat in the same code path, and each failed
+    silently rather than loudly:
+
+        `_dead`      shelled out to `ps`, which raises FileNotFoundError on
+                     Windows, was swallowed, and reported "not dead" for ever -
+                     so every wait burned its full timeout
+        `_proc_cmd`  also shelled out to `ps`, returning "" for every pid, and
+                     `_lock_holder` reads an unreadable command line as "not
+                     the holder we recorded" and DROPS the lock - so the one
+                     guard against two bots clicking one game was inert on
+                     Windows, on every launch
+    """
+    print("\nliveness is probed without killing anything on Windows")
+    import app as app_mod
+
+    src = inspect.getsource(app_mod)
+
+    # CODE ONLY. These functions DISCUSS os.kill at length in their
+    # docstrings, and the first version of every check below matched the prose
+    # and failed on correct code - the trap this suite keeps re-learning.
+    def code_of(fn):
+        t = inspect.getsource(fn)
+        parts = t.split('"""')
+        return parts[0] + "".join(parts[2:]) if len(parts) > 2 else t
+
+    # --- os.kill may appear ONLY inside the probe, and only for POSIX ----
+    probe = code_of(app_mod._alive)
+    calls = [ln.strip() for ln in src.splitlines()
+             if "os.kill(" in ln and not ln.strip().startswith("#")
+             and "`" not in ln]
+    check(len(calls) == 1,
+          f"exactly one os.kill call site remains ({calls})")
+    check("os.kill(" in probe, "and it is inside _alive")
+    check('os.name != "nt"' in probe or 'os.name == "nt"' in probe,
+          "which branches on the platform before using it")
+    check(probe.index('os.name != "nt"') < probe.index("os.kill("),
+          "the platform test comes BEFORE the os.kill, so Windows never "
+          "reaches it")
+
+    # --- everything that asks 'is it alive' goes through the probe -------
+    for fn in (app_mod._lock_holder, app_mod._dead):
+        body = code_of(fn)
+        check("_alive(" in body, f"{fn.__name__} uses _alive")
+        check("os.kill(" not in body,
+              f"{fn.__name__} does not call os.kill itself")
+
+    # --- `ps` is never the only answer ----------------------------------
+    for fn in (app_mod._dead, app_mod._proc_cmd):
+        body = code_of(fn)
+        if '"ps"' in body:
+            check('os.name == "nt"' in body,
+                  f"{fn.__name__} guards its use of `ps`, which is POSIX-only")
+
+    # --- and it still works here ----------------------------------------
+    check(app_mod._alive(os.getpid()) is True,
+          "our own pid reads as alive")
+    check(app_mod._alive(999999) is False,
+          "a pid that cannot exist reads as dead")
+    # A REAL PROCESS MUST SURVIVE BEING PROBED. This is the whole point: the
+    # old code would have terminated it on Windows, and nothing here would
+    # have noticed on a POSIX test host.
+    import subprocess as sp
+    child = sp.Popen([sys.executable, "-c", "import time; time.sleep(6)"])
+    try:
+        seen = [app_mod._alive(child.pid) for _ in range(4)]
+        check(all(seen), f"a live child survives four probes ({seen})")
+        check(child.poll() is None, "and is still running afterwards")
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+    check(app_mod._dead(child.pid) is True,
+          "and reads as dead once it has been reaped")
+
+
+
+def test_a_stage_dialog_is_a_solid_button_of_one_fixed_size():
+    """`stage_dialog` fired on the LOBBY, and worse, on CHARACTER SELECT.
+
+    Both SS puzzle drivers check the dialog before anything else, so a false
+    "fail" makes the bot click that spot and abandon a mission that is still
+    running. Found by peeking at a healthy village on a fresh launch:
+    `stage_dialog -> ('fail', (1585, 1062))`.
+
+    Three gates, each measured, and the first two are not enough on their own:
+
+        village sign      337x121  aspect 2.79  fill 0.19   area 7,631
+        character select  323x156  aspect 2.07  fill 0.65   area 32,686
+        TP mission list   445x105  aspect 4.24  fill 0.88   area 41,212
+        Stage Clear       351x108  aspect 3.25  fill 0.83   area 31,542
+        Mission Fail      352x108  aspect 3.26  fill 0.79   area 29,891
+
+    FILL removes the village sign - an OK button is a filled rounded rect and
+    village art is outlines and lettering, the same solid-not-outline test
+    `find_confirm_point` needed. WIDTH and HEIGHT remove the other two, and
+    they are legitimate here because the viewport is pinned and the game draws
+    this button at one size, the way the command discs are one size. Aspect
+    cannot separate 2.07 / 3.25 / 4.24 without being fitted to those samples.
+
+    **The character-select case is the one that matters most.** `Delete` sits
+    beside `Play`, which is why this project only ever clicks Play BY
+    TEMPLATE; a red blob passing as an OK button there is precisely the
+    click-by-offset that rule forbids.
+    """
+    print("\na stage dialog is a solid button of one fixed size")
+    import ss as ss_mod
+
+    # --- the real thing is still recognised, at both measured sizes -----
+    for label, bgr, want in (("Stage Clear", (60, 170, 60), "clear"),
+                             ("Mission Fail", (40, 40, 210), "fail")):
+        f = np.zeros((1440, 3440, 3), np.uint8)
+        cv2.rectangle(f, (1712 - 176, 991 - 54), (1712 + 176, 991 + 54),
+                      bgr, -1)
+        got = ss_mod.stage_dialog(f)
+        check(got is not None and got[0] == want,
+              f"{label} at its measured 352x108 reads {got}")
+        if got:
+            check(abs(got[1][0] - 1712) <= 4 and abs(got[1][1] - 991) <= 4,
+                  f"{label} centre is the button, not an edge ({got[1]})")
+
+    # --- a HOLLOW button of the same size is not a button ---------------
+    f = np.zeros((1440, 3440, 3), np.uint8)
+    cv2.rectangle(f, (1712 - 176, 991 - 54), (1712 + 176, 991 + 54),
+                  (60, 170, 60), 6)
+    check(ss_mod.stage_dialog(f) is None,
+          "an outline of the same size is refused (fill, not bbox)")
+
+    # --- and the two wrong sizes that got through before ----------------
+    for label, w, h in (("character select", 323, 156), ("TP list", 445, 105)):
+        f = np.zeros((1440, 3440, 3), np.uint8)
+        cv2.rectangle(f, (1712 - w // 2, 991 - h // 2),
+                      (1712 + w // 2, 991 + h // 2), (40, 40, 210), -1)
+        check(ss_mod.stage_dialog(f) is None,
+              f"a solid {w}x{h} blob ({label}'s size) is refused")
+
+    # --- nothing in the whole reference set is a dialog -----------------
+    frames = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer", "ss"):
+        frames += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    fires = [(os.path.basename(p), ss_mod.stage_dialog(im))
+             for p in sorted(frames)
+             if (im := cv2.imread(p)) is not None
+             and ss_mod.stage_dialog(im) is not None]
+    check(not fires,
+          f"none of {len(frames)} reference frames is read as a dialog "
+          f"({fires[:3]})")
+    # the safety rule this protects, stated where it can fail loudly
+    charsel = [p for p in frames if "charsel" in os.path.basename(p)]
+    check(charsel, "character-select frames are in the set at all")
+    for p in charsel:
+        im = cv2.imread(p)
+        if im is not None:
+            check(ss_mod.stage_dialog(im) is None,
+                  f"{os.path.basename(p)}: never a dialog - Delete is there")
+
+
+
+def test_losing_the_idle_poke_does_not_also_lose_sleep_prevention():
+    """Keep-awake had ONE mechanism, and it needs a permission.
+
+    `presence.KeepAwake` poked the HID idle timer with an `osascript` fn-key
+    press, and on a machine without the Accessibility grant macOS refuses it:
+    "not allowed to send keystrokes (1002)". The handler then disabled
+    keep-awake ENTIRELY - throwing away the half that costs missions. Measured
+    the morning after, on this machine:
+
+        the machine was asleep for 1172s - the game session will not have
+        survived that; relogging          ... and again at 205s, 245s, 244s
+
+    Each of those is a lost in-flight mission. The two concerns are separate
+    and only one needs permission:
+
+        caffeinate -i -w <pid>   prevents idle SYSTEM sleep. No permission.
+        osascript key code 63    resets the HID idle timer, which is what
+                                 keeps the screen unlocked and Teams off
+                                 Away. Needs Accessibility.
+
+    And `caffeinate` genuinely cannot substitute for the poke - measured,
+    `caffeinate -u -t 1` moved the idle counter 39.3s -> 40.4s, so it did not
+    reset it at all. It is a power assertion, not an input event.
+
+    `-w <pid>` is what makes spawning a child acceptable here. The module
+    rejects "shelling out to an external daemon" because `kill -9` skips every
+    `finally` and would hold the machine awake for ever; `caffeinate -w`
+    releases when the watched process exits, so the guarantee is structural.
+    """
+    print("\nlosing the idle poke does not also lose sleep prevention")
+    import presence as pres
+
+    argv = pres._sleep_guard_argv(4321)
+    check(argv[0] == "caffeinate", f"the guard is caffeinate ({argv})")
+    check("-i" in argv, "asserting against IDLE SLEEP specifically")
+    check("-w" in argv and argv[argv.index("-w") + 1] == "4321",
+          "and tied to our pid with -w, so kill -9 cannot orphan it")
+    check("-t" not in argv,
+          "no -t timeout: the assertion must last as long as the bot does")
+
+    src = inspect.getsource(pres.KeepAwake)
+    start = inspect.getsource(pres.KeepAwake.start)
+    check("_sleep_guard_argv" in start, "start() raises the sleep guard")
+    check(start.index("_sleep_guard_argv") < start.index("threading.Thread"),
+          "before the poke thread - it is the half that needs no permission, "
+          "so it must not be skipped when the poke fails")
+
+    poke = inspect.getsource(pres.KeepAwake._poke)
+    check("caffeinate" in poke,
+          "the refusal message says the machine still will not sleep")
+    check("Accessibility" in poke,
+          "and names the grant that would restore the screen-awake half")
+    check("self._stop.set()" in poke,
+          "the poke still disables ITSELF rather than warning every interval")
+    check("self._caffeinate = None" not in poke,
+          "but it must NOT tear down the sleep guard")
+
+    stop = inspect.getsource(pres.KeepAwake.stop)
+    check("terminate" in stop, "stop() releases the guard promptly")
+
+    # --- it really runs, and really dies with its target ----------------
+    if platform.system() == "Darwin":
+        import subprocess as sp
+        target = sp.Popen([sys.executable, "-c", "import time; time.sleep(3)"])
+        guard = sp.Popen(pres._sleep_guard_argv(target.pid),
+                         stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+        try:
+            time.sleep(0.8)
+            check(guard.poll() is None,
+                  "the guard holds while its target lives")
+            target.wait(timeout=10)
+            for _ in range(24):
+                if guard.poll() is not None:
+                    break
+                time.sleep(0.25)
+            check(guard.poll() is not None,
+                  "and releases itself when the target exits, with no cleanup "
+                  "path involved")
+        finally:
+            for p_ in (target, guard):
+                if p_.poll() is None:
+                    p_.kill()
+    else:
+        check(True, "(the guard is macOS-only; not exercised here)")
+
+
+
+def test_every_run_one_branch_actually_runs():
+    """`run_one` dispatches four ways, and one of them could not execute.
+
+    Shipped and caught live on the first rune mission of the day:
+
+        SS: this mission is rune
+        ERROR task error: UnboundLocalError: local variable 'play'
+                          referenced before assignment
+
+    The puzzle branch had been written as `play = play_balance if ... else
+    play_lights`. Assigning a name ANYWHERE in a function makes it local for
+    the WHOLE function, so the rune branch's call to the MODULE-LEVEL `play`
+    resolved to an unbound local and raised before doing anything.
+
+    **This is the second instance of exactly this bug** - `_traverse` shipped
+    with `UnboundLocalError: local variable 'arrow'` behind 749 passing
+    checks - and the lesson is the one already recorded: source inspection is
+    a supplement to execution, never a substitute. Every assertion I had
+    written about this function read its text, and text was not the problem.
+
+    So this test CALLS it, once per family, with fakes.
+    """
+    print("\nevery run_one branch actually runs")
+    import ss as ss_mod
+
+    # `play` must not be a local of run_one at all - the bytecode says so
+    # without depending on how the line happens to be spelled.
+    import dis
+    names = {i.argval for i in dis.get_instructions(ss_mod.run_one)
+             if i.opname in ("STORE_FAST", "LOAD_FAST")}
+    check("play" not in names,
+          f"`play` is not shadowed as a local in run_one ({sorted(names)})")
+
+    class _Cap:
+        def frame(self, gray=False):
+            return np.zeros((1440, 3440, 3), np.uint8)
+
+    class _Actor:
+        def __init__(self):
+            self.clicks = []
+
+        def click_pixel(self, x, y, why=""):
+            self.clicks.append((x, y, why))
+
+    calls = []
+    orig = {n: getattr(ss_mod, n) for n in
+            ("identify", "open_puzzle", "play", "play_balance", "play_lights")}
+    orig_close = ss_mod.tp.close_out
+    try:
+        ss_mod.open_puzzle = lambda *a, **k: False
+        ss_mod.play = lambda *a, **k: (calls.append("rune"), (2, "cleared", []))[1]
+        ss_mod.play_balance = lambda *a, **k: (calls.append("balance"), (1, "cleared"))[1]
+        ss_mod.play_lights = lambda *a, **k: (calls.append("lights"), (1, "cleared"))[1]
+        ss_mod.tp.close_out = lambda *a, **k: True
+
+        for family in ("rune", "balance", "lights"):
+            calls.clear()
+            ss_mod.identify = lambda *a, **k: family
+            try:
+                banked = ss_mod.run_one(_Cap(), _Actor(), _Log())
+            except Exception as e:
+                check(False, f"{family}: run_one raised "
+                             f"{type(e).__name__}: {e}")
+                continue
+            check(calls == [family],
+                  f"{family}: reached its own driver ({calls})")
+            check(banked is True,
+                  f"{family}: banks via close_out ({banked})")
+
+        # combat goes to the supplied runner, not to a puzzle driver
+        calls.clear()
+        fought = []
+        ss_mod.identify = lambda *a, **k: "combat"
+        banked = ss_mod.run_one(_Cap(), _Actor(), _Log(),
+                                play_combat=lambda: fought.append(1))
+        check(fought == [1] and calls == [],
+              f"combat: handed to the battle runner ({fought}, {calls})")
+        check(banked is True, "combat: banks via close_out")
+
+        # an unnameable screen must click NOTHING and bank NOTHING
+        ss_mod.identify = lambda *a, **k: None
+        act = _Actor()
+        banked = ss_mod.run_one(_Cap(), act, _Log())
+        check(banked is False, "an unrecognised mission banks nothing")
+        check(not act.clicks,
+              f"and clicks nothing at all ({act.clicks})")
+    finally:
+        for n, v in orig.items():
+            setattr(ss_mod, n, v)
+        ss_mod.tp.close_out = orig_close
+
+
+
+def test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely():
+    """Every confirmed answer is repeat-free, so try that space FIRST.
+
+    The operator asked why the bot clicks the same rune three times and
+    whether the puzzle even allows repeats. It does not, as far as anything
+    measured shows - every answer this bot has confirmed is repeat-free:
+
+        len 3   White, Blue, Yellow
+        len 3   Green, Blue, Black
+        len 5   Yellow, Blue, Green, Black, Red
+        len 6   Yellow, Black, Red, Green, Blue, White   <- all six, once each
+
+    CLAUDE.md recorded "repeats occur", but from INFERRED SURVIVORS rather
+    than a confirmed answer, and during the run where a misread counter
+    poisoned the model - which eliminates the true repeat-free code and leaves
+    exactly the repeat-y survivors that were observed.
+
+    **AUTO makes acting on this cheap instead of a gamble**, because an empty
+    pool is already a detected condition: `next_guess` returns None rather
+    than guessing. So a repeating secret cannot produce a WRONG answer, only
+    an exhausted permutation pool - after which AUTO widens, carrying the same
+    history. The test asserts both halves, since only asserting the fast half
+    would be assuming the very thing in question.
+    """
+    print("\nthe rune secret looks like a permutation, and AUTO proves it safely")
+    import itertools
+    import kekkai as kek
+
+    check(kek.candidates(3, allow_repeats=False)[0] is not None,
+          "the permutation space exists")
+    check(len(kek.candidates(6, allow_repeats=False)) == 720,
+          f"length 6 has 720 permutations "
+          f"({len(kek.candidates(6, allow_repeats=False))})")
+    check(len(kek.candidates(6, allow_repeats=True)) == 46656,
+          "against 46,656 with repeats - 65x")
+
+    def run(secret, length, allow):
+        hist = []
+        for n in range(1, 16):
+            g = kek.next_guess(length, hist, allow_repeats=allow)
+            if g is None:
+                return None
+            if tuple(g) == tuple(secret):
+                return n
+            hist.append((tuple(g), *kek.score(tuple(g), tuple(secret))))
+        return None
+
+    rnd = random.Random(11)
+    for length, cap in ((3, 6), (5, 8), (6, 9)):
+        perms = [tuple(c) for c in itertools.permutations(kek.RUNES, length)]
+        sample = rnd.sample(perms, min(40, len(perms)))
+        got = [run(sec, length, kek.AUTO) for sec in sample]
+        solved = [g for g in got if g is not None]
+        check(len(solved) == len(sample),
+              f"len {length}: every permutation secret solved "
+              f"({len(solved)}/{len(sample)})")
+        if solved:
+            check(max(solved) <= cap,
+                  f"len {length}: worst {max(solved)} guesses, inside the "
+                  f"ten-row budget that a stage allows")
+
+    # --- THE SAFETY HALF: a repeating secret must still be solved ------
+    for length in (3, 5):
+        reps = [s for s in itertools.product(kek.RUNES, repeat=length)
+                if len(set(s)) < length]
+        sample = rnd.sample(reps, 30)
+        got = [run(sec, length, kek.AUTO) for sec in sample]
+        solved = [g for g in got if g is not None]
+        check(len(solved) == len(sample),
+              f"len {length}: AUTO still solves REPEATING secrets by widening "
+              f"({len(solved)}/{len(sample)})")
+
+    # --- and it reports which space it used ----------------------------
+    pool, used = kek.surviving(3, [], allow_repeats=kek.AUTO)
+    check(used is False and len(pool) == 120,
+          f"with no history it starts in the permutation space "
+          f"({used}, {len(pool)})")
+    # a history only a repeating code can satisfy must force the widen
+    secret = ("Red", "Red", "Blue")
+    g = ("Red", "Blue", "Green")
+    hist = [(g, *kek.score(g, secret))]
+    while True:
+        nxt = kek.next_guess(3, hist, allow_repeats=kek.AUTO)
+        if nxt is None or tuple(nxt) == secret:
+            break
+        hist.append((tuple(nxt), *kek.score(tuple(nxt), secret)))
+    _pool, used = kek.surviving(3, hist, allow_repeats=kek.AUTO)
+    check(used is True,
+          "and reports True once the evidence forces the repeat space, so a "
+          "widen is visible rather than silent")
+
+    check(kek.next_guess.__defaults__ is not None
+          and kek.AUTO in kek.next_guess.__defaults__,
+          "AUTO is the default, so the live caller gets it")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -4487,9 +5912,11 @@ def main():
                test_tp_pass_is_bounded_by_the_list_not_by_a_count,
                test_a_completed_tp_row_reflows_and_must_not_poison_its_slot,
                test_a_task_is_declared_in_exactly_one_place,
+               test_the_exam_rune_puzzle_needs_no_new_machinery,
                test_attach_with_no_browser_fails_fast,
                test_stop_comes_back_attached_by_itself,
                test_any_chromium_browser_will_do,
+               test_the_game_settings_are_chosen_from_the_panel,
                test_in_mission_asks_the_cheap_questions_first,
                test_a_looping_task_recovers_instead_of_pausing,
                test_the_games_render_bug_is_recognised_not_walked_through,
@@ -4499,7 +5926,19 @@ def main():
                test_the_ceiling_memo_survives_neither_a_level_up_nor_a_short_list,
                test_cooldowns_are_learned_from_play_not_guessed,
                test_a_cooldown_refusal_ends_the_wait_immediately,
-               test_a_greyed_skill_is_never_clicked):
+               test_a_greyed_skill_is_never_clicked,
+               test_a_template_is_recut_per_renderer_where_the_backend_differs,
+               test_an_accidental_scroll_cannot_move_the_game,
+               test_the_unknown_streak_counts_the_ladder_not_our_label,
+               test_the_ss_hints_panel_is_dismissed_by_a_button_below_the_fold,
+               test_balance_control_is_read_and_solved_as_a_subset_sum,
+               test_lights_out_is_solved_over_gf2_and_the_rule_is_learned,
+               test_an_ss_family_is_dispatched_by_looking_not_by_name,
+               test_liveness_is_probed_without_killing_anything_on_windows,
+               test_a_stage_dialog_is_a_solid_button_of_one_fixed_size,
+               test_losing_the_idle_poke_does_not_also_lose_sleep_prevention,
+               test_every_run_one_branch_actually_runs,
+               test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

@@ -101,8 +101,57 @@ def consistent(pool, history):
     return out
 
 
-def next_guess(length, history, runes=RUNES, allow_repeats=True, minimax=True,
-               minimax_cap=300):
+AUTO = "auto"
+
+
+def surviving(length, history, runes=RUNES, allow_repeats=AUTO):
+    """(pool, repeats_used) - the codes still consistent with `history`.
+
+    **THE SECRET LOOKS LIKE A PERMUTATION, so try that space first.** Every
+    answer this bot has ever confirmed is repeat-free, at three different
+    lengths:
+
+        len 3   White, Blue, Yellow
+        len 3   Green, Blue, Black
+        len 5   Yellow, Blue, Green, Black, Red
+        len 6   Yellow, Black, Red, Green, Blue, White   <- all six, once each
+
+    That last one is the tell: six runes, six slots, each used once. The
+    operator spotted it from watching the bot click the same rune three times
+    and asking whether the puzzle even allows that.
+
+    CLAUDE.md previously recorded the opposite - "repeats occur" - but that
+    came from INFERRED SURVIVORS rather than a confirmed answer, and it was
+    written during the run where a misread counter poisoned the model. A
+    poisoned model eliminates the true repeat-free code and leaves only
+    repeat-y ones, which is exactly the shape of that observation. Four direct
+    observations outweigh one inference from a model known to be corrupt.
+
+    **`AUTO` is why acting on this is cheap rather than a gamble.** An empty
+    pool is already a MEANINGFUL, DETECTED condition here - `next_guess`
+    returns None and the caller stops rather than guessing - so a secret that
+    does repeat cannot produce a wrong answer, only an exhausted permutation
+    pool. AUTO then widens to the full space and carries the SAME history
+    forward, losing nothing. So:
+
+        hypothesis holds   720 codes at length 6 instead of 46,656
+        hypothesis wrong   the pool empties, we widen, and we find out
+
+    The mode actually used is returned so the caller can say which happened,
+    because a silent widening would hide the very measurement this is here to
+    collect.
+    """
+    modes = (False, True) if allow_repeats == AUTO else (bool(allow_repeats),)
+    pool = []
+    for m in modes:
+        pool = consistent(candidates(length, runes, m), history)
+        if pool:
+            return pool, m
+    return pool, modes[-1]
+
+
+def next_guess(length, history, runes=RUNES, allow_repeats=AUTO,
+               minimax=True, minimax_cap=300):
     """The rune sequence to try next, or None if the history is contradictory.
 
     A None return is meaningful and must not be treated as "guess anything": it
@@ -110,7 +159,7 @@ def next_guess(length, history, runes=RUNES, allow_repeats=True, minimax=True,
     was misread or a click did not register. Guessing on regardless would burn
     attempts against a corrupted model. Re-read the history instead.
     """
-    pool = consistent(candidates(length, runes, allow_repeats), history)
+    pool, _repeats = surviving(length, history, runes, allow_repeats)
     if not pool:
         return None
     if len(pool) <= 2 or not minimax or len(pool) > minimax_cap:

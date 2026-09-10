@@ -170,10 +170,36 @@ Two facts from their code and ours that the loop encodes explicitly:
 
 ---
 
+## The decompiled source is no longer kept
+
+`ref/tp/cmmhero` has been deleted. Everything taken from it is recorded here
+and in CLAUDE.md, the one algorithm worth having was ported to
+`engine/kekkai.py`, and every question below that needed the C# has since been
+answered by measuring OUR client instead - which is the better answer anyway,
+because their client is a different private-server build.
+
+It was also mildly hazardous to keep: it hardware-fingerprints, plants a DPAPI
+licence file that survives uninstall, and opens a plaintext WebSocket to a
+hardcoded IP. Nothing here ever ran it, but a copy on disk invites someone to.
+
+The citations left in `engine/*.py` are provenance - "this idea came from
+there" - and stay true whether or not the files are present.
+
 ## Research questions this port opened
 
-Ordered by what unblocks the most. First two need a live client; the rest are
-answerable from the decompiled C# you already have.
+**All the ones that mattered are now closed, and none by reading their code.**
+
+| | question | outcome |
+|---|---|---|
+| 1 | does clicking a ring slot select that target? | **RESOLVED by a live click.** The ring is a turn-scoped jutsu CAST panel, not a target selector - clicking a filled slot consumed the turn and cast Strengthen. `battle.click_target` stays false. This was called "the single largest unverified assumption in the port". |
+| 2 | can an HP bar be mapped to a ring slot? | **Moot.** The ring is not a target selector, so there is nothing to map. |
+| 3 | what does `#000002` detect in a slot rect? | **Superseded.** Cooldown is read off the icon: a cooling tile is drawn in true greyscale, measured saturation 0.0 inside the tile against 164.0 for a ready one, and the game prints the remaining count on it. Simpler than either their probe or our old `SlotBaseline`. |
+| 4 | `PixelLoop2` vs `PixelLoop` tolerance | **Open, and low value.** `gate.pixel()` has never needed a non-zero tolerance; if one is ever wanted, calibrate it against our own frames rather than inferring their intent. |
+| 5 | `FindPixelColorRange` / `FindAllInRange` callers | **Answered.** No callers outside `PixelSearch.cs`, one thin wrapper - so they do no bar reading at all and `combat.bar_fill_ratio` is not redundant. |
+| 6 | their mission list and grade handling | **Superseded.** Ours is measured directly: grade by colour (A hue ~103, B ~51, C ~128, locked renders grey), pagination confirmed by row CONTENT changing, and the level ceiling remembered per grade. |
+
+Kept below for the record, since the reasoning is what has value now.
+
 
 1. **Does clicking a ring slot actually select that target?** The ring's
    *existence* on our client is measured (8 slots, upper four red-bordered =

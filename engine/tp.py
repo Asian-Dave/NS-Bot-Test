@@ -67,6 +67,7 @@ from act import Actor, Controls
 from capture import Capture
 from cdp import CDP, find_page_target
 from perceive import Template, find
+import perceive
 
 # Mission name -> family. Kept as substrings so it survives minor renames.
 FAMILIES = {
@@ -105,8 +106,9 @@ class _Log:
 
 
 def _tpl(name, thr=0.88, scales=None):
-    t = Template(name, os.path.join(ROOT, "tpl", f"{name}.png"), threshold=thr)
-    if scales:
+    # See the note in farm._tpl: renderer variants apply here too.
+    t = perceive.template(name, threshold=thr)
+    if t is not None and scales:
         t.scales = scales
     return t
 
@@ -370,8 +372,13 @@ def start_row(actor, cap, log, y, x=2195, settle=2.6):
     return True, "started"
 
 
-def pick_any(actor, cap, log, skip=(), max_pages=3, done=None):
-    """Start ANY unplayed mission on the TP list. Returns its (page, y) or None.
+def pick_any(actor, cap, log, skip=(), max_pages=3, done=None, label="TP"):
+    """Start ANY unplayed mission on the list. Returns its (page, y) or None.
+
+    `label` names the list in the log only. The SS pass shares this sweep, and
+    the lines still read "TP list page 1" while an SS mission was being
+    started - which is the kind of small lie that sends a later reader looking
+    at the wrong task.
 
     Name-agnostic on purpose: what the mission actually is gets decided by
     looking at the minigame once it opens.
@@ -387,7 +394,8 @@ def pick_any(actor, cap, log, skip=(), max_pages=3, done=None):
     for page in range(max_pages):
         f = cap.frame(gray=False)
         rows = find_mission_rows(f)
-        log.info("TP list page %d: %d row(s) at y=%s", page + 1, len(rows), rows)
+        log.info("%s list page %d: %d row(s) at y=%s",
+                 label, page + 1, len(rows), rows)
         for y in rows:
             fp = row_fingerprint(f, y)
             if any(same_row(fp, s_fp) for s_fp in skip):
@@ -405,7 +413,7 @@ def pick_any(actor, cap, log, skip=(), max_pages=3, done=None):
         nm, nc = find(g, nxt)
         if not nm.found:
             return None
-        actor.click_pixel(*nm.center, why=f"TP list next page ({nc:.3f})")
+        actor.click_pixel(*nm.center, why=f"{label} list next page ({nc:.3f})")
         time.sleep(2.2)
     return None
 
@@ -519,6 +527,7 @@ def close_out(actor, cap, log, timeout=45):
             # four matched it: measured on a live share prompt, close_popup_x
             # 0.719, close_popup_x_menu 0.586, close_promo_x 0.465 - all below
             # threshold, so close-out timed out with the reward panel still open.
+            dismissed = None
             for x_tpl in ("close_share_x", "close_popup_x", "close_popup_x_menu"):
                 p = os.path.join(ROOT, "tpl", f"{x_tpl}.png")
                 if not os.path.exists(p):
@@ -528,8 +537,35 @@ def close_out(actor, cap, log, timeout=45):
                     actor.click_pixel(*m.center,
                                       why=f"close share prompt via {x_tpl} ({c:.3f})")
                     time.sleep(2.0)
-                    g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
+                    f = cap.frame(gray=False)
+                    g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                    dismissed = x_tpl
                     break
+
+            # THAT X MAY HAVE CLOSED THE SUCCESS PANEL ITSELF, and it does.
+            #
+            # Observed live: `close_share_x` matched at 0.998, was clicked, and
+            # the very next frame was the VILLAGE - gold up, level up, mission
+            # plainly banked. There was no separate share prompt to close; the
+            # template had matched the reward panel's OWN close button.
+            #
+            # The old code went straight on to hunt for the green check on that
+            # village frame, failed, and logged "Success panel up but its check
+            # was not located" about a panel that no longer existed. That single
+            # misleading line sent this investigation twice to measure a check
+            # glyph on a frame with no panel in it - the scale sweep peaked at
+            # 0.699 on a piece of village scenery.
+            #
+            # So verify the panel is STILL THERE before looking for its
+            # control. If it is gone, the dismissal did the job: fall through
+            # and let the village confirmation below decide, which is the
+            # measurement that actually establishes a banked mission.
+            if dismissed and not find(g, ms)[0].found:
+                log.info("the %s click also closed the Success panel - not "
+                         "hunting for a check that is gone; confirming the "
+                         "village instead", dismissed)
+                continue
+
             pt, c = green_check(g)
             if pt:
                 actor.click_pixel(*pt, why=f"acknowledge Mission Success ({c:.3f})")
@@ -540,13 +576,64 @@ def close_out(actor, cap, log, timeout=45):
                     return True
             else:
                 log.info("Success panel up but its check was not located (%.3f)", c)
+                # SAVE THE FRAME THAT DEFEATED US.
+                #
+                # This is the last thing standing between a played TP mission
+                # and a banked one, and it had already escaped capture twice:
+                # the panel is transient, so by the time an operator or a
+                # second client reacts, the pass has moved on and the screen is
+                # gone. Every unrecognised screen in this project turned out to
+                # be one anchor away from handled - the hard part was always
+                # CATCHING the frame, so catch it here where it is certain.
+                #
+                # Bounded, and it stops once there is something to compare
+                # against: the point is one good frame, not a pile of them.
+                try:
+                    d = os.path.join(ROOT, "ref/auto/tp")
+                    os.makedirs(d, exist_ok=True)
+                    n = len([f for f in os.listdir(d)
+                             if f.startswith("success_check_missing")])
+                    if n < 3:
+                        p2 = os.path.join(
+                            d, f"success_check_missing_{int(time.time())}.png")
+                        # `f`, THE FRAME THAT WAS SCORED - never a fresh
+                        # capture. The first version re-captured here and saved
+                        # the village, because the panel had closed in between,
+                        # which made the evidence worse than useless: it looked
+                        # like a panel whose check could not be found.
+                        cv2.imwrite(p2, f)
+                        log.info("saved the panel to %s - the check glyph needs "
+                                 "measuring on it (green_check sweeps "
+                                 "0.95..1.95 at a 0.80 gate)",
+                                 os.path.relpath(p2, ROOT))
+                except Exception as e:
+                    log.warning("could not save the Success panel: %s", e)
         elif seen:
             # THE PANEL BEING GONE IS NOT THE SAME AS BEING BACK IN THE VILLAGE.
             # CLAUDE.md records the false-success bug this exact shape caused for
             # story missions: returning success on the panel alone let the next
             # run start while the game was still mid-transition. Require the
             # lobby anchor too, and say so when it does not come back.
-            lob = _tpl("lobby_rail_fortune", 0.90)
+            # DO NOT INVENT A TIGHTER GATE THAN THE CALIBRATED ONE.
+            #
+            # This read `_tpl("lobby_rail_fortune", 0.90)`, and that 0.90 was
+            # THE WHOLE REASON TP BANKED NOTHING. The anchor's calibrated
+            # threshold is 0.88; 0.90 was chosen when it measured ~1.000, which
+            # it does on wgpu. On webgl the same anchor reads **0.895** - five
+            # thousandths under the invented gate - so the village could never
+            # be confirmed and a won mission was reported as a failure. From
+            # the log, one second apart:
+            #
+            #   15:56:40  Success panel cleared but the village did not come
+            #             back; not calling this a success
+            #   15:56:41  resume: lobby (lobby_rail_fortune conf=0.895)
+            #
+            # The resume ladder, using the calibrated 0.88, found it instantly.
+            #
+            # A threshold is calibrated once, against measured extremes, and
+            # every call site that re-guesses it is a place where one backend,
+            # one animation frame or one re-cut silently changes an outcome.
+            lob = _tpl("lobby_rail_fortune")
             for _ in range(10):
                 lg = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
                 lm, lc = find(lg, lob)
@@ -555,8 +642,9 @@ def close_out(actor, cap, log, timeout=45):
                              "(%.3f) - mission banked", lc)
                     return True
                 time.sleep(1.2)
-            log.info("Success panel cleared but the village did not come back; "
-                     "not calling this a success")
+            log.info("Success panel cleared but the village did not come back "
+                     "(best %.3f against %.2f); not calling this a success",
+                     lc, lob.threshold)
             return False
         time.sleep(1.5)
     log.info("close-out timed out after %ss", timeout)
@@ -569,7 +657,8 @@ def close_out(actor, cap, log, timeout=45):
 SWEEP_TRIPWIRE = 40
 
 
-def run_all(cap, actor, log, relog=None, max_missions=None):
+def run_all(cap, actor, log, relog=None, max_missions=None,
+            to_list=None, run_one_fn=None, label="TP"):
     """Play EVERY TP mission on the list, whatever they turn out to be.
 
     The mission is chosen by position, not by name, and what it IS gets decided
@@ -601,8 +690,18 @@ def run_all(cap, actor, log, relog=None, max_missions=None):
     genuinely wants one (a test, or a cautious manual run). The default is
     unbounded.
 
+    **THE SWEEP IS SHARED WITH SS TRAINING**, via `to_list` and `run_one_fn`.
+    Not for tidiness: the loop below carries several fixes that were each paid
+    for in lost missions - remembering only FAILURES because survivors reflow
+    upward into vacated slots, fingerprinting rows so a reflow cannot make one
+    mission stand in for another, and a tripwire that reports a broken
+    termination check instead of looking like a tidy stop. A second copy for SS
+    would be a second place for all of that to be got wrong.
+
     Returns (played, banked).
     """
+    to_list = to_list or to_tp_list
+    run_one_fn = run_one_fn or (lambda: run_one(cap, actor, log))
     played = banked = 0
     # ONLY FAILURES ARE REMEMBERED, and this is the fix for a pass that stopped
     # with a mission still on the list.
@@ -630,27 +729,27 @@ def run_all(cap, actor, log, relog=None, max_missions=None):
                      max_missions)
             break
         if sweeps > SWEEP_TRIPWIRE:
-            log.error("TP: %d sweeps without exhausting the list - the "
+            log.error("%s: %d sweeps without exhausting the list - the "
                       "termination check is not working; stopping to avoid "
                       "looping. %d played, %d rows set aside",
-                      sweeps, played, len(failed) + len(exhausted))
+                      label, sweeps, played, len(failed) + len(exhausted))
             break
-        if not to_tp_list(actor, cap, log):
-            log.info("could not reach the TP list")
+        if not to_list(actor, cap, log):
+            log.info("could not reach the %s list", label)
             break
-        spot = pick_any(actor, cap, log, skip=failed + exhausted,
+        spot = pick_any(actor, cap, log, skip=failed + exhausted, label=label,
                         done=exhausted)
         if spot is None:
-            log.info("every TP row is now played or greyed out - the day's "
+            log.info("every %s row is now played or greyed out - the day's "
                      "list is finished (%d played, %d already done, %d set "
                      "aside after failing)",
-                     played, len(exhausted), len(failed))
+                     label, played, len(exhausted), len(failed))
             break
         page, y, fp = spot
         played += 1
         log.info("started the mission at page %d y=%d - identifying it from the "
                  "screen", page + 1, y)
-        if run_one(cap, actor, log):
+        if run_one_fn():
             banked += 1
             log.info("mission banked (%d of %d played)", banked, played)
         else:
@@ -660,7 +759,7 @@ def run_all(cap, actor, log, relog=None, max_missions=None):
             log.info("mission did not complete; it stays in the list and will "
                      "not be retried this pass")
             _recover_to_lobby(cap, actor, log, relog=relog)
-    log.info("TP pass finished: %d started, %d banked", played, banked)
+    log.info("%s pass finished: %d started, %d banked", label, played, banked)
     return played, banked
 
 

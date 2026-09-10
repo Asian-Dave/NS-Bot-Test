@@ -59,6 +59,7 @@ import cv2
 import numpy as np
 
 import tp
+import perceive
 from perceive import Template, find
 
 # hue -> grade, on OpenCV's 0..179 scale, measured on the live panel.
@@ -70,8 +71,12 @@ BAND_FRAC = 0.50           # of the scanned width
 
 
 def _tpl(name, thr=0.88):
-    p = os.path.join(ROOT, "tpl", f"{name}.png")
-    return Template(name, p, threshold=thr) if os.path.exists(p) else None
+    # Via `perceive.template`, NOT a bare path: it applies the active
+    # renderer's `tpl/<renderer>/` variant. Building the path here is what
+    # made the webgl variants inert - `load_templates` swapped them in, the
+    # log said so, and this function went on loading the default crop, so the
+    # farm could not enter the Mission Room while the variant measured 1.000.
+    return perceive.template(name, threshold=thr)
 
 
 def find_grades(frame, x0=1800, x1=2400, y0=250, y1=1100, step=6):

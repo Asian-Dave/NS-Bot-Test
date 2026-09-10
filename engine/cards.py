@@ -212,11 +212,11 @@ def board_present(frame, origin=(0, 0)):
     """
     global _HUD
     if _HUD is None:
-        from perceive import Template
-        p = os.path.join(ROOT, "tpl", "tp_cards_hud.png")
-        if not os.path.exists(p):
+        import perceive
+        # `perceive.template` so the active renderer's variant is used.
+        _HUD = perceive.template("tp_cards_hud", threshold=0.88)
+        if _HUD is None:
             return None                 # unknown, not "yes"
-        _HUD = Template("tp_cards_hud", p, threshold=0.88)
     from perceive import find
     g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     if _HUD.h > g.shape[0] or _HUD.w > g.shape[1]:

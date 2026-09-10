@@ -137,6 +137,36 @@ def find_rune_buttons(frame_bgr, y0=820, y1=1220, x0=760, x1=2680):
                 break
         else:
             bands.append([c])
+    # AND WHEN THERE ARE TWO SUCH ROWS, PICK THE COLOURED ONE.
+    #
+    # This used to return the FIRST qualifying run, and bands are sorted by y,
+    # so the topmost won. That was right by accident on the TP layout - three
+    # numbered slots against six runes, so only the runes ever formed a run of
+    # six. The SS puzzle escalates the code length, and at length SIX there are
+    # six numbered slots AND six rune discs: two rows of six evenly spaced
+    # identical circles. It locked onto the SLOTS, every click landed on an
+    # empty numbered slot and did nothing, and six successive guesses read back
+    # byte-identical feedback from an untouched board.
+    #
+    # Saturation does not separate them - measured mean S 75 for the slots
+    # against 85 for the runes. HUE SPREAD does, decisively: the rune row is
+    # six DIFFERENT colours while the slot row is six of the same parchment
+    # tone.
+    #
+    #     slot row   H = 19 19 19 19 19 19        spread   0
+    #     rune row   H = 53 174 120 0 24 15       spread 174
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+
+    def _hue_spread(run):
+        hs = []
+        for x, y, r in run:
+            rr = max(6, int(r * 0.6))
+            p = hsv[max(0, y - rr):y + rr, max(0, x - rr):x + rr]
+            if p.size:
+                hs.append(float(np.median(p[:, :, 0])))
+        return (max(hs) - min(hs)) if len(hs) > 1 else 0.0
+
+    runs = []
     for band in bands:
         band.sort(key=lambda z: z[0])
         for i in range(len(band) - want + 1):
@@ -149,8 +179,11 @@ def find_rune_buttons(frame_bgr, y0=820, y1=1220, x0=760, x1=2680):
                 continue
             if (max(gaps) - min(gaps)) > 0.30 * max(gaps):
                 continue                       # not evenly spaced
-            return [(z[0], z[1]) for z in run]
-    return None
+            runs.append((_hue_spread(run), run))
+    if not runs:
+        return None
+    runs.sort(key=lambda z: -z[0])
+    return [(z[0], z[1]) for z in runs[0][1]]
 
 
 def find_confirm_point(frame_bgr, y0=200, y1=900, x0=900, x1=1800):
@@ -176,8 +209,29 @@ def find_confirm_point(frame_bgr, y0=200, y1=900, x0=900, x1=1800):
             continue
         if not (0.7 <= bw / bh <= 1.4):        # a disc is round
             continue
+        # IT MUST BE A SOLID DISC, NOT A DARK RING.
+        #
+        # A node's dark circular OUTLINE passes every test above, and its
+        # centroid lands in the pale middle of the ring - so this returned a
+        # point that was BRIGHT (mean grey 220) out of a mask built from
+        # `g < 90`, while the real submit disc is solid and dark (grey 71).
+        # On the SS layout that put the submit click on a rune node.
+        #
+        # Fill separates them the same way it separates a kekkai outline from a
+        # solid robe elsewhere in this project: a ring is sparse inside its
+        # bounding box, a disc is not.
+        if a < 0.55 * bw * bh:
+            continue
+        # AND NOT "the centre pixel must be dark" - that was tried and it
+        # rejected the right blob everywhere. The kanji is drawn LIGHT on the
+        # dark disc, so the centroid lands on a light stroke: measured
+        # centre-grey 148 on both SS stages and 204 on TP. Fill alone is the
+        # discriminator, and it is decisive - the correct disc measures
+        # 0.65 / 0.66 / 0.77 across the three layouts while every distractor
+        # sits at 0.18..0.47.
+        cx, cy = int(ce[i][0]) + x0, int(ce[i][1]) + y0
         if best is None or a > best[0]:
-            best = (a, int(ce[i][0]) + x0, int(ce[i][1]) + y0)
+            best = (a, cx, cy)
     return (best[1], best[2]) if best else None
 
 
@@ -355,20 +409,131 @@ def read_seals(frame, ex, x0=1300, x1=1900, y0=60, y1=130):
     return (None, None)
 
 
-def find_rows(frame, x0=1950, x1=2030, y0=240, y1=1200, min_area=800,
+# The history scroll's columns are LOCATED, not assumed - see `find_rows`.
+COL_SEARCH = (1880, 2340)     # x range that contains both layouts' scrolls
+COL_TOL = 26                  # x spread within one column of discs
+
+
+def _green_blobs(frame, y0, y1, min_area):
+    """Centroids of the green-hue discs across the whole scroll region."""
+    h, w = frame.shape[:2]
+    x0, x1 = max(0, min(COL_SEARCH[0], w)), max(0, min(COL_SEARCH[1], w))
+    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return []
+    roi = frame[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    m = (((hsv[:, :, 0] > 35) & (hsv[:, :, 0] < 95)
+          & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 40)).astype(np.uint8) * 255)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    n, _, stats, cent = cv2.connectedComponentsWithStats(m)
+    return [(x0 + cent[i][0], y0 + cent[i][1]) for i in range(1, n)
+            if stats[i, cv2.CC_STAT_AREA] >= min_area]
+
+
+def _columns(pts):
+    """Group centroids into columns by x. Returns [(x, [y...]), ...] left first."""
+    cols = []
+    for x, y in sorted(pts):
+        for col in cols:
+            if abs(col[0][0] - x) <= COL_TOL:
+                col.append((x, y))
+                break
+        else:
+            cols.append([(x, y)])
+    out = []
+    for col in cols:
+        xs = [p[0] for p in col]
+        out.append((int(round(sum(xs) / len(xs))),
+                    sorted(int(round(p[1])) for p in col)))
+    return sorted(out)
+
+
+def find_rows(frame, x0=None, x1=None, y0=240, y1=1200, min_area=800,
               min_rows=5):
     """Locate the feedback rows by segmenting the GREEN disc column.
 
     Returns (green_x, [y, ...]) top to bottom, or (None, []) if the panel is not
-    open. Measured on our client: 10 rows, y 290..1087, pitch 88.53, green column
-    x 1987.
+    open.
 
-    `min_rows` exists because ONE stray green blob is not a history scroll. After
-    a correct guess the panel closes instantly, and a single unrelated green
-    element elsewhere on the scene made this report "panel open, 1 row" - so the
-    solver went on to read digits out of a closed panel, got 0.000, and bailed
-    with "could not read" on a puzzle it had in fact just solved.
+    **THE COLUMN'S X IS LOCATED, NOT ASSUMED.** This used to hardcode
+    x 1950..2030, measured on the TP kekkai where the green column sits at 1987.
+    The SS version of the same puzzle - identical rules, five runes instead of
+    three - draws its history scroll further right, so that window contained
+    nothing: the minigame reported `history_rows: 0` and classified as
+    "unknown". This file already says the scroll "must be LOCATED, not
+    computed" about the row Y positions; the same is true of X, and only one
+    layout had been seen when that was written.
+
+    **NEITHER A WIDER WINDOW NOR A SWEEP OF NARROW ONES IS THE FIX**, and both
+    were tried and measured. One wide window merges the green and gold columns:
+    12 "rows" at pitch 71.36 with a standard deviation of 21.16, which is two
+    interleaved columns. Sweeping narrow windows and taking each window's
+    centroid instead BIASES THE X, because a window that clips a disc puts its
+    centroid off-centre - it reported the TP column at 1972 where the true
+    value is 1987, and derived a gold offset of 51 against a true 86.
+
+    So segment ONCE over the whole region and cluster the blobs by x. A column
+    is then a real group of discs rather than whatever fell inside a chosen
+    rectangle, and the centres come out unbiased.
     """
+    if x0 is not None and x1 is not None:
+        return _find_rows_legacy(frame, x0, x1, y0, y1, min_area, min_rows)
+    cols = [c for c in _columns(_green_blobs(frame, y0, y1, min_area))
+            if len(c[1]) >= min_rows]
+    if not cols:
+        return None, []
+    # The GREEN column is the leftmost qualifying one; gold sits to its right.
+    return cols[0][0], cols[0][1]
+
+
+# The gold disc needs its OWN hue window, and that is not a detail: it does
+# not pass the green filter at all, so looking for a second GREEN column found
+# nothing on either layout. Measured at the disc centres -
+#
+#     gold disc    H p50 = 13 (SS), 22 (TP wgpu), 22 (TP webgl),  V p50 ~ 235
+#     green disc   H p50 = 54..57
+#
+# - so the two separate cleanly on hue, and gold is bright besides.
+GOLD_HSV = ((8, 80, 150), (32, 255, 255))
+
+
+def _gold_blobs(frame, y0, y1, min_area):
+    """Centroids of the GOLD discs across the scroll region."""
+    h, w = frame.shape[:2]
+    x0, x1 = max(0, min(COL_SEARCH[0], w)), max(0, min(COL_SEARCH[1], w))
+    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return []
+    roi = frame[y0:y1, x0:x1]
+    lo, hi = GOLD_HSV
+    m = cv2.inRange(cv2.cvtColor(roi, cv2.COLOR_BGR2HSV),
+                    np.array(lo, np.uint8), np.array(hi, np.uint8))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    n, _, stats, cent = cv2.connectedComponentsWithStats(m)
+    return [(x0 + cent[i][0], y0 + cent[i][1]) for i in range(1, n)
+            if stats[i, cv2.CC_STAT_AREA] >= min_area]
+
+
+def find_gold_dx(frame, green_x, ys, y0=240, y1=1200, min_area=800):
+    """How far right of the green column the GOLD one sits. Measured, not fixed.
+
+    `HIST_GOLD_DX` is 86, measured on the TP layout; the SS layout of the same
+    puzzle differs, and reading a digit several px off centre is enough to make
+    a counter unreadable - which stops the solver dead. Returns None when the
+    column cannot be found, so the caller keeps the constant rather than acting
+    on a guess.
+    """
+    for x, cys in _columns(_gold_blobs(frame, y0, y1, min_area)):
+        if x <= green_x + COL_TOL:
+            continue                        # that is the green column itself
+        if abs(len(cys) - len(ys)) <= 2 and abs(cys[0] - ys[0]) <= 14:
+            return x - green_x
+    return None
+
+
+def _find_rows_legacy(frame, x0=1950, x1=2030, y0=240, y1=1200, min_area=800,
+                      min_rows=5):
     h, w = frame.shape[:2]
     x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
     y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
@@ -388,38 +553,74 @@ def find_rows(frame, x0=1950, x1=2030, y0=240, y1=1200, min_area=800,
     return gx, sorted(int(round(p[1])) for p in pts)
 
 
-def count_filled(frame, x0=2120, x1=2230, box=30):
+# The rune-icon strip, as an offset from the located GOLD disc.
+FILLED_DX = (30, 200)
+# A filled row is measured by EDGE DENSITY, not saturation - see count_filled.
+FILLED_EDGE = 0.12
+
+
+def count_filled(frame, x0=None, x1=None, box=28):
     """How many history rows already hold a guess.
 
     Needed because reading "the row for my Nth guess" as row N-1 is wrong the
-    moment the scroll already has entries — e.g. a guess entered by hand before
-    the solver started. That off-by-one made the solver read guess 2's feedback
-    off guess 1's row and corrupted its whole model.
+    moment the scroll already has entries, and that off-by-one made the solver
+    read one guess's feedback off another's row and corrupted its whole model.
 
-    A filled row shows coloured RUNE ICONS where an empty one shows only a dash.
-    MEAN saturation does not separate them - parchment is itself fairly saturated,
-    so filled rows read 87..93 and empty ones 47..53, and any single mean cutoff
-    is fragile. The FRACTION of strongly-saturated pixels does separate cleanly:
-    measured 0.243..0.303 for filled rows against 0.000..0.028 for empty.
+    **SATURATION WAS THE WRONG METRIC, and the failure was rune-specific.** The
+    old version measured the fraction of strongly-saturated pixels in the rune
+    strip. That works until a row contains the BLACK rune, which is dark and
+    barely saturated: measured on an SS scroll with eight rows filled, the two
+    rows holding black read 0.09 against a 0.12 gate and were counted EMPTY, so
+    `count_filled` returned 6 for 8. The solver then read stale rows and only
+    converged by luck.
+    hue is irrelevant to the question being asked - "is there an icon here, or
+    a dash?" - so measure STRUCTURE. Edge density separates cleanly and a black
+    rune has just as strong an outline as a bright one:
+
+        filled rows   0.160 .. 0.215   (SS, including the black-rune rows)
+                      0.168            (TP)
+        empty rows    0.009 .. 0.089   (both layouts, both renderers)
+
+    The window is also RELATIVE to the located gold column rather than
+    absolute. It was hardcoded to the TP layout's x 2120..2230; on the SS
+    layout the whole scroll sits further right, so that window landed on the
+    GOLD DISCS - and a gold disc is saturated whether its row was played or
+    not, which returned 10 filled on a scroll with nothing on it at all.
     """
     gx, ys = find_rows(frame)
     if gx is None:
         return 0
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    if x0 is None or x1 is None:
+        dx = find_gold_dx(frame, gx, ys)
+        gold = gx + (dx if dx is not None else HIST_GOLD_DX)
+        x0, x1 = gold + FILLED_DX[0], gold + FILLED_DX[1]
+    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     n = 0
     for y in ys:
-        cell = hsv[y - box:y + box, x0:x1]
-        if cell.size and float((cell[:, :, 1] > 90).mean()) > 0.12:
+        cell = g[max(0, y - box):y + box, max(0, x0):x1]
+        if cell.size < 100:
+            continue
+        e = cv2.Canny(cell, 60, 160)
+        if float((e > 0).mean()) >= FILLED_EDGE:
             n += 1
     return n
 
 
 def row_center(i, frame=None):
-    """(green_xy, gold_xy) for history row i, 0-based. Located when given a frame."""
+    """(green_xy, gold_xy) for history row i, 0-based. Located when given a frame.
+
+    THE GOLD OFFSET IS MEASURED TOO. `HIST_GOLD_DX` is 86, from the TP layout;
+    the SS layout of the same puzzle puts the pair 79 px apart. Reading a digit
+    7 px off centre is enough to make a counter unreadable, and an unreadable
+    counter stops the solver dead.
+    """
     if frame is not None:
         gx, ys = find_rows(frame)
         if gx is not None and i < len(ys):
-            return (gx, ys[i]), (gx + HIST_GOLD_DX, ys[i])
+            dx = find_gold_dx(frame, gx, ys)
+            if dx is None:
+                dx = HIST_GOLD_DX      # measured for TP; better than nothing
+            return (gx, ys[i]), (gx + dx, ys[i])
     # fallback to the measured grid if segmentation failed
     y = int(round(290 + i * 88.53))
     return (1987, y), (1987 + HIST_GOLD_DX, y)
@@ -430,16 +631,62 @@ def crop_digit(frame, xy):
     return frame[y - DIGIT_BOX:y + DIGIT_BOX, x - DIGIT_BOX:x + DIGIT_BOX]
 
 
-def digit_mask(frame, xy):
-    """Binarised digit crop.
+# Where the ink exemplars live. A SEPARATE directory from `digits/`, because
+# the two representations are NOT interchangeable and mixing them would be
+# silently wrong - see the measurement in `digit_mask`.
+INK_DIR = "ref/auto/tp/digits_ink"
 
-    The glyph is a DARK digit with a WHITE OUTLINE on a coloured disc (green for
-    one counter, gold for the other). The white outline is the only
-    colour-independent feature, so thresholding bright pixels lets ONE exemplar
-    set serve both discs. Measured: self-match 1.000, cross-digit 0.161.
+# The glyph is a minority of the disc's area. Measured on a live webgl row,
+# taking the darkest 30% inside the disc gives mask fractions of 0.150 (green
+# "0") and 0.153 (gold "1") - consistent across two very differently coloured
+# discs, which is the property the old mask lost.
+INK_PCT = 30
+INK_DISC_FRAC = 0.40          # of the crop's half-width, so the rim is excluded
+
+
+def digit_mask(frame, xy, r=26):
+    """The counter digit as DARK INK, relative to the disc's own brightness.
+
+    THIS USED TO THRESHOLD BRIGHT PIXELS, and that is why the kekkai stopped
+    after guess 1 on webgl. On wgpu the glyph is a dark digit with a WHITE
+    OUTLINE, so bright pixels captured the outline and one exemplar set served
+    both discs. **webgl draws no outline** - it is the same missing text stroke
+    that broke seven templates elsewhere - so the bright mask collapsed:
+
+        green disc (dark)   bright fraction 0.08  - the "0" VANISHED, leaving
+                                                    only a specular highlight
+        gold disc (light)   bright fraction 0.375 - the DISC went white and the
+                                                    "1" became a dark HOLE
+
+    The ink is dark in BOTH renderings, so that is what to key on. Measured
+    inside the discs on webgl: ink at p1=17 against a green disc body of 112,
+    and p1=28 against a gold body of 198. Taking the darkest `INK_PCT` inside a
+    disc-shaped window - which also excludes the parchment and the disc's own
+    dark rim - yields a clean, legible glyph on either disc.
+
+    IT NEEDS ITS OWN EXEMPLARS, and that was measured rather than assumed. The
+    existing outline masks are NOT reusable: scored against ink masks of a
+    known "0" and "1", every one of the sixteen sat at 0.33..0.63 distance and
+    the ink "1" matched `2.png` best - a wrong answer. An outline and a
+    silhouette of the same glyph are different shapes, which is also why this
+    project's earlier attempts at normalising between the two measured worse.
     """
-    g = cv2.cvtColor(crop_digit(frame, xy), cv2.COLOR_BGR2GRAY)
-    return cv2.threshold(g, 200, 255, cv2.THRESH_BINARY)[1]
+    x, y = int(xy[0]), int(xy[1])
+    h0, w0 = frame.shape[:2]
+    if not (r <= x < w0 - r and r <= y < h0 - r):
+        return None
+    g = cv2.cvtColor(frame[y - r:y + r, x - r:x + r], cv2.COLOR_BGR2GRAY)
+    if g.size == 0:
+        return None
+    h, w = g.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    inside = ((xx - w / 2.0) ** 2 + (yy - h / 2.0) ** 2) <= \
+        (min(h, w) * INK_DISC_FRAC) ** 2
+    vals = g[inside]
+    if vals.size < 50:
+        return None
+    cut = np.percentile(vals, INK_PCT)
+    return ((g <= cut) & inside).astype(np.uint8) * 255
 
 
 def tight_glyph(mask, pad=2):
@@ -510,16 +757,22 @@ def load_exemplars():
     which would start accepting cross-digit matches.
     """
     out = {}
-    for p in sorted(glob.glob(os.path.join(ROOT, "ref/auto/tp/digits/*.png"))):
+    # THE INK DIRECTORY, not `digits/`. Those are outline masks for the old
+    # bright-pixel mask and are measurably incompatible with the ink mask - see
+    # `digit_mask`. They are left in place as the record of what wgpu draws,
+    # and simply not loaded.
+    for p in sorted(glob.glob(os.path.join(ROOT, INK_DIR, "*.png"))):
         n = os.path.splitext(os.path.basename(p))[0]
         head = n.split("_")[0]
         if not head.isdigit():
             continue                     # UNREAD_*: unclassified, never guess
-        g = cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2GRAY)
-        # Binarise the exemplar the SAME way the live patch is binarised in
-        # `digit_mask`, or the two are simply not comparable.
-        out.setdefault(int(head), []).append(
-            cv2.threshold(g, 200, 255, cv2.THRESH_BINARY)[1])
+        g = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+        if g is None:
+            continue
+        # Already a mask on disk - stored exactly as `digit_mask` produces it,
+        # so no re-binarising. Re-thresholding a mask is how two
+        # representations quietly stop being comparable.
+        out.setdefault(int(head), []).append(g)
     return out
 
 
@@ -538,7 +791,8 @@ def enter_guess(actor, guess, settle=0.55, rune_xy=None):
     return True
 
 
-def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
+def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2,
+               history=None, on_history=None):
     """Solve the puzzle by playing it. Returns (secret, guesses) or (None, n).
 
     WHICH COUNTER IS WHICH IS NOT ASSUMED.
@@ -547,14 +801,35 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
     feedback and converge on nothing. So both mappings are carried as live
     hypotheses and consistency kills the wrong one: a hypothesis whose candidate
     pool goes empty is disproved. That costs no extra guesses.
+
+    IT CAN NOW RESUME. `history` seeds the model with guesses already on the
+    scroll as [(guess_tuple, (green, gold)), ...], and `on_history` is called
+    with that list after every answer so a caller can keep it.
+
+    **WHY THAT MATTERS: ROWS ARE THE SCARCE RESOURCE.** A stage allows ten
+    guesses and failing to solve inside them fails the whole mission. Without
+    resume, every restart replayed the same openers into fresh rows - and a
+    restart is exactly what happens after an unreadable digit is harvested and
+    labelled. Measured on an SS length-5 stage: two rows spent, then a stall;
+    a naive re-run would have spent two more repeating itself, against an
+    average requirement of about six.
     """
     ex = load_exemplars()
     if not ex:
-        log.info("no digit exemplars in ref/auto/tp/digits/ - cannot read feedback")
+        log.info("no digit exemplars in %s - cannot read feedback", INK_DIR)
         return None, 0
     pool_all = kekkai.candidates(length)
     hist_a, hist_b = [], []          # A: green=cp,gold=wp   B: green=wp,gold=cp
     alive_a = alive_b = True
+    if history:
+        # THE SAME SHAPE THIS FUNCTION ALREADY APPENDS - `(guess, green, gold)`,
+        # a flat 3-tuple, which is what `kekkai.consistent` expects. The first
+        # attempt seeded a nested `(guess, (green, gold))` and would have
+        # filtered against a shape the solver never produces.
+        for g, gv, ov in history:
+            hist_a.append((g, gv, ov))
+            hist_b.append((g, ov, gv))
+        log.info("resuming with %d answer(s) already on the scroll", len(history))
 
     # The panel MUST already be open. Treating "no history discs" as success was
     # a bug that reported "solved after 0 guesses" when the puzzle had simply
@@ -661,14 +936,43 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
         gv, gc = read_digit(frame, g_xy, ex)
         ov, oc = read_digit(frame, o_xy, ex)
         if gv is None or ov is None:
-            d = os.path.join(ROOT, "ref/auto/tp/digits")
+            d = os.path.join(ROOT, INK_DIR)
+            os.makedirs(d, exist_ok=True)
             cv2.imwrite(os.path.join(d, f"UNREAD_green_{n}.png"),
                         digit_mask(frame, g_xy))
             cv2.imwrite(os.path.join(d, f"UNREAD_gold_{n}.png"),
                         digit_mask(frame, o_xy))
-            log.info("could not read row %d (green %.3f / gold %.3f); crops saved "
-                     "as UNREAD_*. Classify them and rerun rather than guessing.",
-                     len(hist_a), gc, oc)
+            # SAVE THE WHOLE FRAME, not only the two crops.
+            #
+            # The crops alone cannot tell you WHY the read failed, and that
+            # cost a diagnosis: both came back as neither digit nor noise - one
+            # was almost solid black, the other a white SPIRAL, which is a RUNE
+            # GLYPH. So the reader was not misreading a digit at all, it was
+            # looking in the wrong place, and nothing in a 68x68 binarised crop
+            # says that. `find_rows` segments a fixed absolute column
+            # (x 1950..2030) by GREEN HUE, and both of those are fragile here:
+            # the panel moves (measured 116 px on one occasion) and colour is
+            # exactly what a different Ruffle backend renders differently.
+            #
+            # With the full frame, where the discs really are is measurable
+            # afterwards. Bounded, because the point is one good frame.
+            try:
+                nsaved = len([f for f in os.listdir(d)
+                              if f.startswith("UNREAD_frame")])
+                if nsaved < 3:
+                    fp = os.path.join(d, f"UNREAD_frame_{int(time.time())}.png")
+                    cv2.imwrite(fp, frame)
+                    log.info("saved the whole panel to %s - measure where the "
+                             "feedback discs actually are before touching the "
+                             "digit exemplars", os.path.relpath(fp, ROOT))
+            except Exception as e:
+                log.warning("could not save the panel frame: %s", e)
+            log.info("could not read row %d (green %.3f / gold %.3f) at "
+                     "green=%s gold=%s; crops saved as UNREAD_*. Classify them "
+                     "and rerun rather than guessing.",
+                     len(hist_a), gc, oc, g_xy, o_xy)
+            if on_history is not None:
+                on_history(list(hist_a))
             return None, n + 1
         log.info("   feedback: green=%d gold=%d", gv, ov)
         if gv == length or ov == length:
@@ -677,6 +981,8 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2):
             return guess, n + 1
         hist_a.append((guess, gv, ov))
         hist_b.append((guess, ov, gv))
+        if on_history is not None:
+            on_history(list(hist_a))
     return None, max_guesses
 
 
@@ -715,7 +1021,9 @@ def seal_broken(cap, settle=1.2):
     from perceive import Template, find
     time.sleep(settle)
     g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
-    t = Template("gc", os.path.join(ROOT, "tpl/mission_start.png"), threshold=0.80)
+    # Named by its FILE (`mission_start`), because the renderer-variant
+    # lookup is by template name - "gc" would find no variant.
+    t = perceive.template("mission_start", threshold=0.80)
     t.scales = [round(0.95 + i * 0.05, 2) for i in range(21)]
     return find(g, t)[0].found
 
@@ -730,10 +1038,9 @@ def mission_over(cap, log=None):
     from perceive import Template, find
     g = cv2.cvtColor(cap.frame(gray=False), cv2.COLOR_BGR2GRAY)
     for name, thr in (("mission_success", 0.88), ("cutscene_continue", 0.80)):
-        p = os.path.join(ROOT, "tpl", f"{name}.png")
-        if not os.path.exists(p):
+        t = perceive.template(name, threshold=thr)
+        if t is None:
             continue
-        t = Template(name, p, threshold=thr)
         if name == "cutscene_continue":
             t.scales = [round(0.9 + i * 0.05, 2) for i in range(9)]
         m, c = find(g, t)
@@ -846,9 +1153,8 @@ def hunt_and_solve(cap, actor, log, length=3, max_rounds=6, max_walks=10):
         # acknowledge "You break the seal!"
         time.sleep(1.5)
         f = cap.frame(gray=False)
-        from perceive import Template, find as _find
-        gc = Template("gc", os.path.join(ROOT, "tpl/mission_start.png"),
-                      threshold=0.80)
+        from perceive import find as _find
+        gc = perceive.template("mission_start", threshold=0.80)
         gc.scales = [round(0.95 + i * 0.05, 2) for i in range(21)]
         m, conf = _find(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), gc)
         if m.found:

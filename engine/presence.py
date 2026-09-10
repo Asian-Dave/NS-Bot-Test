@@ -41,6 +41,42 @@ It is also independent of any `keepgreen` the operator started by hand: both
 merely reset the same counter, so neither can cancel the other, and the bot
 exiting never revokes a keep-awake the operator set up for their own reasons.
 
+TWO DIFFERENT JOBS, AND ONLY ONE OF THEM NEEDS PERMISSION
+----------------------------------------------------------
+The fn-key poke needs Accessibility, and on a machine where that has not been
+granted `osascript` refuses with "not allowed to send keystrokes (1002)". The
+first version then disabled keep-awake ENTIRELY - and that threw away the half
+that matters most to the bot. Measured the morning after:
+
+    the machine was asleep for 1172s - the game session will not have
+    survived that; relogging
+    ... and again at 205s, 245s, 244s
+
+Every one of those is a lost in-flight mission. So the two concerns are now
+served separately:
+
+    caffeinate -i -w <pid>    prevents idle SYSTEM SLEEP. No permission of any
+                              kind. This is what stops the suspend-and-relog
+                              loop above.
+    osascript key code 63     resets the HID idle timer, which is the only
+                              thing that keeps the screen unlocked and Teams
+                              off Away. Needs Accessibility.
+
+**`caffeinate` cannot substitute for the poke**, and that is measured, not
+assumed: `caffeinate -u -t 1` moved the idle counter 39.3s -> 40.4s, i.e. it
+did not reset it at all. It is a power assertion, not an input event. So a
+machine with no Accessibility grant keeps botting through the night and still
+goes Away in Teams - which is the honest trade, and the log now says exactly
+which half is active.
+
+`-w <pid>` is what makes the child safe to spawn at all. The docstring below
+already rejects "shelling out to an external daemon" because `kill -9` on the
+bot skips every `finally` and would leave the machine awake for ever with
+nothing to turn it off. `caffeinate -w` releases its assertion when the
+watched process exits, so the guarantee is structural rather than a promise
+about cleanup paths - verified: the child outlived a `stop()` by nothing, and
+exits on its own when the bot is killed outright.
+
 Presence is a convenience. It must never take the bot down with it, so every
 failure here is logged once and swallowed.
 """
@@ -52,6 +88,10 @@ THRESHOLD = 120   # only inject after this many seconds of real idle
 INTERVAL = 30     # how often to look
 
 _POKE = ["osascript", "-e", 'tell application "System Events" to key code 63']
+
+# Prevents idle SYSTEM sleep and nothing else. `-w` ties its lifetime to ours.
+def _sleep_guard_argv(pid):
+    return ["caffeinate", "-i", "-w", str(pid)]
 
 
 def idle_seconds():
@@ -83,11 +123,25 @@ class KeepAwake:
         self._thread = None
         self._warned = False
         self._pokes = 0
+        self._caffeinate = None
 
     def start(self):
         # No-op off macOS: `ioreg` and `osascript` are the whole mechanism.
         if platform.system() != "Darwin":
             return self
+        # SLEEP FIRST, because it needs no permission and it is the half that
+        # costs missions when it is missing.
+        try:
+            import os
+            self._caffeinate = subprocess.Popen(
+                _sleep_guard_argv(os.getpid()),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.log.info("sleep guard on (caffeinate -i, released when this "
+                          "process exits)")
+        except Exception as e:
+            self._caffeinate = None
+            self.log.warning("no sleep guard: %s - the machine may suspend "
+                             "and cost an in-flight mission", e)
         self._thread = threading.Thread(target=self._loop, name="keep-awake",
                                         daemon=True)
         self._thread.start()
@@ -95,6 +149,12 @@ class KeepAwake:
         return self
 
     def stop(self):
+        if self._caffeinate is not None:
+            try:
+                self._caffeinate.terminate()
+            except Exception:
+                pass                      # `-w` releases it regardless
+            self._caffeinate = None
         if not self._thread:
             return
         self._stop.set()
@@ -122,7 +182,16 @@ class KeepAwake:
         # the bot is ticked in System Settings > Privacy & Security >
         # Accessibility. Say it once, then stay quiet - it will not fix itself
         # mid-run and a per-interval warning would bury the mission log.
-        self._warn("keep-awake disabled: %s" % (r.stderr or "").strip()[:90])
+        # SAY WHAT IS LOST AND WHAT IS KEPT. Disabling the poke used to read
+        # as "keep-awake disabled", which sounds like the machine will now
+        # sleep - it will not, the caffeinate assertion is separate and needs
+        # no permission. What is actually lost is the screen staying unlocked
+        # and Teams staying off Away.
+        kept = ("; the machine still will not sleep (caffeinate)"
+                if self._caffeinate is not None else "")
+        self._warn("idle-poke disabled: %s%s - grant Accessibility to the app "
+                   "that launched the bot to keep the screen awake"
+                   % ((r.stderr or "").strip()[:90], kept))
         self._stop.set()
 
     def _warn(self, msg):

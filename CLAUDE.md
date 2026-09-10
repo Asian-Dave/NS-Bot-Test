@@ -2024,12 +2024,25 @@ point that a coordinate is meaningless without the geometry it was measured at �
 the same ten tiles are 148 CSS px apart in one and 150 captured px apart in the
 other.
 
-## Cross-reference: CMMhero NS Bot (decompiled, `ref/tp/cmmhero`)
+## Cross-reference: CMMhero NS Bot (decompiled) — SOURCE NO LONGER KEPT
 
-Third-party Windows/C#/Adobe-AIR bot for a **different** private-server clone.
-Mechanics reference only - never run the binary (it hardware-fingerprints, plants a
-DPAPI licence file that survives uninstall, and opens a plaintext WebSocket to a
-hardcoded IP). Findings that change our design:
+Third-party Windows/C#/Adobe-AIR bot for a **different** private-server clone,
+used as a mechanics reference. **`ref/tp/cmmhero` has been deleted**; the
+findings below are the whole of what it was worth, the one algorithm worth
+having is ported (`engine/kekkai.py`), and every open question that needed the
+C# has since been answered by measuring our own client - see
+`docs/PORT_FROM_CMMHERO.md` for which and how.
+
+That is the better outcome regardless: their build is a different private
+server, so their code was only ever a hypothesis about ours. Every place we
+took their word for something and later measured it, the measurement won - the
+target ring being the clearest case.
+
+It was also mildly hazardous to keep on disk: it hardware-fingerprints, plants
+a DPAPI licence file that survives uninstall, and opens a plaintext WebSocket to
+a hardcoded IP. It was never run here.
+
+Findings that changed our design, kept because the reasoning still applies:
 
 * **Their symbol matcher is better specified than our sketch**
   (`CardSolver.cs:139-166`): inset each crop by 20% to drop the frame, resize to
@@ -2133,6 +2146,94 @@ rescans on arrival, and **clears the dud set**, because those coordinates
 described the previous map and would blacklist innocent ground on a map the bot
 has never seen.
 
+## MINIMISING THE WINDOW — the renderer survives it, the COMPOSITOR does not
+
+"Can the window be minimised and still keep the game running?" splits in two,
+and rAF alone gives the wrong answer to the half that matters.
+
+**THE GAME KEEPS RUNNING, COMPLETELY UNTHROTTLED.** Measured with a
+second-by-second rAF trace recorded IN the page (so nothing is evaluated while
+the window is down, and a suspended renderer cannot hang the probe):
+
+    t     top fps   game fps   visibilityState
+    -1      120       120      visible
+    +1      119       119      hidden        <- minimised
+    +6      118       118      hidden
+    +12     120       120      hidden
+    +13     120       120      visible       <- restored
+
+`visibilityState` does go to `hidden`, and rAF does not care: 120 fps
+throughout, in the top page and in the game frame alike. That is the three
+launch flags doing their job — `--disable-backgrounding-occluded-windows`,
+`--disable-renderer-backgrounding`, `--disable-background-timer-throttling`,
+all three verified present on the live browser. `browser.py`'s comment
+predicted exactly this and it is now measured rather than hoped.
+
+**BUT THE BOT DOES NOT SEE VIA rAF — IT SEES VIA `Page.captureScreenshot`,
+AND THAT BLOCKS.** Same window, captures issued on their own CDP connection
+from a worker thread:
+
+    t       took    phase
+    -0.4    0.14s   visible
+    +0.3    7.00s   MINIMISED   <- returned only when the window came back
+    +8.2    0.13s   visible
+
+    and again over 45 s down:
+    +0.3   45.98s   MINIMISED   <- same, so it does NOT recover on its own
+
+One capture, issued just after minimising, blocks for exactly as long as the
+window is down. **Zero captures complete while minimised**, at either
+duration. A minimised window does not composite, so there is no new frame to
+hand over — and nothing times out, because `CDP.call` waits with `select` and
+no socket timeout (a timeout expiring mid-frame desynchronises the stream, as
+this file records).
+
+**IT IS THE GOOD FAILURE, AND THAT IS WORTH SAYING PRECISELY.** The bot is
+parked INSIDE the capture call: it never receives a frame to be wrong about,
+never reports an unrecognised screen, and never clicks. The DANGEROUS version
+would be captures SUCCEEDING with stale pixels, which is exactly what this
+file warns about for the lock screen — "captures show a stale frame and every
+template match is against the past". That is not this.
+
+It freezes more than the perception, though: `Capture.on_activity` is the hook
+that pumps the operator's buttons and the panel's heartbeat, so Run, Stop and
+the staleness banner all stop being serviced too. Everything resumes cleanly
+on restore.
+
+**THE REAL HAZARD IS THAT THE GAME DOES NOT FREEZE WITH IT.** rAF keeps
+running at 120 fps, so the world moves on while the bot is blind, and several
+things in this game are on a CLOCK: Balance Control allows 169 s per stage,
+Lights Out 84 s, and combat has its own turn timer. Minimise mid-puzzle and
+the bot resumes to a `Mission Fail` it could not have prevented. Park the
+window off-screen instead.
+
+**OFF-SCREEN IS THE ANSWER, AND IT WORKS PERFECTLY.** Move the window instead
+of minimising it: still a normal, composited window, just not where anyone is
+looking. Measured over the same six seconds:
+
+    +0.5 .. +5.3   0.14 .. 0.16s per capture, every frame different
+
+Full speed, no stalls. Note macOS CLAMPS the position — asking for
+`left: 6000, top: 3000` landed it at `1688, 995`, keeping a corner on the
+desktop — so in practice the window ends up parked in a corner rather than
+truly gone. Covering it with another window is the same class and the
+occlusion flag already handles that.
+
+Two things that follow:
+
+* **Never resize it to hide it, only move it.** The bot's viewport is pinned
+  with `Emulation.setDeviceMetricsOverride`, so it is independent of the OS
+  window and moving cannot desync a click. Resizing `ruffle-player` is the
+  standing prohibition at the top of this file, and shrinking the OS window is
+  a needless invitation to reflow the page under the bot.
+* **A separate macOS Space is UNMEASURED.** It plausibly behaves like a
+  minimise (the compositor for an inactive Space may stop), and guessing is
+  what this file exists to prevent. Measure it with the same probe before
+  relying on it.
+
+Still distinct, and still true: SLEEP cannot be prevented and the LOCK SCREEN
+is unmeasured — see the section on those. This entry is about minimising only.
+
 ## SLEEP AND LOCK SCREEN ARE DIFFERENT PROBLEMS — one is impossible
 
 Asked as one question ("can the bot keep running when I sleep or lock the
@@ -2165,6 +2266,47 @@ waking relogs and clears the drift cache and alignment flag, exactly as the
 window-size path does and for the same reason. It degrades safely: on a
 platform whose monotonic clock includes suspend time the difference stays ~0
 and the detector simply never fires.
+
+### LOSING THE IDLE POKE MUST NOT ALSO LOSE SLEEP PREVENTION
+
+`presence.KeepAwake` had ONE mechanism and it needs a permission. The fn-key
+poke goes through `osascript`, and on a machine without the Accessibility
+grant macOS refuses it — *"not allowed to send keystrokes (1002)"* — after
+which the handler disabled keep-awake **entirely**. That threw away the half
+that costs missions. Measured the morning after, from the bot's own log:
+
+    the machine was asleep for 1172s - the game session will not have
+    survived that; relogging          ... and again at 205s, 245s, 244s
+
+Every one of those is a lost in-flight mission, and it looked like a sleep
+problem the bot could not do anything about. It was a permission problem
+taking an unrelated guard down with it.
+
+Two concerns, and only one of them needs permission:
+
+    caffeinate -i -w <pid>   prevents idle SYSTEM SLEEP. No permission of any
+                             kind. This is what stops the suspend-and-relog
+                             loop above.
+    osascript key code 63    resets the HID idle timer, which is the only
+                             thing that keeps the screen unlocked and Teams
+                             off Away. Needs Accessibility.
+
+**`caffeinate` cannot substitute for the poke, and that is measured** — this
+file already records `caffeinate -u -t 1` moving the idle counter
+39.3s -> 40.4s, i.e. not resetting it at all. It is a power assertion, not an
+input event. So a machine with no Accessibility grant now farms through the
+night and still goes Away in Teams, which is the honest trade; the warning
+names which half is gone and which is still standing, instead of the old
+"keep-awake disabled" that implied both.
+
+**`-w <pid>` is what makes spawning a child acceptable at all.** This module
+explicitly rejects "shelling out to an external daemon" because `kill -9` on
+the bot — the operator's habit when a run wedges — skips every `finally` and
+would leave the machine awake indefinitely with nothing left to turn it off.
+`caffeinate -w` releases its assertion when the watched process exits, so the
+guarantee is structural rather than a promise about cleanup paths. Verified
+both directions: it holds while its target lives, and exits on its own when
+the target dies.
 
 **LOCK SCREEN IS A DIFFERENT ANIMAL — processes keep running.** macOS does not
 suspend on lock; the risk is Chrome, not the OS. Ruffle's render loop is
@@ -2762,6 +2904,41 @@ does not raise, that it walks toward the badge, and that it never clicks the
 badge itself. Source inspection is a supplement to execution, never a
 substitute.
 
+### ASSIGNING A NAME ANYWHERE MAKES IT LOCAL EVERYWHERE — the second UnboundLocalError
+
+Shipped with 998 checks passing, and it died on the first real mission of the
+day:
+
+    SS: this mission is rune
+    ERROR task error: UnboundLocalError: local variable 'play' referenced
+                      before assignment
+
+`run_one` dispatches four ways. The puzzle branch had been written as
+
+    play = play_balance if kind == "balance" else play_lights
+
+and Python makes a name local to the WHOLE function if it is assigned
+anywhere in it — so the RUNE branch's call to the module-level `play` resolved
+to an unbound local and raised before doing anything at all. The rune family
+is the one this project has supported longest, and it was the one that broke.
+
+**This is the second instance of exactly this bug.** `_traverse` shipped with
+`UnboundLocalError: local variable 'arrow'` behind 749 passing checks, and
+this file already draws the conclusion: *a test that reads code cannot catch
+code that does not run*. Every assertion written about `run_one` inspected its
+text — its branches, its ordering, which functions it mentions — and the text
+was never the problem.
+
+`test_every_run_one_branch_actually_runs` CALLS it once per family with fakes,
+and additionally asserts from the BYTECODE that `play` is not a local of
+`run_one` at all, which does not depend on how the line happens to be spelled.
+Verified by reintroducing the bug: the test reports the identical
+`UnboundLocalError` the live run hit.
+
+General rule, now paid for twice: **a dispatcher must be executed down every
+branch it offers.** Fakes are cheap; the branch that never runs in testing is
+the branch that runs in production.
+
 ## "THE TASK RETURNED" IS NOT "THE TASK ACHIEVED SOMETHING"
 
 The same live loop exposed a hole in the setback budget. `farm.farm` CATCHES a
@@ -2883,6 +3060,66 @@ relative string and was invisible. The assertion now reads the module source
 instead - the right move whenever a platform-specific value cannot exist on the
 platform running the test.
 
+### `os.kill(pid, 0)` IS A KILL ON WINDOWS, NOT A PROBE
+
+Reported from a Windows machine: *"when I clicked stop it did not immediately
+reconnect the panel and just died."* That is precisely what the code did.
+
+CPython's `os.kill` only sends a real signal for `CTRL_C_EVENT` and
+`CTRL_BREAK_EVENT`; for every other value it calls
+`TerminateProcess(handle, sig)`. So the POSIX liveness idiom
+`os.kill(pid, 0)` **terminates the target with exit code 0** there — and
+`_respawn` releases the pid lock by asking `_lock_holder(lock) == os.getpid()`,
+which probed OUR OWN pid. Pressing Stop therefore made the process kill itself
+before it could spawn its replacement, leaving the injected panel with no
+receiver: exactly the "dead panel, no bot" state Stop was rewritten to prevent.
+
+`_alive(pid)` is now the single liveness probe and is non-destructive on both
+platforms. Windows has no zombies, so a handle that signals means the process
+is finished, and `WaitForSingleObject(h, 0)` answers directly —
+`WAIT_TIMEOUT` running, `WAIT_OBJECT_0` exited — opened with `SYNCHRONIZE`,
+the least right that permits the wait, so it cannot modify the target even by
+accident.
+
+**Two more POSIX-only assumptions sat in the same path, and both failed
+SILENTLY rather than loudly:**
+
+    `_dead`      shelled out to `ps`, which raises FileNotFoundError on
+                 Windows, was swallowed, and returned "not dead" for ever - so
+                 every `_wait_for_exit` burned its full 10 s timeout
+    `_proc_cmd`  also shelled out to `ps`, returning "" for every pid - and
+                 `_lock_holder` reads an unreadable command line as "not the
+                 holder we recorded" and DROPS THE LOCK. The one guard against
+                 two bots clicking one game was inert on Windows, on every
+                 launch.
+
+`_proc_cmd` now uses `Get-CimInstance Win32_Process` with a `wmic` fallback
+(`wmic` is deprecated and absent on recent Windows, so it cannot be the only
+route), and `_dead` no longer reaches for `ps` there at all.
+
+**The unknown-answer direction matters and is chosen deliberately.** When
+`_alive` genuinely cannot tell, it says ALIVE: a false "alive" costs a refused
+launch the operator can resolve by killing a process, while a false "dead"
+lets two instances click the same game — which this file records happening
+eight instances over.
+
+**A test that only runs on POSIX still catches this**, which is the point:
+it asserts there is exactly ONE `os.kill` call site, that it is inside
+`_alive`, and that the platform test precedes it in the CODE (the first
+version of that assertion matched the docstring's own prose and failed on
+correct code — the trap this suite keeps re-learning). It also spawns a real
+child, probes it four times and asserts it is still running, which the old
+code would have killed.
+
+### AND TWO WINDOWS REPORTS THAT WERE NOT BUGS AT ALL
+
+The same machine reported the window still scrollable and webgl not working
+for the bot. Both features exist ONLY in commit `75053db`, which sat
+**unpushed** while that machine was tested; the newest commit it could have
+pulled predates the scroll lock and `tpl/webgl/` entirely. Before diagnosing a
+platform difference, check `git log --oneline -1` on the platform — a missing
+commit and a broken port look identical from the outside.
+
 ## THE "Go!" BADGE BLINKS — which is why one veto worked and the next did not
 
 The badge veto shipped and then failed intermittently. Nine seconds apart in
@@ -2931,3 +3168,1301 @@ The badge marks the way ON, not a destination to stand on. Within
 heading is KEPT rather than recomputed. Continuing right is what produced
 `moved on` about thirty-five seconds later, so the guard would have saved that
 whole excursion.
+
+## THE EXAM RUNE PUZZLE — already supported; only the navigation is missing
+
+The reference bot solved this puzzle for the **Jounin and Sage exams** and never
+for TP; we did the exact opposite. Porting "the exams" turned out to need no new
+solver at all, because every piece of the path was already context-free:
+
+* `minigame.classify` reads the family OFF THE SCREEN rather than from a
+  configured label - the decision recorded above as "the pixels win" - so an
+  exam seal is recognised as a kekkai with nothing added;
+* `kekkai_play` contains no TP assumptions (asserted by the suite, which greps
+  it for `tp_training_row`, `special_tab` and `TP Training`);
+* `hunt_and_solve` **counts the seal's nodes** and uses that as the code length,
+  which is the whole of the difference between an exam and TP - their bot keyed
+  four coordinate tables 2..5, and TP only ever showed 3 and 5;
+* `kekkai.candidates` is a plain product over the six runes, so it is generic in
+  the length.
+
+Verified, since lengths **2 and 4 had never been exercised on this side**:
+
+    length   candidates   secrets tried   solved   avg guesses   worst
+       2             36        36 (all)       36          3.72       6
+       3            216       216 (all)      216          4.07       6
+       4          1,296              80       80          5.28       7
+       5          7,776              80       80          6.06       8
+
+**WHAT IS NOT PORTED IS THE NAVIGATION**, and it cannot be: nobody has captured
+an exam's screens, and inventing templates for a menu nobody has looked at is
+the eyeball mistake this file exists to prevent. Their coordinate tables are for
+their own geometry on a different private-server build, so they would not
+transfer even if kept.
+
+So `tasks.ExamKekkai` divides the labour honestly. `needs_lobby` is False - for
+the same reason the farm can start mid-mission, since the resume ladder
+deliberately cannot name an exam screen and demanding the lobby first would make
+the task unusable. The operator navigates to the exam and presses Run; the bot
+plays the puzzle. When it finds no puzzle it says so precisely and **saves the
+frame**, which is how the navigation gets taught - the same trick that
+eventually solved the mission list, the between-turns battle, the seal-broken
+dialog and the Level Up panel.
+
+## SS TRAINING — the multi-stage rune puzzle, cleared
+
+Mission Room -> `Special` tab -> `SS Training`, one row below TP Training at
+(2118, 1037). Five missions, all Lv 80, XP 10,000, Gold 10,000, flame 30 -
+five times TP's reward against TP's flame of 10:
+
+    Twins Unicorn · Sage Power Seal · Forest Guardians
+    Balance Control · Sage Sealed Boxes
+
+`Sage Power Seal` is **the same rune Mastermind as the TP kekkai**, and it has
+been cleared end to end: two stages, `Mission Success!` banked.
+
+**THE GAME STATES ITS OWN FEEDBACK MAPPING.** A rules panel opens before the
+puzzle and says outright that the green disc counts runes "correct in both
+pattern and position" and the gold disc "a correct rune pattern placed in the
+wrong position". That is exactly what this project established by carrying both
+hypotheses through live play - the mapping was right, and it is now confirmed
+from the game rather than inferred.
+
+### One mission is several stages, and the length ESCALATES
+
+    stage 1   FIVE nodes  -> length 5, answer Red,White,Blue,Black,Green
+    stage 2   SIX  nodes  -> length 6, answer Yellow,Red,Black,Green,Blue,White
+
+So the length is re-read PER STAGE from the seal's node count and never
+carried over. `count_nodes` needs a bigger box than the TP triangle uses -
+measured, the default (260, 160) clips a pentagon and returns 3 for a five-node
+seal, so `ss.NODE_BOX` is (320, 300).
+
+**CORRECTION — THE SECRET LOOKS LIKE A PERMUTATION.** This section used to
+say "repeats occur", on the strength of a five-node stage whose two SURVIVORS
+both repeated White. That was an inference from a model, not an observed
+answer, and it was made during the run where a misread counter poisoned the
+model — which is precisely what leaves only repeat-y survivors, by eliminating
+the true repeat-free code.
+
+Every answer the bot has actually CONFIRMED is repeat-free:
+
+    len 3   White, Blue, Yellow
+    len 3   Green, Blue, Black
+    len 5   Yellow, Blue, Green, Black, Red
+    len 6   Yellow, Black, Red, Green, Blue, White   <- all six, once each
+
+The operator found this by watching the bot click the same rune three times
+and asking whether the puzzle allows that at all. It is a good question and
+the answer changes the search space by 65x at length 6 — 720 codes instead of
+46,656 — which matters because ten rows is the whole budget and running out
+fails the MISSION, not the stage.
+
+**`kekkai.AUTO` acts on it without gambling on it**, because an empty pool is
+already a detected condition here: `next_guess` returns None and the caller
+stops rather than guessing. So a secret that DOES repeat cannot produce a
+wrong answer — only an exhausted permutation pool, after which AUTO widens to
+the full space carrying the same history. `surviving()` returns which space
+was used, so a widen is visible rather than silent, and the evidence keeps
+accumulating.
+
+Measured over random secrets:
+
+    permutation secrets   len 3  40/40  worst 5
+                          len 5  40/40  worst 6      (was avg 6.06, worst 8)
+                          len 6  40/40  worst 7
+    REPEATING secrets     len 3  30/30      len 5  30/30   - still solved
+
+### TEN ROWS PER STAGE, AND RUNNING OUT FAILS THE MISSION
+
+Not the stage - the whole mission, with `Mission Fail - Sorry, try again next
+time`. That was learned expensively: a diagnostic sweep of six all-same probes
+left four rows for solving and lost the mission. Knuth selection needs roughly
+six to eight guesses at length six, which fits ten; a probe sweep does not.
+
+An all-same guess is still the one probe whose answer is knowable without
+reading it - gold MUST be 0, because no wrong-position match is possible when
+every slot holds the same rune - which makes it perfect for harvesting and far
+too expensive for playing.
+
+### THE STAGE DIALOGS ARE TOLD APART BY COLOUR
+
+    Stage Clear    a GREEN button, area 31542, 351x108, centre (1712,  991)
+    Mission Fail   a RED   button, area 29891, 352x108, centre (1720, 1015)
+
+Same shape, same place; only the colour differs, and it decides whether to
+carry on to the next stage or stop. Checking the dialog BEFORE the puzzle
+matters: a solved stage leaves the panel closed and the dialog up, and "the
+panel is gone" alone cannot tell a clear from a failed mission - a script that
+read a closed panel as "solved" reported a win on a mission that had just
+failed.
+
+Verified against a real distractor: the game's own "Learn new Jutsu" nag has a
+green `Go to Academy` button inside the same band and is correctly NOT read as
+a stage dialog, because its aspect ratio is far wider than an OK button's 3.25.
+
+### GEOMETRY THAT WAS HARDCODED TO THE TP LAYOUT
+
+Five things, all now located rather than assumed, and each validated against
+both layouts:
+
+| | was | now |
+|---|---|---|
+| history column x | fixed 1950..2030, found NOTHING on SS | TP 1987, SS 2058 |
+| gold disc offset | fixed 86 | TP 84..86, SS 78..79 |
+| `count_filled` window | fixed, landed on SS's gold discs | relative to the located gold column |
+| `find_rune_buttons` | first row of six wins | the row with the widest HUE SPREAD |
+| `find_confirm_point` | largest dark blob | a SOLID disc, not a dark ring |
+
+**The rune row was the worst of them.** At length six there are six numbered
+slots AND six rune discs - two rows of six evenly spaced identical circles -
+and it locked onto the SLOTS. Every click landed on an empty numbered slot and
+six successive guesses read back byte-identical feedback from an untouched
+board. Saturation does not separate them (mean S 75 against 85); hue spread
+does, decisively:
+
+    slot row   H = 19 19 19 19 19 19        spread   0
+    rune row   H = 53 174 120 0 24 15       spread 174
+
+`find_confirm_point` had two failures in one. It picked a dark RING - a node's
+outline - whose centroid lands in the pale middle, so it returned a point that
+was BRIGHT (grey 220) out of a mask built from `g < 90`. Requiring a solid fill
+fixes it: the real submit disc measures fill 0.65 / 0.66 / 0.77 across the
+three layouts while every distractor sits at 0.18..0.47. And a "the centre must
+be dark" test was tried and REJECTED THE RIGHT BLOB everywhere, because the
+kanji is drawn LIGHT on the dark disc - centre grey 148 on both SS stages and
+204 on TP.
+
+### `count_filled` BY EDGES, because a black rune is not saturated
+
+The old version counted a row as filled from the fraction of strongly
+saturated pixels in the rune strip. That works until a row contains the BLACK
+rune: measured on a scroll with eight rows filled, the two rows holding black
+read 0.09 against a 0.12 gate and were counted EMPTY, so it returned 6 for 8 -
+and the solver then read stale rows and converged by luck.
+
+Hue is irrelevant to "is there an icon here, or a dash?", so measure STRUCTURE.
+Edge density separates cleanly and a black rune has as strong an outline as a
+bright one:
+
+    filled rows   0.160 .. 0.215 (SS, including the black-rune rows), 0.168 (TP)
+    empty rows    0.009 .. 0.089 (both layouts, both renderers)
+
+### `solve_live` CAN RESUME, because rows are the scarce resource
+
+It used to start a fresh model on every call, so a restart replayed the same
+openers into fresh rows - and a restart is exactly what happens after an
+unreadable digit is harvested and labelled. At length five the solver needs
+about six of the ten rows, so two wasted restarts lose the mission.
+
+`history` seeds it with answers already on the scroll and `on_history` reports
+them back after every answer, so a caller can resume. **The seed shape is the
+flat `(guess, green, gold)` this function already appends** - a first attempt
+passed a nested `(guess, (green, gold))` and would have filtered against a
+shape the solver never produces.
+
+Measured working: stage 1 resumed from two answers and solved in four more;
+stage 2 resumed three times across digit harvests and still finished inside its
+ten rows.
+
+### The digit exemplars are complete, 0 to 6
+
+Harvested during the clear, both discs. The set was the whole reason the solver
+kept stopping, and every stop was correct behaviour - an unread counter is
+refused, never rounded to the nearest exemplar, because a wrong counter
+silently corrupts the model. That happened once and is worth remembering: with
+only 0 and 1 present, an SS "2" matched the "1" exemplar above the 0.80 gate,
+the solver recorded green=1 for a row that truly read 2, and every candidate it
+computed afterwards came from a false premise.
+
+Note the last stall of the winning run was the digit **6** - the win condition
+itself. The game acted on it and cleared the stage while the solver could not
+read it, so the mission succeeded without the bot knowing why.
+
+## TP NOW BANKS — and the last blocker was a hand-picked threshold
+
+Five TP missions banked in one session across all three families: hand-seal
+(including eight-sign rounds), memory cards (20/20 and 10/10), and the kekkai.
+Before this, every pass read "N started, 0 banked".
+
+**THE CAUSE WAS FIVE THOUSANDTHS.** `close_out` confirmed the village with
+`_tpl("lobby_rail_fortune", 0.90)` - a threshold invented at the call site. The
+anchor's CALIBRATED threshold is 0.88; 0.90 was reasonable when it measured
+~1.000, which it does on wgpu. On webgl the same anchor reads **0.895**, so the
+village could never be confirmed and a won mission was reported as a failure.
+One second apart in the log:
+
+    15:56:40  Success panel cleared but the village did not come back; not
+              calling this a success
+    15:56:41  resume: lobby (lobby_rail_fortune conf=0.895)
+
+The resume ladder, on the calibrated 0.88, found it instantly. A threshold is
+calibrated ONCE against measured extremes; every call site that re-guesses it
+is a place where one backend, one animation frame or one re-cut silently
+changes an outcome. `lobby_rail_fortune` also has a webgl variant now, so it
+reads 1.000 there and the margin is real rather than marginal.
+
+### `close_share_x` CLOSES THE SUCCESS PANEL ITSELF
+
+There is often no separate share prompt to dismiss. Measured live:
+`close_share_x` matched 0.998, was clicked, and the next frame was the VILLAGE
+with the gold and level both up - the template had matched the reward panel's
+OWN close button, and the mission was already banked.
+
+The old code went straight on to hunt for the green check on that village
+frame, failed, and logged *"Success panel up but its check was not located
+(0.609)"* about a panel that no longer existed. **That one misleading line sent
+this investigation to measure a check glyph on a frame with no panel in it,
+twice** - a scale sweep peaked at 0.699 on village scenery. So the panel is now
+RE-VERIFIED after any dismissal, and if it has gone the village confirmation
+decides, which is the measurement that actually establishes a banked mission.
+
+**AND SAVE THE FRAME YOU SCORED, NEVER A FRESH CAPTURE.** The "save the frame
+that defeated us" instrumentation re-captured at save time, so it wrote the
+village - evidence that looked exactly like a panel whose check could not be
+found. Worse than no evidence, because it was confidently wrong. It saves `f`,
+the frame the decision was made on.
+
+## THE KEKKAI DIGIT READER — key on the INK, not on a white outline
+
+The kekkai stopped after guess 1 every time: "could not read row 0 (green
+0.410 / gold 0.897)". The geometry was never wrong - overlaid on a saved frame,
+the coordinates land exactly on the two feedback discs - and neither was the
+solver. `digit_mask` thresholded BRIGHT pixels, because on wgpu the glyph is a
+dark digit with a WHITE OUTLINE. webgl draws no outline, so:
+
+    green disc (dark)   bright fraction 0.08  - the "0" VANISHED, leaving only
+                                                a specular highlight
+    gold disc (light)   bright fraction 0.375 - the DISC went white and the "1"
+                                                became a dark HOLE in it
+
+The ink is dark in BOTH renderings - measured p1=17 against a green disc body
+of 112, and p1=28 against a gold body of 198 - so that is what to key on.
+Taking the darkest 30% inside a disc-shaped window (which also excludes the
+parchment and the disc's dark rim) gives a clean legible glyph on either disc,
+at consistent mask fractions of 0.150 and 0.153 where the old mask gave
+0.08 and 0.375.
+
+**THE OLD EXEMPLARS ARE NOT REUSABLE, AND THAT WAS MEASURED BEFORE RELYING ON
+IT.** Scored against ink masks of a known 0 and 1, all sixteen outline
+exemplars sat at 0.33..0.63 distance and the ink "1" matched `2.png` BEST - a
+wrong answer. An outline and a silhouette of the same glyph are different
+shapes, which is also why this file's earlier attempts to normalise between the
+two measured worse. So the ink set lives in `ref/auto/tp/digits_ink/` and
+`digits/` is left in place, unloaded, as the record of what wgpu draws.
+
+**IT IS DELIBERATELY INCOMPLETE.** Only two digits could be labelled with
+certainty from a saved panel - a "0" on the green disc and a "1" on the gold -
+so the gate has to REFUSE the rest rather than round them to the nearest
+exemplar. Verified: with only the wrong exemplar available, a 0 scores 0.099
+and a 1 scores 0.206 against the 0.80 gate, so both are refused; with the right
+one, both read 1.000. A wrong counter corrupts the solver's model silently,
+which is far worse than an unread one.
+
+Two exemplars turned out to be enough for a live solve, because early feedback
+counters are small:
+
+    guess 1  Green,Red,Blue     pool 216   feedback green=1 gold=1
+    guess 2  Green,Green,Red    pool  24   feedback green=1 gold=0
+    guess 3  Green,Blue,Black   pool   8   panel closed -> SOLVED
+
+A 2 or a 3 will still be refused and saved for labelling, which is the correct
+failure and how the set grows.
+
+## THE COLD START HAD NO RENDERER TO READ
+
+`main` asks for the backend once, at startup - but a cold SWF takes 25-30 s, so
+on a fresh launch there is no `ruffle-player` yet:
+
+    renderer: no canvas context yet (no ruffle-player)
+    renderer unknown, so the default templates stand
+
+and nothing re-asked. A session that started before the game finished loading
+therefore ran on the WRONG template set for its entire life, which on webgl
+means the farm cannot leave the village - the exact failure the variants exist
+to fix. It only came right in practice because the operator happened to switch
+the renderer by hand, which reloads and re-reads.
+
+`Runner.ensure_renderer_templates` asks once per cycle and stops the moment it
+gets an answer, so the steady-state cost is nothing. It does not re-ask once
+known: the renderer cannot change while the document stays put, and
+`_apply_game_setting` already covers the case where it does.
+
+## THE HAND-SEAL GAME WAS NEVER FAILING TO MEMORISE — it clicked too early
+
+Five TP missions, zero banked, and the board explained it in one glance:
+`Skill : 1 / 4` with **all three hearts** after the bot had "played" a round.
+Nothing had been submitted, right or wrong.
+
+**THE CLICKS WENT OUT DURING THE LOOK PHASE.** The sequence is read while the
+slots display it, and in that phase the tiles are face up but GREYED - a click
+on a greyed tile does nothing. The reader went from "recorded 2 of 2 sign(s)"
+straight to clicking about two seconds later:
+
+    15:05:12  look phase: recorded 2 of 2 sign(s), in order
+    15:05:14  CLICK hand sign 0 = tile 1
+    15:05:15  CLICK hand sign 1 = tile 8
+              board still `Skill : 1 / 4`, three hearts
+
+`wait_input_phase` fixes it, and the size of the wait is the proof: measured
+live it blocks for **9 to 19 seconds** depending on the sequence length. The bot
+had been clicking two seconds in, every time.
+
+**IT CANNOT GATE ON `tiles_live` ALONE, AND THAT IS THE INTERESTING PART.**
+The blue-glove check is the right primary signal on wgpu, where greying drives
+the glove's blue fraction to exactly 0.000. On webgl it returns instantly and
+fixes nothing, because **webgl does not apply the grey-out filter at all** -
+the glove keeps its blue and the tiles read LIVE throughout the look phase.
+Independently measured on the skill slots, where webgl greying left saturation
+at 0.397..0.748 against 0.000 on wgpu. Greying is a COLOUR operation, and
+colour is what this backend renders differently.
+
+So the second signal is the SLOTS, which flip back to NINJA SAGA card backs
+when input opens - a different IMAGE, not a recolour, and therefore
+renderer-independent. Both must hold: on wgpu they agree, on webgl the
+always-true tiles check reduces the condition to the slot signal.
+
+### `d = 0.000` IS AMBIGUOUS, AND BOTH READINGS ARE WRONG ALONE
+
+The old check compared the filled slot against the memorised sign and called
+`d=0.000` a match. This file had already warned that zero means "nothing
+happened". **Both of those are half right, and that is why the HUD had to be
+read instead.** Two opposite outcomes produce exactly 0.000:
+
+    nothing happened   the slot is STILL showing the prompt we memorised, so
+                       we compared a crop with itself
+    a CORRECT pick     the slot now shows that seal drawn as slot art - the
+                       very rendering we memorised - identical for the right
+                       reason
+
+Measured both, in that order. So it is UNKNOWN and never decides a round.
+
+### THE BOARD'S OWN HUD IS THE VERDICT — hearts and the round counter
+
+`seals.hud_state` / `hud_verdict` read two anchor-relative boxes beside the
+"Skill :" HUD and answer the question the slot art cannot:
+
+    hearts dropped     a WRONG answer was submitted -> the clicks DID land
+    counter changed    the round advanced -> they landed and were right
+    neither moved      NOTHING was submitted -> they did not land
+
+**No digit recognition is needed**, which is the point: hearts are counted as
+red blobs (measured 2738..2742 area, 67x56, three of them) and the counter is
+compared as an IMAGE against the pre-answer snapshot. That sidesteps the digit
+exemplar problem entirely - see the kekkai section below for what happens when
+you do depend on reading digits. Verified against synthetic heart-loss and
+counter-change frames, plus a lobby frame for the unknown case.
+
+Only "advanced" counts as a played round now. Our own slot check is not
+allowed to decide it.
+
+## WHY IT SOMETIMES LOST HEARTS — the catalogue was never built
+
+With the clicks landing, the remaining failures correlated perfectly with one
+number. Measured over one mission, with the HUD as the verdict:
+
+| round | thinnest margin | board |
+|---|---|---|
+| 1 | 9.32x | advanced |
+| 2 | **1.01x** | HEART LOST |
+| 3 | 5.78x | advanced |
+| 4 | 3.85x | advanced |
+| 5 | **1.06x** | HEART LOST |
+
+Both failures were ~1.0x; everything at 2.6x or better was accepted. The bot
+memorises the sequence perfectly - what fails is mapping a seal drawn SMALL ON
+A SLOT CARD over animated flames to the same seal drawn LARGE IN A WOODEN
+FRAME. Two of the ten have near-identical blue-glove silhouettes, and on both
+failures the ink tiebreak was consulted and **agreed with the wrong answer**.
+
+`load_catalogue()` exists precisely to remove that guess - and it reads
+`ref/auto/tp/seal_catalogue/`, **a directory that had never been created.
+There was no builder.** So the catalogue was always empty, `identify()` always
+returned None, and every round fell through to the weak cross-rendering path.
+
+`engine/build_seal_catalogue.py` builds it from the 288 crops already on disk,
+by the method `load_catalogue`'s own docstring specifies:
+
+* split by CROP SIZE, not filename - 104x104 is tile art, 140x170 is slot art.
+  Sizes are a property of the thing; the filenames were written by several
+  different code paths and are not uniform.
+* cluster WITHIN each rendering, which is the strong direction. Both distance
+  distributions are bimodal with an EMPTY GAP, so the threshold is a
+  measurement: tile pairs 0.000..0.104 then nothing until 0.156. Tile gives 10
+  clusters for every threshold from 0.05 to 0.15 and slot gives 10 from 0.03 to
+  0.12, so neither balances on a knife edge.
+* link the two renderings ONCE by a one-to-one assignment on mean cross
+  distance. **One-to-one is the whole point**: nine seals link at 2.72x..12.97x,
+  and the tenth links at **0.95x - its runner-up is CLOSER than its
+  assignment** - so it is settled BY ELIMINATION, which is exactly the leverage
+  the live matcher lacks because it decides each sign independently.
+
+Validated: **429 harvested crops, 100% correct, 0 wrong, 0 unknown** from four
+medoid exemplars per seal per rendering. Then live:
+
+    round 1  [8, 0]                    advanced, 3 hearts
+    round 2  [9, 2]                    advanced, 3 hearts
+    round 3  [4, 5, 2, 8]              advanced, 3 hearts
+    round 4  [7, 2, 1, 4, 9, 3]        advanced, 3 hearts
+    round 5  [2, 5, 3, 6, 8, 7, 1, 9]  board closed - 5/5 done
+
+**Zero hearts lost**, where the same mission had been losing two. Catalogue
+margins run 5.72x..70.42x against the old 1.01x. Note round 5 was EIGHT signs:
+the sequence length was never the problem - "recorded 8 of 8 sign(s), in order"
+was already working.
+
+**A UNION-FIND BUG NEARLY HID ALL OF THIS.** The first clustering used path
+halving written as `lab[a] = lab[lab[a]]; a = lab[a]`, which does not settle on
+a single root, and the tell was that the cluster sizes SUMMED TO MORE THAN THE
+INPUT - 220 members from 208 crops. A partition whose parts do not sum to the
+whole is not a partition, and its cluster COUNT cannot be trusted either. It
+reported 9 slot clusters where there are 10.
+
+## A GUARD DEFEATED BY A LABEL — the fourth instance of one bug
+
+The bot span on one screen for about ten minutes: `resume: no anchor matched`
+reaching **streak 634** with no relog and no pause.
+
+`Runner.step` drives `Resumer.advance()`, which has no `max_unknown` of its own
+(only `Resumer.run()` does), so the runner bounds the streak itself - a guard
+added after 52 consecutive unrecognised cycles. It was then defeated by a
+diagnostic label:
+
+    self.state = info.get("step", out)        # "unknown" - the ladder's verdict
+    if self.state == "unknown":
+        self.state = self._name_screen() or "unknown"   # -> "seal_entry"
+    ...
+    if self.state == "unknown": self.unknown += 1 else: self.unknown = 0
+
+`_name_screen` deliberately recognises the TP minigame HUDs, so on a hand-seal
+board - a screen the ladder cannot climb from - the label came back non-unknown
+and **the counter reset to zero on every cycle**.
+
+This file's own rule names it: *a guard bounded by a counter is only as good as
+the event that CLEARS the counter; clear it on evidence of progress, never on
+something merely correlated.* Now the ladder's own verdict is captured BEFORE
+anything relabels it, so naming a screen for the operator can no longer be
+mistaken for making progress on it.
+
+Previous instances, for the pattern: reset on reaching the lobby (a relog
+always does), reset on a task returning (a swallowed crash also does), reset on
+a lap that banked nothing. This is the fourth.
+
+## THE KEKKAI DIGIT READER DEPENDS ON THE MISSING TEXT STROKE
+
+The kekkai stops after guess 1 - "the first 3 choices", i.e. the three rune
+clicks - with:
+
+    could not read row 0 (green 0.410 / gold 0.897)
+      at green=(1997, 292) gold=(2083, 292)
+
+**The geometry is correct.** Overlaid on the saved frame, those coordinates land
+exactly on the green "0" and gold "1" feedback discs. The solver is fine too.
+What fails is reading the digits, and the reason is the same as everything else
+on this backend.
+
+`digit_mask` binarises BRIGHT pixels, because on wgpu the glyph is a dark digit
+with a WHITE OUTLINE and thresholding bright pixels captures that outline.
+**webgl draws no outline**, so:
+
+    green disc (dark)    bright fraction 0.08 - the "0" vanishes entirely and
+                         only the disc's specular highlight survives
+    gold disc (light)    bright fraction 0.375 - the DISC is white and the "1"
+                         is a dark HOLE in it
+
+Measured inside the discs, the ink is cleanly separable - green p1=17 against a
+disc body of 112, gold p1=28 against 198 - so a DARK-INK mask would work on
+both backends, since the ink is dark in both. The obstacle is not the idea:
+
+**every existing exemplar is stored as a white-outline MASK** (bright fractions
+0.24 green / 0.46 gold), so changing the mask function invalidates the whole
+set, and the raw crops they came from were never kept. Re-deriving them needs
+fresh captures of each digit on each disc. Not attempted here rather than
+half-done, and note this file's existing warning that normalising the two forms
+was tried and measured WORSE.
+
+Until then the reader refuses to guess and saves evidence - and it now saves
+**the whole frame plus the coordinates it used**, not just the two 68x68 crops.
+That mattered: the crops alone showed one near-solid black square and one white
+SPIRAL, which is a rune glyph, and nothing in a binarised 68x68 crop says
+whether the reader was misreading a digit or looking in the wrong place. The
+full frame answered it in one look.
+
+## STILL OPEN after all of the above
+
+* **the TP Success panel's check reads 0.609** against `green_check`'s 0.80
+  gate, so a played mission is not acknowledged and nothing banks. The same
+  glyph dismisses the FARM's Mission Success at 0.970 on the same backend, so
+  the template is not broken in general. The panel is transient and escaped
+  capture twice, so `tp.py` now SAVES IT when the check is not located.
+* **the kekkai digit exemplars**, above.
+
+## AN ACCIDENTAL SCROLL MUST NOT MOVE THE GAME — lock it in the PAGE
+
+The operator: "sometimes I accidentally scroll down which causes some kind of
+behaviour bug". It does, and this file already explains why - every minigame's
+geometry is ABSOLUTE, so a displaced game breaks all of them at once and each
+one reports a fault in its own subsystem. Measured previously: scrollY 60 put
+the game at **-236 captured px** and the memory board's rows measured -237 out.
+
+`__nsbotAlign` already put the scroll back, but it is only called from
+`ensure_focus`, which runs BETWEEN CYCLES - and a mission blocks for minutes.
+So an accidental scroll during a mission stood for the whole of it.
+
+**The fix belongs in the page**, for the same reason the panel's heartbeat does:
+Python is not there to notice. `__nsbotScrollLock` layers three mechanisms,
+because each catches what the others miss:
+
+    1. html,body{overflow:hidden !important}   removes the scroll rather than
+                                               reacting to it, and an
+                                               !important stylesheet beats the
+                                               site's inline styles
+    2. a `scroll` listener that snaps to 0     catches whatever still scrolls -
+                                               keyboard, the site's own script,
+                                               a focus() on some element.
+                                               `scroll` cannot be prevented,
+                                               only undone
+    3. wheel/touchmove preventDefault          stops the gesture before it
+                                               scrolls, so there is no visible
+                                               jump-and-snap
+
+Verified live, all four behaviours at once:
+
+    scrollTo(0, 400)                  -> snapped back, scrollY 0, snaps 1
+    a real wheel via Input.dispatch   -> scrollY stayed 0, nothing to undo
+    a five-event flick                -> scrollY stayed 0
+    the dock's own log pane           -> still scrolls (0 -> 40)
+
+**THE PANEL'S LOG PANE MUST STAY SCROLLABLE**, so layer 3 exempts any event
+inside the dock; layer 1 cannot affect it, being `position:fixed` with its own
+scroller. **KEYS ARE DELIBERATELY NOT BLOCKED** - this is a Flash game and the
+SWF may want them; a swallowed keystroke would be a new bug to chase, and
+layer 2 covers a keyboard scroll after the fact.
+
+**IT RIDES WITH FOCUS MODE, and that is a correctness decision rather than a
+convenience.** With focus ON the game is pinned at scrollY 0 and any scroll is
+an accident. With focus OFF the bot SCROLLS ON PURPOSE - `Capture.scroll_game`
+is the documented fallback for reaching an anchor in the hidden 119 px band,
+and the resume ladder alternates the scroll before calling a frame
+unrecognised. Locking there would break the one path that needs it.
+(`scroll_game` already no-ops under focus mode, so nothing else changed.)
+
+`align()` re-asserts the lock every cycle because a reload drops the injected
+style and its listeners - the standing rule that any cached belief about page
+state is invalidated by a navigation. Snaps are COUNTED and the count is read
+from the page, so an accidental wheel becomes a log line -
+`scroll: 1 accidental scroll(s) snapped back (the game did not move)` - instead
+of a mystery drift. It is pure DOM, so it behaves identically on every backend.
+
+## TP UNDER webgl — one variant, and the rest was already fine
+
+Tested end to end on webgl. Only `special_tab` needed recutting (0.795 against
+its 0.88 gate); everything else on the TP path held:
+
+    Special tab       1.000  (the new variant)
+    TP Training row   0.998
+    TP list           3 rows found at y=[462, 638, 818]
+    minigame classify seal_entry {'seal_hud': 0.998}, cards {'cards_hud': 0.986}
+    hand-seal round 1 sign 0 -> tile 2 (margin 6.63x), sign 1 -> tile 1 (10.58x)
+    memory cards      20/20 cells cleared BY THE GAME, 40.1 s
+
+So the blue-glove sign matcher and the mean-HSV card signature both survive the
+backend change - the two hardest pieces of perception in the project, and
+neither needed touching. Note `tp_training_row` measured 0.282 on the Mission
+Room screen, which is a CORRECT NEGATIVE (it lives on the TP list, not there) -
+scoring a template on a screen that does not contain it proves nothing, and
+doing so once already produced five bogus "broken" verdicts in one pass.
+
+Two things stop TP, and NEITHER is a rendering fault:
+
+* **the hand-seal round 2 PARKS** - "no Start, and the tiles are already live".
+  That is the open issue this file already records ("the slot row is both the
+  prompt AND the input"): by the time the bot looks, the round is in its INPUT
+  phase and the sequence is gone. The bot correctly refuses to click at random.
+  Worth noting the timing - round 1 finished at 14:45:17 and the bot looked at
+  14:45:20, which is `play()`'s 2.5 s inter-round sleep. Whether the reveal
+  happens inside that window is UNMEASURED; the experiment is to burst-capture
+  straight through a round transition rather than sleeping and then looking.
+* **the TP Success panel's check read 0.609** against `green_check`'s 0.80 gate,
+  so the reward was not acknowledged ("Success panel cleared but the village
+  did not come back; not calling this a success"). The same `mission_start`
+  glyph dismissed the FARM's Mission Success at 0.970 on the same backend
+  minutes earlier, so the template is not broken in general - this particular
+  panel is either drawing the check outside the 0.95..1.95 sweep or drawing it
+  differently. Unmeasured, because the panel was gone before it could be
+  captured and reaching it again costs a TP mission from the day's list.
+
+### A STALE LOG NEARLY PRODUCED A WRONG DIAGNOSIS, again
+
+While reading the above, `farm` lines appeared to be interleaved with a running
+TP task, which would have been a serious bug - two tasks acting at once. They
+were not. `run/app.log` is APPENDED ACROSS SESSIONS, and the farm lines sat at
+line ~12095 while the session being read started at line 15593: same wall-clock
+times, different days.
+
+This file already warns about exactly this ("check `ls -l run/app.log` against
+the clock before trusting it"). The warning is not enough on its own, because
+the trap is not a stale FILE - it is stale lines inside a live file. **Anchor
+the read to a line number**, e.g. the session's own startup line, and filter
+from there. Timestamps alone cannot separate sessions.
+
+## THE BACKEND CHANGES THE PIXELS — one template set is not enough
+
+The operator switched to `webgl` and the farm could not leave the village.
+Measured live, same session, same screen, minutes apart, only `renderMode`
+changed:
+
+| anchor | wgpu-webgl | webgl | canvas |
+|---|---|---|---|
+| `mission_room_entry` | **0.997** | 0.531 | - |
+| `char_slot_level` | **0.965** | 0.677 | 0.678 |
+| `character_select` | 0.865 | 0.442 | 0.436 |
+| `result_panel` | **1.000** | 0.341 | - |
+| `mission_success` | **1.000** | 0.418 | - |
+| `lobby_logo`, `nav_*` | 0.93..1.00 | 0.95..1.00 | - |
+
+**THE SPLIT IS NOT "LEGACY WEBGL IS BROKEN".** `webgl` and `canvas` agree with
+each other to **0.001** and both disagree with the wgpu backend. wgpu draws
+text WITH its stroke; the other two draw a thinner, unstroked face at a
+different baseline, and shift some element colours (a gold button beside the
+Mission Room plaque renders purple). Everything that is not text is
+**pixel-identical** - mean |diff| 3..7 across the plaque, with the whole
+difference confined to the text rows.
+
+So every template in this project is calibrated against the OUTLIER, and one
+variant set serves both of the others.
+
+    icons survive     nav_*, lobby_logo, the command discs, the green check
+    text does not     any crop whose discriminating content is lettering
+
+**A LOWER THRESHOLD CANNOT FIX IT.** `mission_room_entry` at 0.531 sits INSIDE
+the negative distribution - other anchors read 0.39..0.53 on the same frame -
+so a lower gate buys false positives, not recognition.
+
+### `tpl/<renderer>/<name>.png` overrides the default crop
+
+`perceive.set_renderer(name)` is module state, set once from
+`browser.renderer_info()["requested"]` - **`loadedConfig`, never the canvas
+context type**, which cannot tell `wgpu-webgl` from `webgl` because both draw
+through WebGL2. `load_templates` and `perceive.template` then prefer
+`tpl/<renderer>/`, and the log says which were substituted, because a silently
+swapped template is indistinguishable from a mis-cut one when a match later
+goes wrong.
+
+Six variants take the farm from "cannot leave the village" to a mission banked
+end to end on webgl (3 battles, 2 victories, closed out to the lobby):
+`character_select`, `char_slot_level`, `play_btn`, `mission_room_entry`,
+`result_panel`, `mission_success`. Everything else - `grade_tab`, `page_next`,
+`mission_row`, `mission_start`, `cutscene_continue`, the command bar,
+`action_flag`, the HP bars - held with no variant at all.
+
+**THE MECHANISM WAS INERT AT FIRST, AND THE LOG SAID IT WAS WORKING.**
+`load_templates` was swapping crops correctly and printing "4 recut for
+webgl", while the running bot logged `could not reach the grade panel` on every
+lap - because **nine live sites built `Template(name, "tpl/<name>.png")`
+directly** and never went near `load_templates`:
+
+    farm._tpl   minigame._tpl   tp._tpl   cards._HUD
+    kekkai_play (x3)   seals (x2)
+
+Measured at the time: the variant scored **1.000 on ten fresh lobby frames**
+while the bot could not see it. `perceive.template` is now the only way to
+build a template by name, and the suite greps all nine modules for a bare
+`tpl/` path. This is "one coordinate space, or none" in a new costume - a
+mechanism that covers only some of its call sites is the half-applied
+correction this file already has a rule about.
+
+### Recutting: `engine/recut.py`, and why the naive cut is useless
+
+**Cut the same region out of a webgl frame and you get a template that matches
+its own frame at 1.000 and false-positives everywhere.** `mission_room_entry`:
+self 1.000, worst negative **0.907** against an 0.88 gate. Strip the stroked
+text out of that plaque and what remains is smooth pale pink, and a
+low-variance template correlates with any large smooth region - the same trap
+as `close_popup_x_large` ("flat 0.547 at every scale. Bad crop") and the
+flood-filled digit masks.
+
+The cure is to give the crop back STRUCTURE by expanding into surrounding art,
+and the expansion is measured, never guessed:
+
+    pad     0   self 1.000   worst-neg 0.907    unusable
+    pad    20   self 1.000   worst-neg 0.780    unusable
+    pad    40   self 1.000   worst-neg 0.665    chosen
+    pad   140   self 1.000   worst-neg 0.475
+
+**EXPAND SYMMETRICALLY.** The match centre is what gets CLICKED, so an
+asymmetric crop silently moves every click that anchor drives. The tool
+asserts the centre does not move, and the suite pins the structural invariant:
+a variant is the default's size plus EQUAL, EVEN padding on both axes.
+
+Acceptance is calibrated to the company these anchors keep - every margin in
+this file sits between 0.37 and 0.66 - so negatives must stay at or below
+`threshold - 0.18` with at least 0.30 of separation. **A first version scored
+`self - max(neg, threshold)`, which is a CONSTANT whenever negatives are below
+the gate; every expansion reported "+0.120" and nothing could ever qualify
+while pad 0 was in fact fine.**
+
+### A DETECTOR-ONLY ANCHOR NEED NOT BE SYMMETRIC — but constrain the search
+
+`result_panel` defeated symmetric expansion outright: every pad from 0 to 140
+left its best negative between 0.70 and 0.85, because the banner is a large
+flat parchment strip and expanding only adds more parchment.
+
+Symmetry is only needed because a centre gets clicked, and `result_panel`'s
+does not - `resume.py` uses it as a rung ANCHOR whose clicked target is
+`mission_start`, and this file already records that the panel body is not a hit
+area (a Victory absorbed **eleven** clicks at the canvas centre). So
+`recut.py free` searches sub-windows, behind a required `--no-click-anchor`
+acknowledgement.
+
+**ITS FIRST ANSWER WAS A TRAP, AND THE SCORE LOOKED GREAT.** Searching a band
+around the centre, it picked a window that was **not the panel at all**: the
+team badge reading `0/2` plus sky and cloud art from above the banner, at a
++0.576 separation. Two faults in one crop:
+
+* it contains a **counter**, and an anchor must not contain the thing that
+  varies - the same mistake `tp_seal_hud` was re-cut for;
+* it would match in ANY battle, so it does not detect the state it is named
+  after.
+
+It scored well because **the negatives are all wgpu frames** and that HUD
+renders differently there - a separation earned against the wrong question.
+Candidates are now constrained to sub-rectangles OF THE DEFAULT TEMPLATE, so
+every crop is structurally a piece of the anchor - the property a score cannot
+check for itself. The accepted crop is the letters `tory` from "Victory!",
+self 1.000, worst negative 0.576, separation +0.424.
+
+**General limit, and it bounds everything above: calibrating a variant for
+backend X really wants NEGATIVES rendered by backend X.** The committed `ref/`
+frames are wgpu. For a crop dominated by art that is fine, since the art is
+identical between backends; for anything else the false-positive bound is
+weaker than it looks. `ref/auto/renderer/` holds the webgl fixtures harvested
+so far and is excluded from the negative set, because scoring a positive as a
+negative rejects every crop.
+
+### The cross-check that must never be skipped
+
+A Victory must not bank a success. Measured on webgl frames of both panels,
+both directions:
+
+| webgl templates | webgl Victory | webgl Mission Success |
+|---|---|---|
+| `result_panel` | **1.000** | 0.524 |
+| `mission_success` | 0.244 | **1.000** |
+
+### Mission Success unrecognised = the fifth "negative definition" bug
+
+Before its variant existed, a completed mission left "Mission Success!" on
+screen at 0.418, so `looks_like_mission_scene` found nothing to veto with and
+the runner TRAVERSED on top of the reward panel - 13 dead ends, while
+`find_character` locked onto the panel's red stamina icon at a byte-identical
+`(1567, 699)` every pass. The mission had actually succeeded (3900 gold,
+99892 XP on screen).
+
+That is this file's recurring shape for the fifth time - mission list,
+battle-between-turns, seal-broken dialog, Level Up, and now a result panel
+under a different renderer. **A byte-identical detector coordinate across
+passes is always a static object, never a character.**
+
+### THE WHOLE RESULT-PANEL CHAIN VERIFIED ON webgl
+
+Reported from Windows: *"the victory screen was stuck there as it couldn't
+see the check button."* Not reproducible on this machine with current code. A
+full Grade-A mission on webgl, end to end:
+
+    battle 1 -> victory   result_panel conf=1.000
+                green check found at scale 1.2  -> dismissed (0.970)
+    battle 2 -> victory   result_panel conf=1.000  -> dismissed (0.970)
+    battle 3 -> victory   ended in a cutscene
+                mission_success recognised, check at scale 1.8 -> (0.970)
+    SUCCESS after 3 battles, closed out to the lobby, banked
+
+Both check sizes the panels use — 1.2 for a mid-mission Victory and 1.8 for
+Mission Success — are found at 0.970 on webgl with the DEFAULT crop. That is
+consistent with what this file already measured: only TEXT loses its stroke
+between backends, and the check is art, which is pixel-identical.
+
+**So the Windows symptom is most likely the missing commit, not the check.**
+That machine was tested while `75053db` was unpushed, and without
+`tpl/webgl/` the `result_panel` variant does not exist — measured 0.341 on a
+webgl Victory. The panel is then not recognised AT ALL, and this file already
+records what that produces: the runner treats the reward panel as scenery and
+"traverses" on top of it. From outside that is indistinguishable from being
+stuck on the victory screen unable to press the check.
+
+### AND TWO FIXTURES THAT WERE LYING ABOUT THEMSELVES
+
+Diagnosing the above, two saved frames produced a confident wrong answer:
+
+    success_panel_webgl.png            is the SPECIAL TAB
+    success_check_missing_...png       is the VILLAGE
+
+The second is an artefact of the re-capture bug this file already documents
+("save the frame you SCORED, never a fresh capture") — it was written before
+that fix. Scoring the check glyph on them gave 0.543 and 0.633, which looked
+exactly like the reported failure and is in fact a CORRECT NEGATIVE on screens
+containing no check.
+
+This is the same lesson as `tp_training_row` measuring 0.282 on the Mission
+Room: **scoring a template on a screen that does not contain it proves
+nothing.** Check what a fixture actually shows before quoting a number off it.
+Both are renamed for what they are.
+
+A second self-inflicted error in the same pass: `result_panel [webgl]`
+appeared to false-positive on 89 frames, which would have been serious. It was
+an invented 21-scale 0.95..1.95 sweep applied to a 47x183 crop. At its
+CONFIGURED scales it matches exactly one frame in the whole reference set, the
+real webgl Victory, at 1.000. **A template's scale list is part of the
+template**; overriding it and then judging the result measures the override.
+
+### A SATURATION GATE IS PER-RENDERER TOO — and webgl has no calibration
+
+Template variants fix template anchors. They do nothing for the detectors that
+read COLOUR, and `combat.slot_cooling` is one: it asks what fraction of a skill
+tile's interior clears a saturation threshold. Measured on the committed
+refusal frames:
+
+    wgpu-webgl    cooling 0.000  0.000  0.000        ready 0.905
+    webgl         0.397 .. 0.748 (used slots)        0.865 .. 0.904
+
+wgpu is cleanly bimodal, which is what the 0.25 gate was calibrated against.
+On webgl, greying does NOT drive the tile to zero saturation - the readings run
+continuously, exactly as this file already records for the FIRST saturation
+attempt ("56..191 continuously, with a pale slot reading 56 while fully
+ready").
+
+**With the wgpu gate applied, all four webgl tiles read READY - including the
+slot that had just visibly refused.** So the bot clicks a cooling skill and
+pays a full ~6 s resolve timeout for it, twice a turn. Observed live:
+`S1 timed out`, `S3 timed out`, `2 actions did not resolve` inside one turn,
+with turn gaps of 6.7..10.4 s.
+
+So `COOLING_GATES` is keyed by backend, `wgpu-webgl` keeps the measured 0.25,
+and **an uncalibrated backend returns None (UNKNOWN)** rather than a confident
+wrong answer. The caller already offers an UNKNOWN slot anyway, so behaviour is
+unchanged - the difference is that the log stops claiming a greyed slot is
+ready. A renderer of `None` keeps the historical path exactly, so every offline
+tool and test is untouched.
+
+**WHY IT IS NOT SIMPLY RE-CALIBRATED.** It looks like a gate near 0.80 would
+separate the webgl readings, and that is a trap. All EIGHT webgl refusal frames
+harvested over 21 minutes read S1=0.748 S2=0.904 S3=0.397 S4=0.865 - identical
+to three decimals - because the rotation is always S1 S3 S4 S5, so the same
+slots are cooling at the same point of every turn. That is ONE battle state
+sampled eight times, with ~0.05 of margin, and S4's true status is inferred
+rather than known: the filename only names the slot that refused. Calibrating
+from it would repeat the mistake this file records about the OpenCV thread
+sweep - "before trusting a measurement, check that the knob you turned is
+connected to anything", and its cousin, that a suspiciously constant reading is
+usually not data.
+
+To calibrate properly, harvest frames where every slot's state is KNOWN - drive
+a rotation that leaves some slots deliberately unused, and record the expected
+state alongside each frame.
+
+**A TEST THAT PASSED FOR THE WRONG REASON, exposed by this.** The greyed-skill
+test globbed `ref/auto/battle/cooldown_msg_*.png` and applied ONE battle's slot
+expectation to every frame it matched. `_keep_failed_frame` WRITES NEW FRAMES
+DURING LIVE PLAY, so the moment webgl runs harvested six more, the test began
+asserting one battle's states about a different battle on a different backend,
+and failed. A fixture set that grows at runtime cannot carry a hardcoded
+expectation - the two calibrated frames are now named explicitly.
+
+### `webgpu` never came up
+
+Asking for `webgpu` produced no canvas at all on this machine ("shadow root",
+no context), so it is untested rather than broken. `canvas` works and renders
+text like `webgl`, at a 2d context.
+
+### Performance was never the reason to switch
+
+The operator wanted `webgl` because it is the lightest backend. Measured rAF
+in the game's own frame, one clean pass per document:
+
+    webgl        119.7 fps
+    wgpu-webgl   119.9 fps
+
+Both pinned to the display refresh, matching `docs/BENCHMARK.md` (120 fps,
+188x GL headroom, against a 24 fps SWF). There is no render-intensity
+difference to buy here - the bot now works on both, so the choice is free.
+
+**`renderer_ab.measure_fps` IS NOT SAFE TO CALL TWICE on one document.** It
+installs a fresh rAF chain per call without cancelling the previous one and
+they all increment the same counter: three calls read 119.6 / 239.3 / 359.8.
+The A/B harness only escapes it because each backend is preceded by a reload.
+
+## SS: THE OTHER TWO FAMILIES — Balance Control and Lights Out, both cleared
+
+Both were sitting behind one obstacle that had nothing to do with either
+puzzle, and neither had ever been seen.
+
+### THE HINTS PANEL HAS NO X, AND ITS BUTTON IS DRAWN OFF SCREEN
+
+`Balance Control` and `Sage Sealed Boxes` open on a panel of illustrated rules
+instead of the rune family's rules popup. `open_puzzle` swept three X templates
+across it and pressed nothing, so both missions were abandoned as unrecognised
+and the families could never be learned. Measured on all five saved frames, no
+X-shaped anchor comes close:
+
+    close_popup_x      0.608 / 0.665      close_promo_x    0.466 / 0.454
+    close_popup_x_menu 0.620 / 0.610      mission_start    0.598 / 0.502
+
+The only exit is a wide green button at the bottom of the panel — **and it does
+not fit on screen.** The game is 839 CSS px tall in a 720 px viewport, so its
+bottom 238 captured px are hidden, and the button lands exactly there: tops
+measured at y=1404 and y=1410 against a frame that ends at 1440, leaving a
+30..36 px sliver. So `ss.hints_button` clicks near the blob's TOP rather than
+its centre — the centre of a clipped button is off screen, and a Flash button's
+hit area is the whole button, so the sliver is as good as the middle.
+
+The positive signal is the WIDTH: both panels draw it at 412 px. The band floor
+of 1350 is what does the real separating, because the same green range also
+catches the puzzle art at y=1300 (884x43 and 440x101) and a width window alone
+would let the 440 through. Verified: 5 of 5 hints frames, 0 of 94 other
+reference frames.
+
+### BALANCE CONTROL IS A SUBSET SUM, and the target is forced
+
+Two columns of numbers, a circle button per row between them, a red SUM box
+under each column, `Target: N` at the top, and a countdown. Clicking a row's
+circle SWAPS that row's two numbers — verified by prediction, not assumed: the
+first click was told which pair reversal to expect and the board was re-read to
+confirm it.
+
+Because a swap only moves values BETWEEN the columns, the grand total is
+invariant, so the target is forced to half of it — measured on every board
+seen (100 -> 50, 104 -> 52, 152 -> 76). Nothing therefore reads the white
+`Target:` text: deriving it costs no perception and cannot disagree with the
+board. With `d_i = right_i - left_i`, the puzzle is
+
+    choose S with sum(d_i for i in S) == total // 2 - left_sum
+
+Four rows is sixteen subsets; brute force is the whole algorithm, and `solve`
+returns the SHORTEST set because boards often have two answers (stage 1's had
+`{0,2}` and `{1,3}`).
+
+**STAGE 2 HIDES THE SUMS — they read `??`.** So the sums are COMPUTED from the
+rows and the printed values are only a CROSS-CHECK when present: a column must
+equal its own sum box, which is exactly the invariant a misread digit breaks.
+A reader that depended on them stopped dead on the second stage of every
+mission. `?` is an EXEMPLAR rather than a fallback, so "deliberately hidden" is
+read positively and never confused with "a digit I could not recognise" — the
+two want opposite responses.
+
+Digits are read from a mask, so **one exemplar set serves both the pale-yellow
+row numbers and the RED sums** — the same trick the kekkai counters needed.
+0 to 9 are harvested; measured worst distance 0.037 at a worst margin of 5.8x.
+
+**ANCHOR ON THE BOXES, NOT ON THE SUM TEXT.** The first version keyed on the
+red sum digits and died on stage 2's `??`. The boxes are what both variants
+draw: near-black rectangles, interior grey 31 against a border of 77, 359x157
+at a 203 px pitch, columns centred x=1236 and x=2188. A `grey < 40` pass finds
+the bottom THREE rows on every frame held and never the top two — the glow
+behind those is brighter — which costs nothing, because the bottom row plus the
+pitch locates the rest.
+
+`locate` answers "where are the boxes"; **`board_present` is what DISPATCH
+uses**, and the difference is not cosmetic. Red text is everywhere in this game
+— floating damage, status effects, the Admin Message banner — and the
+sum-digit version fired on **31 of 94** combat and lobby frames. Requiring two
+columns of evenly-pitched boxes with at least two paired pale rows above them
+brings that to 0 of 99.
+
+### THE CLOCK IS THE REASON `balance.py` COMPUTES INSTEAD OF POLLING
+
+169 s per stage (99 s on the hints illustration). The first live look at the
+board cost the mission outright: reading it, measuring the geometry offline and
+coming back to click took longer than the timer, and the stage ended
+`Mission Fail` at `0s` with nothing clicked. Every step is now one pass —
+locate, read, solve, click — and the module never waits on anything it can
+compute.
+
+### A STAGE IS MANY BOARDS UNDER ONE CLOCK — and that produced a FALSE FAILURE
+
+Balancing the columns does not end the stage: the game immediately deals a
+FRESH set with a fresh target and the timer keeps running.
+
+    169s   left 17 18  7 12 = 54   right  5 24 15  2 = 46   target 50
+     94s   left 19  5  9 34 = 67   right 12  1  1 23 = 37   target 52
+
+The first attempt read that second board as the result of its own clicks and
+reported *"after the swaps the sums are 67/37, not 50"* — a false failure on a
+round it had just WON. That is the vacuous-verification trap this file already
+records for the hand-seal slots: a reading taken after the screen has moved on
+says nothing about what we did. Note the target tracked the total both times,
+which is the strongest evidence for the swap model — the total is only
+invariant under swapping, and a re-roll is exactly where it may change.
+
+So a round's verdict is "did the board become something OTHER than what my
+swaps would have made it": that is a re-roll, and a re-roll only happens on
+success.
+
+**AND A BLINK IS NOT AN ENDING.** The first version called the board gone the
+instant `locate` missed, and a re-roll redraws the boxes — so every round
+returned "gone" after zero wins, which meant **a wrong answer and a win were
+reported identically**. That is worse than a wrong count: it is the loss of the
+only signal that says whether the solver is right. An absent board now has to
+persist for the whole wait, and only the stage dialog ends a round early.
+
+### LIGHTS OUT — a 3x3 GF(2) system, cleared in five presses
+
+`Sage Sealed Boxes`. Nine spheres in a wooden frame and a timer; the game's own
+hints panel gives the rules, half of them in Spanish: *"There are randomly 1-2
+circles with light at the start"*, *"Extinguish all the light to clear the
+stage"*. Lit is ON, grey is OFF, pressing toggles a neighbourhood, and over
+GF(2) that is `A x = b` on nine unknowns. The 3x3 plus-rule matrix is
+invertible, so every board has exactly one solution — verified against **all
+512 states**, not a sample. Live:
+
+    O........  ->  press [0, 2, 5, 6, 7]
+    .O.O.....     ..OO.O...     ...OO...O     ....O.OOO     dark
+
+Five presses, every intermediate state exactly as predicted, then
+`Mission Success! Sage Sealed Boxes  10,000 gold / 10,000 XP`. It is a
+ONE-STAGE mission.
+
+**The rule is LEARNED rather than assumed.** The plus shape is the prior; every
+press is read before and after, so it reports which cells it actually toggled
+and the model corrects itself from moves that were going to be made anyway.
+Nothing is spent probing — which matters, because this project has already lost
+an SS mission to a diagnostic sweep that ate the budget it was diagnosing.
+`solve` does not rely on invertibility either: it eliminates, then enumerates
+the solution coset and returns the shortest member, so a learned matrix that
+turns out singular still works.
+
+**TWO OF THE NINE CELLS DEFEAT A CENTROID**, and both had to be measured:
+
+    a LIT sphere      masks 232x222 against a grey one's 274x274 - its bright
+                      core falls outside both colour ranges, so the centroid
+                      lands 24 px up and left of the true centre
+    the BOTTOM ROW    is clipped by the viewport at y=1440, masking 274x196,
+                      so its centroid sits 36 px high
+
+In both cases the LEFT and TOP edges survive and only the far side is missing,
+so `left + R` / `top + R` — with R from the whole spheres on that very frame —
+reconstructs all nine centres to within 7 px against a radius of 137. Measured
+grid: columns 1382 / 1733 / 2085, rows 668 / 1028 / 1388.
+
+**Requiring six whole spheres does not work**: with one light on only five are
+whole, and two x clusters cannot say WHICH two of the three columns they are.
+Reconstructing the centres first removes the ambiguity instead of guessing at
+it. First attempt did the arithmetic on `top + bw//2` per blob and inherited
+the lit sphere's shrunken width, putting the extrapolated bottom row at 1372
+instead of 1388.
+
+### A PUZZLE DRIVER'S VERDICT MUST NOT VETO `close_out`
+
+Lights Out cleared in five presses, and `run_one` reported `banked=False`.
+The driver had returned "lost" — no board and no stage dialog followed — while
+`Mission Success! 10,000 gold` was on screen at that moment, because a
+one-stage mission ends straight on the reward panel and the panel is not an OK
+button, so `stage_dialog` cannot see it.
+
+Two fixes, and the second is the general one:
+
+* `ss.mission_over` tests for the reward panel, so a driver stops at once
+  instead of waiting out its blank tolerance;
+* **`close_out` is asked either way**, because it is the measurement that
+  establishes a banked mission. A driver's opinion about its own stage is not
+  that measurement. (The rune path keeps its veto; only the puzzle branch
+  changed.)
+
+Also: a stage ending is not instant. Both drivers tolerate a bounded run of
+frames with neither board nor dialog (`BLANK_TOLERANCE`), and only a sustained
+blank is a real loss.
+
+### A STAGE DIALOG IS A SOLID BUTTON OF ONE FIXED SIZE
+
+`stage_dialog` fired on the LOBBY. Found by peeking at a healthy village on a
+fresh launch: `stage_dialog -> ('fail', (1585, 1062))`. Both SS puzzle drivers
+check the dialog BEFORE anything else, so a false "fail" makes the bot click
+that spot and abandon a mission that is still running.
+
+Three gates, measured, and the first two do not suffice alone:
+
+    village sign      337x121  aspect 2.79  fill 0.19   area  7,631
+    character select  323x156  aspect 2.07  fill 0.65   area 32,686
+    TP mission list   445x105  aspect 4.24  fill 0.88   area 41,212
+    Stage Clear       351x108  aspect 3.25  fill 0.83   area 31,542
+    Mission Fail      352x108  aspect 3.26  fill 0.79   area 29,891
+
+FILL removes the village sign - an OK button is a filled rounded rect while
+village art is outlines and lettering. That is the same solid-not-outline test
+`find_confirm_point` needed, for the same reason.
+
+WIDTH and HEIGHT remove the other two, and they are legitimate here because
+the viewport is pinned, so the game draws this button at ONE size - the way
+the command discs are one size. Aspect cannot separate 2.07 / 3.25 / 4.24
+without being fitted to those three samples.
+
+**The character-select case is the one that matters.** `Delete` sits beside
+`Play`, which is the reason this project only ever clicks Play BY TEMPLATE; a
+red blob passing as an OK button there is exactly the click-by-offset that
+rule exists to forbid. The suite now asserts that no character-select frame is
+ever read as a dialog, and that a HOLLOW button of the right size is refused.
+
+Result: 0 of 102 reference frames read as a dialog, while both recorded button
+sizes are still accepted at their measured centres.
+
+**And note how it was found** - not by a failing test, but by pointing the
+detector at a screen it should say nothing about. Scoring a detector on
+frames it is supposed to REJECT is cheap and this project keeps finding real
+faults that way.
+
+### THE RUNE DRIVER NEEDED THE SAME ENDING THE PUZZLE DRIVERS GOT
+
+Measured live, and it threw away a win:
+
+    08:17:14  guess 6: Yellow,Black,Red,Green,Blue,White   (pool A=6 B=0)
+    08:17:29  panel closed after guess 6 -> SOLVED
+    08:17:29  SS: no puzzle and no dialog on screen - stopping rather than
+              clicking blind
+    08:17:29  SS: 1 stage(s) cleared, lost
+    08:17:29  mission did not complete; it stays in the list and will not be
+              retried this pass
+    08:17:32  resume: mission_success (mission_success conf=1.000)
+
+The stage was SOLVED and `Mission Success!` was on screen three seconds later.
+`ss.play` fired in the gap between the two and called it lost, so `run_all`
+recorded a failure about a mission it had just won. Only the resume ladder
+noticed the reward panel and cleared it.
+
+Balance and Lights had already been given a blank tolerance and a
+`mission_over` check for exactly this; the rune family — the oldest and
+best-tested of the three — was left without either, because the fix was
+applied to the drivers that happened to be written that day. **That is this
+file's recurring shape: a recovery path that exists in two places, only one of
+which was taught the new trick.** The suite now iterates all THREE drivers
+rather than naming the two.
+
+The same edit removed the rune branch's veto on `close_out`, for the reason
+already recorded there: a driver's opinion about its own stage is not the
+measurement that establishes a banked mission.
+
+### CORRECTION — COMPLETED SS MISSIONS DROP OUT OF THE DAY'S LIST
+
+TP's do not: this file records that they stay listed and go GREY, and the whole
+`start_row` "did anything change?" mechanism exists because of it. **SS behaves
+the other way.** Measured across one afternoon: five rows over two pages, then
+two rows on one page, then a panel reading `1 / 0` with no rows at all.
+
+Consequence, and it was a real bug: an exhausted SS day looks exactly like a
+list that never opened, and `to_ss_list` reported *"the SS list did not open"*
+about a perfectly healthy panel — which would have `run_all` blame navigation
+for having nothing left to do. That is the negative-definition trap again:
+"no rows matched" is not evidence that the panel failed to open. The list UI
+carries its own anchors and all three read **1.000** on the empty panel against
+0.18..0.35 for anything row-shaped, so the panel's presence is now a positive
+reading.
+
+### A FIXTURE DIRECTORY THE BOT WRITES TO CANNOT CARRY A HARDCODED EXPECTATION
+
+Second instance, after the cooldown frames. The hints test globbed
+`ref/auto/ss/*.png` and asserted every frame offers a hints button; the moment
+a live run saved a Lights Out BOARD into that directory, it asserted that a
+board offers a hints button and failed on correct code. The fixtures are named
+for what they are now — `hints_balance_*`, `hints_lights_*`, `lights_board*`,
+`balance_board*` — and each test globs only its own.
+
+### STILL OPEN on SS
+
+* **A red dialog was followed by `Mission Success!`.** Stage 2 of Balance
+  Control ended on the red OK button — which this file records as `Mission
+  Fail` — with all four of its boards arithmetically correct, and then the
+  reward panel banked the mission. So either that button is not always a
+  mission failure, or a stage can be failed without failing the mission. The
+  dialog is now SAVED to `ref/auto/ss/balance_fail_*.png` when it appears,
+  because it is gone by the time an operator looks.
+* **Hidden sums remove the arithmetic cross-check.** When stage 2 draws `??`
+  there is nothing to validate a misread row against, and a wrong read is only
+  caught afterwards by the board failing to re-roll. Reading the white
+  `Target:` text would restore the check (`target == total // 2`) and needs one
+  more exemplar set.
+* **A failed mission still pays `close_out`'s 45 s timeout** looking for a
+  reward panel that cannot be there.
+
+
+## THE GAME'S OWN SETTINGS — and three attempts aimed at the wrong layer
+
+The operator wanted to switch Ruffle's render backend from the panel, because
+wgpu/WebGL is the lightest but shows graphical glitches. Three mechanisms were
+tried and all three failed, each for a different reason, and all three looked
+plausible while doing nothing:
+
+    1. patching `RufflePlayer.config.preferredRenderer`
+       -> lost: a PER-LOAD config overrides the global one
+    2. wrapping the element's `load(options)` to inject the choice
+       -> did nothing: the site calls `player.load(swfUrl)` with a bare STRING
+    3. that prototype wrap
+       -> never applied at all (`__nsbotRendererPatched` stayed false)
+
+Measured throughout, which is what finally named the problem:
+
+    RufflePlayer.config.preferredRenderer  = "webgl"       <- our override
+    player.loadedConfig.preferredRenderer  = "wgpu-webgl"  <- what Ruffle used
+
+So asking for `canvas` still produced a WebGL2 context, and the operator
+correctly reported that the graphics had not changed.
+
+**THE SITE ALREADY HAS A CONTROL FOR ALL OF IT.** A gear icon
+(`button#render-toggle-button`, in `div.menu-controls` beside fullscreen and
+the main menu) offers renderer, graphic quality and server. It was never seen
+because **FOCUS MODE HIDES IT** - focus mode hides the game's siblings, and
+`display:none` is set on the button and a parent. Its emulator page reads, on
+every load:
+
+    const defaultRender   = isIOS ? 'webgl' : 'wgpu-webgl';
+    const savedRender     = localStorage.getItem('renderMode')  || defaultRender;
+    const savedQuality    = localStorage.getItem('gameQuality') || 'high';
+    var   selected_server = parseInt(localStorage.getItem('ns_server_index') || '0', 10);
+    const render          = urlParams.get('render') || savedRender;
+
+So a setting is **one localStorage key plus a reload**. No config patching, no
+race with the site's own assignment. Verified live, and this is the first time
+any attempt actually took:
+
+    before:  loadedConfig wgpu-webgl,  context webgl2
+    after :  loadedConfig canvas,      context 2d
+
+**GENERAL LESSON, and it cost three failed attempts: when a site already has a
+control for something, find ITS control before reverse-engineering the
+runtime.** The operator naming the gear was the fastest step in the whole
+investigation.
+
+**NOTHING IS CACHED ON OUR SIDE.** The site stores and reuses these keys
+itself, so an earlier `run/renderer.json` was deleted: a second copy would be a
+stale duplicate of the truth, which is the same mistake as any other cached
+belief about page state. The panel shows what the GAME has stored.
+
+**A write is VERIFIED by reading the key back**, and after the reload the
+setting is re-read and a mismatch is logged. An unverified write is exactly how
+the previous attempt offered a switch that silently did nothing.
+
+### Two measurement mistakes worth remembering
+
+**The canvas CONTEXT TYPE cannot identify the backend.** Both `wgpu-webgl` and
+`webgl` draw through a WebGL2 context, so it only separates GL from canvas2d.
+The backend actually in use comes from `player.loadedConfig`. An early log line
+read "site asked for webgl" while echoing OUR OWN override back from the global
+config - if it had been trusted, the conclusion would have been that the switch
+worked.
+
+**`iframe.contentWindow.localStorage === window.localStorage` is FALSE for
+same-origin frames** and proves nothing: each window gets its own Storage
+object over the same store. A probe used it as an origin test and reported
+"not same origin" about a frame whose scripts, storage and DOM were all being
+read successfully. Verified properly by writing in one window and reading it in
+the other.
+
+### The server setting deserves a sharper warning than the others
+
+`ns_server_index` is stored the same way, and the list is read from the game's
+own `servers` array rather than hardcoded (measured: two entries, index 0 the
+primary host and index 1 a CDN host). But where the renderer only changes how
+pixels are drawn, this points the client at a different game HOST - and whether
+a character exists there is not something this bot can determine. The panel's
+confirm text says so explicitly, and no switch was ever performed to find out.
+
+`gameQuality` is deliberately NOT offered yet: only its default (`high`) has
+been observed, and offering values the site may not accept would be another
+control that silently does nothing.

@@ -258,7 +258,100 @@ _BOOTSTRAP = r"""
       }
     }
     window.__nsbotFocusOn = !!on;
+    // THE LOCK RIDES WITH FOCUS MODE, and that is deliberate rather than
+    // convenient. With focus ON the game is pinned at scrollY 0 and any scroll
+    // is an accident. With focus OFF the bot SCROLLS THE GAME ON PURPOSE -
+    // `Capture.scroll_game(frac)` is the documented fallback for reaching an
+    // anchor in the hidden 119 px band, and the resume ladder alternates the
+    // scroll before calling a frame unrecognised. Locking there would break
+    // the one path that needs scrolling.
+    if (window.__nsbotScrollLock) window.__nsbotScrollLock(!!on);
     return on ? "focused" : "restored";
+  };
+
+  // ---------------------------------------------------------------------
+  // SCROLL LOCK — an accidental wheel must not move the game under the bot
+  //
+  // The operator reported "sometimes I accidentally scroll down which causes
+  // some kind of behaviour bug". It does, and this file already documents why:
+  // every minigame's geometry is ABSOLUTE, so a displaced game breaks all of
+  // them at once, each reporting a fault in its own subsystem and none naming
+  // the real cause. Measured previously: scrollY 60 put the game at -236
+  // CAPTURED px and the memory board's rows measured -237 out.
+  //
+  // `__nsbotAlign` already puts the scroll back - but it is only called from
+  // `ensure_focus`, which runs BETWEEN cycles, and a mission blocks for
+  // minutes. So a scroll during a mission stood for the whole of it. Snapping
+  // back has to be event-driven and live IN THE PAGE, for exactly the reason
+  // the panel's heartbeat does: Python is not there to notice.
+  //
+  // Three layers, because each catches what the others miss:
+  //   1. overflow:hidden via an !important STYLESHEET - removes the scroll
+  //      rather than reacting to it, and beats the site's inline styles.
+  //   2. a scroll listener that snaps to 0 - catches anything that still
+  //      scrolls (keyboard, the site's own script, a focus() on some element).
+  //      `scroll` cannot be prevented, only undone.
+  //   3. wheel/touchmove preventDefault - stops the gesture before it scrolls,
+  //      which avoids a visible jump-and-snap.
+  //
+  // THE PANEL'S OWN LOG PANE MUST STAY SCROLLABLE. It is `overflow:auto` and
+  // the operator reads it, so layer 3 exempts any event inside the dock. Layer
+  // 1 cannot affect it: the dock is position:fixed with its own scroller.
+  //
+  // KEYS ARE DELIBERATELY NOT BLOCKED. This is a Flash game and the SWF may
+  // want them; a swallowed keystroke would be a new bug to chase. Layer 2
+  // covers a keyboard scroll after the fact.
+  //
+  // Snaps are COUNTED, not silent. "the game drifted" was invisible before,
+  // and a counter turns an accidental scroll into something the log can name.
+  window.__nsbotScrollSnaps = window.__nsbotScrollSnaps || 0;
+  window.__nsbotScrollLock = (on) => {
+    const ID = "__nsbot_scrolllock";
+    if (on) {
+      if (!window.__nsbotScrollHandlers) {
+        const snap = () => {
+          if (window.scrollY !== 0 || window.scrollX !== 0) {
+            window.__nsbotScrollSnaps++;
+            window.scrollTo(0, 0);
+          }
+        };
+        const inDock = (ev) => {
+          const d = document.getElementById("__ID__");
+          return d && ev.target && d.contains(ev.target);
+        };
+        const block = (ev) => {
+          if (inDock(ev)) return;          // the log pane scrolls; leave it
+          ev.preventDefault();
+          snap();
+        };
+        window.addEventListener("scroll", snap, {passive: true});
+        window.addEventListener("wheel", block, {passive: false});
+        window.addEventListener("touchmove", block, {passive: false});
+        window.__nsbotScrollHandlers = {snap, block};
+      }
+      let st = document.getElementById(ID);
+      if (!st) {
+        st = document.createElement("style");
+        st.id = ID;
+        document.documentElement.appendChild(st);
+      }
+      st.textContent =
+        "html,body{overflow:hidden !important;overscroll-behavior:none !important;}";
+      window.scrollTo(0, 0);
+      window.__nsbotScrollLocked = true;
+      return "locked";
+    }
+    const h = window.__nsbotScrollHandlers;
+    if (h) {
+      window.removeEventListener("scroll", h.snap, {passive: true});
+      window.removeEventListener("wheel", h.block, {passive: false});
+      window.removeEventListener("touchmove", h.block, {passive: false});
+      window.__nsbotScrollHandlers = null;
+    }
+    const st0 = document.getElementById(ID);
+    if (st0) st0.remove();
+    window.__nsbotScrollLocked = false;
+    return "unlocked";
   };
 
   // Re-run ONLY the top-alignment. Focus is applied as soon as the game appears,
@@ -272,6 +365,14 @@ _BOOTSTRAP = r"""
     // The page can scroll out from under us even in focus mode; rect.y is
     // viewport-relative, so put the scroll back first and then measure.
     if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
+    // Re-assert the SCROLL LOCK as well. A reload drops the injected <style>
+    // and the listeners with it, and this project's standing rule is that any
+    // cached belief about page state is invalidated by a navigation - so ask
+    // the page rather than remembering. Idempotent, so calling it every cycle
+    // costs nothing.
+    if (!window.__nsbotScrollLocked && window.__nsbotScrollLock) {
+      window.__nsbotScrollLock(true);
+    }
     // Re-assert the pin: a reload drops the injected <style>, and without it the
     // site's own top:-58.5px takes over again.
     if (!document.getElementById("__nsbot_pin")) {
@@ -340,6 +441,23 @@ _BOOTSTRAP = r"""
         `<span id="v_viewport"></span></div>` +
       `<div class="g" id="v_viewports" style="margin-top:3px"></div>` +
       `<div class="d" id="v_vp_warn" style="margin-top:4px;display:none"></div>` +
+      // RENDERER. Same shape as the window selector because it has the same
+      // consequence: applying it reloads the game. The LIVE context is shown
+      // beside the request, because asking for a backend is not getting one -
+      // webgpu falls back where it is unavailable, and a WebGL blocklist drops
+      // Ruffle to canvas2d without a word.
+      `<div class="row" style="margin-top:6px"><span class="d">renderer</span>` +
+        `<span id="v_renderer"></span></div>` +
+      `<div class="g" id="v_renderers" style="margin-top:3px"></div>` +
+      `<div class="d" id="v_rend_warn" style="margin-top:4px;display:none"></div>` +
+      // SERVER. Same storage mechanism as the renderer (one localStorage key
+      // the site reads on load) but a much bigger consequence: it points the
+      // client at a different game HOST. The warning says so, and the list is
+      // read from the game's own `servers` array rather than hardcoded.
+      `<div class="row" style="margin-top:6px"><span class="d">server</span>` +
+        `<span id="v_server"></span></div>` +
+      `<div class="g" id="v_servers" style="margin-top:3px"></div>` +
+      `<div class="d" id="v_srv_warn" style="margin-top:4px;display:none"></div>` +
       `<div style="margin-top:6px">` +
         btn("quit", "Quit (closes this panel)") +
       `</div>` +
@@ -406,6 +524,82 @@ _BOOTSTRAP = r"""
     });
   };
 
+  // Two-press confirm, exactly as the window selector does it: one press
+  // arms and explains, a second within 6s commits. A single misclick must not
+  // reload the game.
+  let armedRend = null, armedRendAt = 0;
+  const fillRenderers = (rs, current) => {
+    const key = (rs || []).map(r => r.key).join(",") + "|" + (current || "");
+    if (!V.v_renderers || V.v_renderers.dataset.key === key) return;
+    V.v_renderers.dataset.key = key;
+    V.v_renderers.innerHTML = "";
+    (rs || []).forEach(r => {
+      const b = document.createElement("button");
+      b.dataset.rend = r.key;
+      b.textContent = r.label;
+      if (r.key === current) b.classList.add("on");
+      b.addEventListener("click", ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        const w = document.getElementById("v_rend_warn");
+        const now = Date.now();
+        if (armedRend === r.key && now - armedRendAt < 6000) {
+          armedRend = null;
+          if (w) { w.style.display = "block";
+                   w.textContent = "switching to " + r.label + " - reloading..."; }
+          send("renderer", r.key);
+          return;
+        }
+        armedRend = r.key; armedRendAt = now;
+        if (w) {
+          w.style.display = "block";
+          w.textContent = "press " + r.label + " again to confirm - this "
+            + "RELOADS the game and returns to character select"
+            + (r.key === "canvas"
+               ? ". Canvas2D is far slower and every template here was "
+               + "calibrated on a GL backend, so use it to diagnose, not to play."
+               : "");
+        }
+      });
+      V.v_renderers.appendChild(b);
+    });
+  };
+
+  let armedSrv = null, armedSrvAt = 0;
+  const fillServers = (svs, current) => {
+    const key = (svs || []).map(v => v.index + ":" + v.name).join(",")
+              + "|" + String(current);
+    if (!V.v_servers || V.v_servers.dataset.key === key) return;
+    V.v_servers.dataset.key = key;
+    V.v_servers.innerHTML = "";
+    (svs || []).forEach(v => {
+      const b = document.createElement("button");
+      b.dataset.srv = v.index;
+      b.textContent = v.name;
+      if (v.index === current) b.classList.add("on");
+      b.addEventListener("click", ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        const w = document.getElementById("v_srv_warn");
+        const now = Date.now();
+        if (armedSrv === v.index && now - armedSrvAt < 6000) {
+          armedSrv = null;
+          if (w) { w.style.display = "block";
+                   w.textContent = "switching to " + v.name + " - reloading..."; }
+          send("server", String(v.index));
+          return;
+        }
+        armedSrv = v.index; armedSrvAt = now;
+        if (w) {
+          w.style.display = "block";
+          w.textContent = "press " + v.name + " again to confirm. This is NOT "
+            + "just a graphics setting - it reconnects the game to a different "
+            + "HOST, and whether your character is there is not something the "
+            + "bot can tell. It also reloads to character select.";
+        }
+      });
+      V.v_servers.appendChild(b);
+    });
+  };
+
   const fillSlots = (slots) => {
     const key = (slots || []).join(",");
     if (!V.v_slots || V.v_slots.dataset.key === key) return;
@@ -453,6 +647,17 @@ _BOOTSTRAP = r"""
     fillGrades(s.grades);
     fillViewports(s.viewports, s.viewport);
     setText("v_viewport", s.viewport_label || "");
+    fillRenderers(s.renderers, s.renderer);
+    fillServers(s.servers, s.server);
+    setText("v_server", (() => {
+      const cur = (s.servers || []).find(v => v.index === s.server);
+      return cur ? cur.name : (s.server === null || s.server === undefined
+                               ? "?" : String(s.server));
+    })());
+    setText("v_renderer",
+            (s.renderer_live ? s.renderer_live : "?")
+            + (s.renderer && s.renderer !== s.renderer_live
+               ? " (asked " + s.renderer + ")" : ""));
     setText("v_grade", s.grade || "auto (best available)");
     setText("v_pin", s.pin || "highest unlocked");
     el.querySelectorAll('[data-cmd="grade"]').forEach(b =>
@@ -640,6 +845,34 @@ class Dock:
         """Re-assert top alignment once the layout has settled."""
         return self.cdp.evaluate(
             "(window.__nsbotAlign ? window.__nsbotAlign() : 'no-panel')")
+
+    def scroll_lock(self, on=True):
+        """Remove the page scroll (or restore it). Renderer-independent.
+
+        This is pure DOM, so it behaves identically on every Ruffle backend -
+        which matters, because the operator asked for it "in all renders" and
+        the per-renderer template work only covers what the SWF DRAWS.
+        """
+        return self.cdp.evaluate(
+            f"(window.__nsbotScrollLock "
+            f"? window.__nsbotScrollLock({str(bool(on)).lower()}) : 'no-panel')")
+
+    def scroll_state(self):
+        """(locked, snaps) read FROM THE PAGE, never remembered here.
+
+        `snaps` counts how many times an actual scroll had to be undone, so an
+        accidental wheel becomes something the log can name instead of a
+        mystery drift.
+        """
+        try:
+            raw = self.cdp.evaluate(
+                "JSON.stringify([!!window.__nsbotScrollLocked,"
+                " window.__nsbotScrollSnaps|0, window.scrollY|0])")
+            import json as _j
+            locked, snaps, y = _j.loads(raw)
+            return bool(locked), int(snaps), int(y)
+        except Exception:
+            return False, 0, 0
 
     def focus_state(self):
         try:
