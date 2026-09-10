@@ -541,6 +541,10 @@ GROW_CSS = ("html body .site-wrapper,html body #panels-wrapper,"
             "html body .main-content{height:850px !important;}")
 GROW_ID = "__nsbotGrowRail"
 
+# The recruit rail's two tabs, bottom-left, at the NORMAL layout.
+FRIENDS_TAB = (835, 1268)
+NPC_TAB = (955, 1260)
+
 
 def grow_rail(cdp, on=True):
     js = """
@@ -568,6 +572,17 @@ def recruit(cap, actor, cdp, log, want=2, settle=3.0):
     Returns the levels recruited. Reads the player's level BEFORE growing the
     rail, because that plate is not where the grown layout puts it.
     """
+    # THE PANEL OPENS ON THE NPC TAB. Measured live: with the rail left as
+    # found, `plus_buttons` sees zero GREEN discs and eight blue ones, so
+    # nothing is recruitable and the lap silently fights solo. The tab is
+    # switched BEFORE the layout is grown, because that is the geometry the
+    # tab coordinates were measured at.
+    f0 = cap.frame(gray=False)
+    if not plus_buttons(f0, PLUS_GREEN) and not any(
+            c["friend"] for c in cards(f0, band=find_rail_band(f0) or RAIL_BAND)):
+        actor.click_pixel(*FRIENDS_TAB, why="recruit rail: FRIENDS tab")
+        time.sleep(2.2)
+
     me = player_level(cap.frame(gray=False), log)
     if me is None:
         log.info("recruit: the player's level did not read - refusing, since "

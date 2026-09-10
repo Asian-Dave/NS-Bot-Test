@@ -5921,8 +5921,17 @@ def test_recruiting_takes_the_strongest_friend_and_never_an_npc():
         check(len(picks) < len(rs.plus_buttons(f, rs.PLUS_GREEN)) + len(blue),
               "and the NPC cards were excluded from the picks")
 
-    # --- the resize is bounded and always undone -----------------------
+    # --- THE PANEL OPENS ON THE NPC TAB --------------------------------
+    # Measured live: left as found, the rail shows ZERO green discs and eight
+    # blue ones, so nothing is recruitable and the lap silently fights solo -
+    # which is exactly what happened on the first real Eudemon lap.
     src = inspect.getsource(rs.recruit)
+    check("FRIENDS_TAB" in src, "recruit switches to the friends tab")
+    check(src.index("FRIENDS_TAB") < src.index("grow_rail"),
+          "and does it BEFORE growing the layout, which is the geometry the "
+          "tab coordinates were measured at")
+
+    # --- the resize is bounded and always undone -----------------------
     check("finally" in src, "recruit restores the layout in a finally")
     check("grow_rail(cdp, False)" in src, "and the restore is the real call")
     check(src.index("player_level") < src.index("grow_rail"),
