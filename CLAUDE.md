@@ -3238,13 +3238,40 @@ carried over. `count_nodes` needs a bigger box than the TP triangle uses -
 measured, the default (260, 160) clips a pentagon and returns 3 for a five-node
 seal, so `ss.NODE_BOX` is (320, 300).
 
-The secret's SHAPE also varies, which settles a question this file carried as
-an assumption. **Repeats occur.** Stage 1's answer repeated nothing, but the
-FIRST five-node stage played (a different attempt) had two survivors and
-neither was repeat-free - both repeated White. Stage 2's answer was a
-permutation of all six. So the solver must keep allowing repeats: assuming
-otherwise would search 720 codes instead of 46,656 and eliminate a true answer
-outright.
+**CORRECTION — THE SECRET LOOKS LIKE A PERMUTATION.** This section used to
+say "repeats occur", on the strength of a five-node stage whose two SURVIVORS
+both repeated White. That was an inference from a model, not an observed
+answer, and it was made during the run where a misread counter poisoned the
+model — which is precisely what leaves only repeat-y survivors, by eliminating
+the true repeat-free code.
+
+Every answer the bot has actually CONFIRMED is repeat-free:
+
+    len 3   White, Blue, Yellow
+    len 3   Green, Blue, Black
+    len 5   Yellow, Blue, Green, Black, Red
+    len 6   Yellow, Black, Red, Green, Blue, White   <- all six, once each
+
+The operator found this by watching the bot click the same rune three times
+and asking whether the puzzle allows that at all. It is a good question and
+the answer changes the search space by 65x at length 6 — 720 codes instead of
+46,656 — which matters because ten rows is the whole budget and running out
+fails the MISSION, not the stage.
+
+**`kekkai.AUTO` acts on it without gambling on it**, because an empty pool is
+already a detected condition here: `next_guess` returns None and the caller
+stops rather than guessing. So a secret that DOES repeat cannot produce a
+wrong answer — only an exhausted permutation pool, after which AUTO widens to
+the full space carrying the same history. `surviving()` returns which space
+was used, so a widen is visible rather than silent, and the evidence keeps
+accumulating.
+
+Measured over random secrets:
+
+    permutation secrets   len 3  40/40  worst 5
+                          len 5  40/40  worst 6      (was avg 6.06, worst 8)
+                          len 6  40/40  worst 7
+    REPEATING secrets     len 3  30/30      len 5  30/30   - still solved
 
 ### TEN ROWS PER STAGE, AND RUNNING OUT FAILS THE MISSION
 
@@ -4230,6 +4257,36 @@ sizes are still accepted at their measured centres.
 detector at a screen it should say nothing about. Scoring a detector on
 frames it is supposed to REJECT is cheap and this project keeps finding real
 faults that way.
+
+### THE RUNE DRIVER NEEDED THE SAME ENDING THE PUZZLE DRIVERS GOT
+
+Measured live, and it threw away a win:
+
+    08:17:14  guess 6: Yellow,Black,Red,Green,Blue,White   (pool A=6 B=0)
+    08:17:29  panel closed after guess 6 -> SOLVED
+    08:17:29  SS: no puzzle and no dialog on screen - stopping rather than
+              clicking blind
+    08:17:29  SS: 1 stage(s) cleared, lost
+    08:17:29  mission did not complete; it stays in the list and will not be
+              retried this pass
+    08:17:32  resume: mission_success (mission_success conf=1.000)
+
+The stage was SOLVED and `Mission Success!` was on screen three seconds later.
+`ss.play` fired in the gap between the two and called it lost, so `run_all`
+recorded a failure about a mission it had just won. Only the resume ladder
+noticed the reward panel and cleared it.
+
+Balance and Lights had already been given a blank tolerance and a
+`mission_over` check for exactly this; the rune family — the oldest and
+best-tested of the three — was left without either, because the fix was
+applied to the drivers that happened to be written that day. **That is this
+file's recurring shape: a recovery path that exists in two places, only one of
+which was taught the new trick.** The suite now iterates all THREE drivers
+rather than naming the two.
+
+The same edit removed the rune branch's veto on `close_out`, for the reason
+already recorded there: a driver's opinion about its own stage is not the
+measurement that establishes a banked mission.
 
 ### CORRECTION — COMPLETED SS MISSIONS DROP OUT OF THE DAY'S LIST
 

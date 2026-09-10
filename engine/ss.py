@@ -356,9 +356,11 @@ def play(cap, actor, log, max_stages=10, seed_history=None):
     the solver needs about six of the ten, so two wasted restarts lose the
     mission. `seed_history` resumes a stage already part-answered.
     """
-    cleared = 0
+    cleared, blank = 0, 0
     hist = list(seed_history or [])
-    for _ in range(max_stages):
+    for _ in range(max_stages * (BLANK_TOLERANCE + 4)):
+        if cleared >= max_stages:
+            break
         f = cap.frame(gray=False)
 
         # A DIALOG DECIDES WHETHER THERE IS A NEXT STAGE. Check it before the
@@ -374,14 +376,30 @@ def play(cap, actor, log, max_stages=10, seed_history=None):
                          cleared)
                 return cleared, "failed", hist
             cleared += 1
+            blank = 0
             hist = []            # a new stage starts with a fresh scroll
             log.info("SS: stage %d cleared", cleared)
             continue
 
         if K.find_rows(f)[0] is None:
-            log.info("SS: no puzzle and no dialog on screen - stopping rather "
-                     "than clicking blind")
+            # THE SAME ENDING THE PUZZLE DRIVERS NEEDED, and the rune family
+            # was left without it. Measured live: guess 6 solved the stage
+            # ("panel closed after guess 6 -> SOLVED"), `Mission Success!` was
+            # on screen three seconds later, and this branch fired in between
+            # and reported "lost" - so `run_all` logged "mission did not
+            # complete; it stays in the list and will not be retried this
+            # pass" about a mission it had just WON.
+            if mission_over(f):
+                log.info("SS: the mission is over - Mission Success is up")
+                return cleared, "cleared", hist
+            blank += 1
+            if blank <= BLANK_TOLERANCE:
+                time.sleep(BLANK_POLL)
+                continue
+            log.info("SS: no puzzle and no dialog for %d frame(s) - stopping "
+                     "rather than clicking blind", blank)
             return cleared, "lost", hist
+        blank = 0
 
         n = stage_length(f, log)
         if n is None:
@@ -590,8 +608,6 @@ def run_one(cap, actor, log, tpls=None, play_combat=None, relog=None):
     if kind == "rune":
         cleared, outcome, _hist = play(cap, actor, log)
         log.info("SS: %d stage(s) cleared, %s", cleared, outcome)
-        if outcome not in ("cleared", "failed"):
-            return False
     elif kind in ("balance", "lights"):
         # THE DRIVER'S VERDICT DOES NOT DECIDE WHETHER ANYTHING BANKED, and
         # letting it do so lost a completed mission: Lights Out cleared in five

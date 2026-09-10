@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import platform
+import random
 import sys
 import textwrap
 import time
@@ -5390,13 +5391,21 @@ def test_an_ss_family_is_dispatched_by_looking_not_by_name():
     check("close_out" in src, "run_one closes out")
     # Only the PUZZLE branch changed. The rune path keeps its own veto, and
     # asserting about the whole function would have read that as the failure.
-    branch = src.split('elif kind in ("balance", "lights"):')[1]
-    branch = branch.split("elif kind ==")[0]
-    check('if outcome not in ("cleared", "failed"):' not in branch,
-          "and a puzzle driver's verdict no longer vetoes close_out, which is "
-          "the measurement that establishes a banked mission")
+    for opener, label in (('if kind == "rune":', "rune"),
+                          ('elif kind in ("balance", "lights"):', "puzzle")):
+        branch = src.split(opener)[1].split("elif kind ==")[0]
+        check('if outcome not in ("cleared", "failed"):' not in branch,
+              f"the {label} driver's verdict no longer vetoes close_out, "
+              f"which is the measurement that establishes a banked mission")
 
-    for drv in (ss_mod.play_balance, ss_mod.play_lights):
+    # ALL THREE DRIVERS, not just the two written together. The rune family
+    # was left without this and lost a mission it had solved: guess 6 cleared
+    # the stage, `Mission Success!` was up three seconds later, and the driver
+    # reported "lost" in the gap - so run_all recorded "mission did not
+    # complete" about a win. A fix applied to the drivers that happened to be
+    # written that day is the recurring shape this file calls "a recovery path
+    # that exists in two places, only one of which was taught the new trick".
+    for drv in (ss_mod.play, ss_mod.play_balance, ss_mod.play_lights):
         d = inspect.getsource(drv)
         check("mission_over" in d,
               f"{drv.__name__} stops on the reward panel")
@@ -5761,6 +5770,103 @@ def test_every_run_one_branch_actually_runs():
         ss_mod.tp.close_out = orig_close
 
 
+
+def test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely():
+    """Every confirmed answer is repeat-free, so try that space FIRST.
+
+    The operator asked why the bot clicks the same rune three times and
+    whether the puzzle even allows repeats. It does not, as far as anything
+    measured shows - every answer this bot has confirmed is repeat-free:
+
+        len 3   White, Blue, Yellow
+        len 3   Green, Blue, Black
+        len 5   Yellow, Blue, Green, Black, Red
+        len 6   Yellow, Black, Red, Green, Blue, White   <- all six, once each
+
+    CLAUDE.md recorded "repeats occur", but from INFERRED SURVIVORS rather
+    than a confirmed answer, and during the run where a misread counter
+    poisoned the model - which eliminates the true repeat-free code and leaves
+    exactly the repeat-y survivors that were observed.
+
+    **AUTO makes acting on this cheap instead of a gamble**, because an empty
+    pool is already a detected condition: `next_guess` returns None rather
+    than guessing. So a repeating secret cannot produce a WRONG answer, only
+    an exhausted permutation pool - after which AUTO widens, carrying the same
+    history. The test asserts both halves, since only asserting the fast half
+    would be assuming the very thing in question.
+    """
+    print("\nthe rune secret looks like a permutation, and AUTO proves it safely")
+    import itertools
+    import kekkai as kek
+
+    check(kek.candidates(3, allow_repeats=False)[0] is not None,
+          "the permutation space exists")
+    check(len(kek.candidates(6, allow_repeats=False)) == 720,
+          f"length 6 has 720 permutations "
+          f"({len(kek.candidates(6, allow_repeats=False))})")
+    check(len(kek.candidates(6, allow_repeats=True)) == 46656,
+          "against 46,656 with repeats - 65x")
+
+    def run(secret, length, allow):
+        hist = []
+        for n in range(1, 16):
+            g = kek.next_guess(length, hist, allow_repeats=allow)
+            if g is None:
+                return None
+            if tuple(g) == tuple(secret):
+                return n
+            hist.append((tuple(g), *kek.score(tuple(g), tuple(secret))))
+        return None
+
+    rnd = random.Random(11)
+    for length, cap in ((3, 6), (5, 8), (6, 9)):
+        perms = [tuple(c) for c in itertools.permutations(kek.RUNES, length)]
+        sample = rnd.sample(perms, min(40, len(perms)))
+        got = [run(sec, length, kek.AUTO) for sec in sample]
+        solved = [g for g in got if g is not None]
+        check(len(solved) == len(sample),
+              f"len {length}: every permutation secret solved "
+              f"({len(solved)}/{len(sample)})")
+        if solved:
+            check(max(solved) <= cap,
+                  f"len {length}: worst {max(solved)} guesses, inside the "
+                  f"ten-row budget that a stage allows")
+
+    # --- THE SAFETY HALF: a repeating secret must still be solved ------
+    for length in (3, 5):
+        reps = [s for s in itertools.product(kek.RUNES, repeat=length)
+                if len(set(s)) < length]
+        sample = rnd.sample(reps, 30)
+        got = [run(sec, length, kek.AUTO) for sec in sample]
+        solved = [g for g in got if g is not None]
+        check(len(solved) == len(sample),
+              f"len {length}: AUTO still solves REPEATING secrets by widening "
+              f"({len(solved)}/{len(sample)})")
+
+    # --- and it reports which space it used ----------------------------
+    pool, used = kek.surviving(3, [], allow_repeats=kek.AUTO)
+    check(used is False and len(pool) == 120,
+          f"with no history it starts in the permutation space "
+          f"({used}, {len(pool)})")
+    # a history only a repeating code can satisfy must force the widen
+    secret = ("Red", "Red", "Blue")
+    g = ("Red", "Blue", "Green")
+    hist = [(g, *kek.score(g, secret))]
+    while True:
+        nxt = kek.next_guess(3, hist, allow_repeats=kek.AUTO)
+        if nxt is None or tuple(nxt) == secret:
+            break
+        hist.append((tuple(nxt), *kek.score(tuple(nxt), secret)))
+    _pool, used = kek.surviving(3, hist, allow_repeats=kek.AUTO)
+    check(used is True,
+          "and reports True once the evidence forces the repeat space, so a "
+          "widen is visible rather than silent")
+
+    check(kek.next_guess.__defaults__ is not None
+          and kek.AUTO in kek.next_guess.__defaults__,
+          "AUTO is the default, so the live caller gets it")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -5831,7 +5937,8 @@ def main():
                test_liveness_is_probed_without_killing_anything_on_windows,
                test_a_stage_dialog_is_a_solid_button_of_one_fixed_size,
                test_losing_the_idle_poke_does_not_also_lose_sleep_prevention,
-               test_every_run_one_branch_actually_runs):
+               test_every_run_one_branch_actually_runs,
+               test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
