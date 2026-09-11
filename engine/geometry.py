@@ -93,6 +93,20 @@ SKILLS = {
     **{f"S{i+5}": (224.0 + i * _SKILL_PITCH, _SKILL_Y) for i in range(4)},
 }
 
+# THE SENJUTSU TOGGLE, one slot-and-a-bit right of S8.
+#
+# An amber magatama that SWAPS THE WHOLE SKILL BAR to the senjutsu set. It is
+# not an attack and costs nothing to press, which is exactly what makes it
+# dangerous: after an accidental press S1..S8 still exist and still click, but
+# they are now different jutsu - so the configured rotation silently plays a
+# bar nobody chose, and nothing about the frame looks wrong.
+#
+# Measured at scale 1.0: S8 at (2214, 964), the magatama at (2347, 970), so
+# +133 x and +6 y in template units from S8 - expressed here relative to the
+# command-bar anchor like everything else, because this file's oldest rule is
+# that battle geometry is anchor-relative and never absolute.
+SENJUTSU = (224.0 + 3 * _SKILL_PITCH + 133.0, _SKILL_Y + 6.0)
+
 # Ring action slots: symmetric about dx=+48.5. Inner columns +-55.5, outer +-144.5.
 # NOTE: named TARGETS for historical reasons only — these are jutsu CAST slots.
 _RING_CX = 48.5
@@ -382,6 +396,10 @@ class BattleGeometry:
     def cmd(self, key):
         """Command button centre. key in AT / DO / CH / RN."""
         return self._at(COMMAND, key)
+
+    def senjutsu(self):
+        """Where the senjutsu toggle sits. See `SENJUTSU`."""
+        return self._at({"SENJUTSU": SENJUTSU}, "SENJUTSU")
 
     def slot(self, key):
         """Skill slot centre. key in S1..S8."""

@@ -6716,6 +6716,139 @@ def test_a_failed_log_redirect_cannot_stop_the_relaunch():
     check("no log" in where, f"and says so plainly ({where!r})")
 
 
+
+def test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone():
+    """Pressing the senjutsu orb REWIRES the rotation, silently.
+
+    The amber magatama beside S8 swaps the whole skill bar to the senjutsu
+    set. It costs nothing and deals no damage, which is what makes it a trap:
+    S1..S8 still exist and still click, so nothing looks wrong while the bot
+    plays jutsu the operator never chose. The cause seen live was ours - the
+    token-decline guard misfired on combat frames and clicked (2346, 962),
+    the orb being at (2347, 970).
+
+    Two defences, and they are deliberately different in kind:
+
+        the GUARD      geometry only, so it holds on every backend
+        the RECOVERY   colour, so it is calibrated per backend and answers
+                       UNKNOWN elsewhere - "fixing" this means PRESSING that
+                       same button, so a guess is worse than doing nothing
+
+    THREE states, because absence is ambiguous: a first version read "no
+    magatama" as "senjutsu is on" and called two ordinary archive frames
+    swapped - on those the character had no senjutsu button at all, and
+    acting would have turned senjutsu ON.
+    """
+    print("\nthe senjutsu toggle is never pressed, and a swap is undone")
+    import combat as combat_mod
+    import geometry as geo_mod
+    import perceive as pmod
+    from act import Actor
+
+    was = pmod.get_renderer()
+    try:
+        pmod.set_renderer("webgl")
+        ch, do = pmod.template("charge_btn"), pmod.template("dodge_btn")
+
+        def geo_of(f):
+            return geo_mod.BattleGeometry.locate(
+                cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), ch, do)
+
+        cases = [("ref/auto/battle/senjutsu_normal.png", combat_mod.NORMAL_BAR),
+                 ("ref/auto/battle/senjutsu_active.png", combat_mod.SENJUTSU_BAR)]
+        for d in ("mission", "battle", "lobby"):
+            for nm in ("COMBAT.png", "combat_dark_map.png"):
+                pth = os.path.join(ROOT, f"ref/auto/{d}/{nm}")
+                if os.path.exists(pth):
+                    cases.append((f"ref/auto/{d}/{nm}", combat_mod.NO_SENJUTSU))
+
+        frames = {}
+        for rel, want in cases:
+            f = cv2.imread(os.path.join(ROOT, rel))
+            check(f is not None, f"{os.path.basename(rel)} is on disk")
+            if f is None:
+                continue
+            frames[rel] = f
+            g = geo_of(f)
+            got = combat_mod.skill_bar_state(f, g)
+            check(got == want,
+                  f"{os.path.basename(rel)}: bar reads {got}, want {want}")
+
+        # --- the geometry is ANCHOR-RELATIVE and lands on the orb -------
+        nf = frames.get("ref/auto/battle/senjutsu_normal.png")
+        if nf is not None:
+            g = geo_of(nf)
+            pt = g.senjutsu()
+            check(pt == (2347, 970),
+                  f"the toggle is predicted from the command bar ({pt})")
+            s8 = g.slot("S8")
+            check(abs(pt[0] - s8[0]) > 100,
+                  f"and is well clear of S8 at {s8}, so an ordinary slot "
+                  f"click cannot reach it")
+
+        # --- UNCALIBRATED BACKENDS MUST ABSTAIN -------------------------
+        af = frames.get("ref/auto/battle/senjutsu_active.png")
+        if af is not None:
+            g = geo_of(af)
+            for r in ("wgpu-webgl", "canvas"):
+                check(combat_mod.skill_bar_state(af, g, renderer=r) is None,
+                      f"{r} is not calibrated, so it answers UNKNOWN rather "
+                      f"than pressing a button on a guess")
+            check(combat_mod.skill_bar_state(af, g, renderer="webgl")
+                  == combat_mod.SENJUTSU_BAR,
+                  "while webgl, which was measured, still answers")
+    finally:
+        if was:
+            pmod.set_renderer(was)
+        else:
+            pmod.clear_renderer()
+
+    # --- THE GUARD: the bot cannot click it, but the recovery can -------
+    class _Cap:
+        def to_click_coords(self, x, y):
+            return x / 2.0, y / 2.0
+
+    class _CDP:
+        def __init__(self):
+            self.clicks = []
+
+        def click(self, x, y, jitter=0):
+            self.clicks.append((x, y))
+            return x, y
+
+    cdp = _CDP()
+    a = Actor(cdp, _Cap(), _Log(), dry_run=False, click_delay=(0, 0),
+              post_click=(0, 0))
+    a.guard_point(2347, 970, 60, "the senjutsu toggle")
+    check(a.click_pixel(2347, 970, why="stray") is None,
+          "a stray click ON the toggle is refused")
+    check(a.click_pixel(2387, 970, why="stray") is None,
+          "and one just inside the radius too")
+    check(a.click_pixel(2214, 964, why="action S8") is not None,
+          "while S8 still goes through - the guard is not a wall across "
+          "the skill row")
+    n_before = len(cdp.clicks)
+    a.allow_point("the senjutsu toggle")
+    check(a.click_pixel(2347, 970, why="restore the normal bar") is not None,
+          "and the recovery may press it, once the guard is lifted")
+    check(len(cdp.clicks) == n_before + 1, "exactly one extra click landed")
+
+    # --- the runner re-arms and restores, and only on a POSITIVE read ---
+    import battle as battle_mod
+    # `_run`, not `run` - the latter is a thin wrapper, and inspecting it
+    # found none of this while the code was present and correct.
+    src = inspect.getsource(battle_mod.BattleRunner._run)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("guard_point" in body, "the runner arms the guard each turn")
+    check("SENJUTSU_BAR" in body,
+          "and restores only on a positive senjutsu reading, never on "
+          "absent or unknown")
+    check(body.index("guard_point") < body.index("SENJUTSU_BAR"),
+          "arming comes before the recovery that has to lift it")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -6797,7 +6930,8 @@ def main():
                test_the_whole_boss_list_is_harvested_so_the_panel_can_offer_it,
                test_a_rescan_can_drop_a_boss_and_keeps_identity_across_events,
                test_the_token_guard_does_not_fire_during_an_ordinary_battle,
-               test_a_failed_log_redirect_cannot_stop_the_relaunch):
+               test_a_failed_log_redirect_cannot_stop_the_relaunch,
+               test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

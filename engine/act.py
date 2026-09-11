@@ -31,15 +31,37 @@ class Actor:
         # but "should never fire" is exactly what was believed about the fixed
         # card grid right before it clicked into the weapon Shop.
         self.no_click_zones = list(no_click_zones)
+        # POINTS the bot must never click, as (x, y, radius, why). Unlike the
+        # dock's rectangle these move with the game, so the owner re-arms them
+        # each time it has fresh geometry rather than storing a stale spot.
+        #
+        # The senjutsu toggle is the reason this exists: pressing it swaps the
+        # whole skill bar, so every later S1..S8 click plays a jutsu nobody
+        # chose - and a mis-scoped safety check pressed it twice in one fight.
+        # Refusing beats recovering, because a recovery has to press the same
+        # button back and can only run once something has already gone wrong.
+        self.no_click_points = []
+
+    def guard_point(self, x, y, radius, why):
+        """Forbid clicks within `radius` of (x, y). Replaces any same-`why`."""
+        self.no_click_points = [p for p in self.no_click_points if p[3] != why]
+        self.no_click_points.append((int(x), int(y), int(radius), why))
+
+    def allow_point(self, why):
+        """Lift a guard, for the one caller entitled to press it."""
+        self.no_click_points = [p for p in self.no_click_points if p[3] != why]
 
     def _sleep(self, rng):
         time.sleep(random.uniform(*rng))
 
     def blocked_by(self, px, py):
-        """The no-click zone containing this point, if any."""
+        """The no-click zone or guarded point covering this click, if any."""
         for (zx, zy, zw, zh) in self.no_click_zones:
             if zx <= px < zx + zw and zy <= py < zy + zh:
                 return (zx, zy, zw, zh)
+        for (gx, gy, r, why) in self.no_click_points:
+            if (px - gx) ** 2 + (py - gy) ** 2 <= r * r:
+                return why
         return None
 
     def click_pixel(self, px, py, why=""):
@@ -50,10 +72,14 @@ class Actor:
         """
         zone = self.blocked_by(px, py)
         if zone is not None:
+            # NAME THE REAL REASON. This used to say "(the control dock)"
+            # whatever had blocked it, which would have misdescribed every
+            # point guard - and a guard that reports the wrong cause sends
+            # the next investigation to the wrong module.
+            what = zone if isinstance(zone, str) else f"the control dock {zone}"
             self.log.warning(
-                "REFUSING click (%.0f,%.0f) %s - it lands in a no-click zone %s "
-                "(the control dock). A bot click there would press the "
-                "operator's own buttons.", px, py, why, zone)
+                "REFUSING click (%.0f,%.0f) %s - it lands on %s, which the "
+                "bot must never press.", px, py, why, what)
             return None
         cx, cy = self.capture.to_click_coords(px, py)
         self._sleep(self.click_delay)

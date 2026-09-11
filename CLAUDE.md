@@ -4224,6 +4224,75 @@ never the shape test - it was the context it was asked in. Shape alone is a
 coincidence waiting to happen, and the log line will sound confident when it
 does.
 
+## THE SENJUTSU ORB REWIRES THE SKILL BAR — never press it
+
+A yellow-orange orb with a MAGATAMA inside, one slot-and-a-bit right of S8,
+drawn only while it is our turn. Measured at scale 1.0: **(2347, 970)**, 83x86,
+with S8 at (2214, 964) - so +133 x from S8, and `geometry.SENJUTSU` derives it
+from the command-bar anchor like everything else.
+
+**Pressing it swaps the WHOLE skill bar to the senjutsu set.** It costs
+nothing, deals no damage and plays no animation, which is exactly what makes
+it a trap rather than a mistake you notice: S1..S8 still exist and still
+click, so the bot plays jutsu the operator never chose and every learned
+cooldown is about the wrong skill. It is a toggle - pressing it again restored
+the original bar byte-identically (skill-row diff 0.00).
+
+**The cause seen live was ours.** The token-decline guard misfired on combat
+frames and clicked (2346, 962) - this orb. Two defences now, deliberately
+different in kind:
+
+    the GUARD      `Actor.guard_point`, pure GEOMETRY, so it holds on every
+                   backend. Re-armed each turn, because the anchor moves and
+                   a guard defending where a control USED to be is worse than
+                   none. `allow_point` lets the one legitimate caller press it.
+    the RECOVERY   colour, so it is calibrated PER BACKEND and abstains
+                   elsewhere - see below.
+
+Refusing beats recovering: a recovery has to press the same button back, and
+can only run once something has already gone wrong.
+
+### THREE STATES — absence is ambiguous, so read each one positively
+
+The first version read "no magatama" as "senjutsu is on", and called two
+ordinary archive combat frames swapped. On those the character had **no
+senjutsu button at all**, and acting on it would have pressed the toggle and
+turned senjutsu ON - the exact harm the guard exists to prevent. Measured in a
+140x140 window on the anchor-derived point:
+
+    amber magatama   the normal bar       amber 0.132   red 0.09-0.13
+    red hand sign    the SENJUTSU bar     amber 0.018   red 0.177
+    neither          no senjutsu button   amber 0.02    red 0.02-0.04
+
+Amber is the decisive channel (7x); red alone separates on from normal by only
+1.4x, because the magatama carries a red swirl of its own. So amber decides
+first, and red only tells the two amber-less cases apart.
+
+**Calibrated on webgl ONLY**, and keyed by backend for the same reason
+`COOLING_GATES` is: this reads COLOUR, and colour is what the backends render
+differently - this file already records a gold button rendering purple on one
+of them. Every other backend answers UNKNOWN and nothing is pressed. The
+no-click guard is unaffected, being geometry. To extend it, open the toggle on
+wgpu and measure the same two fractions.
+
+### EDGE IS NOT THE VARIABLE — `renderMode` IS, and it is PER PROFILE
+
+Asked whether Windows running EDGE could conflict. Edge is a Chromium fork,
+speaks CDP, and this file already records it verified live through
+`browser.launch()` - capture, input, injection and device metrics all fine.
+
+The thing that actually differs per machine is `renderMode`, which the SITE
+stores in **localStorage** - so it is per browser profile and per origin, and
+does not travel between the Mac's Chrome and the Windows Edge. Unless it was
+set there, Windows is on the `wgpu-webgl` default, not webgl. Consequences,
+and they are the opposite way round from what "it is Edge" would suggest:
+
+    wgpu   the DEFAULT templates are correct, and `slot_cooling` IS
+           calibrated there (0.25), so cooldown detection works better
+    webgl  needs `tpl/webgl/`, and the senjutsu recovery is calibrated
+
+So before blaming the browser, read the log line that names the backend.
+
 ## EUDEMON GARDEN — the boss ladder, and a second rotation for the hunts
 
 Village -> `Hunting House` label -> submenu -> `Eudemon Garden`. A paged list

@@ -464,3 +464,108 @@ def parse_status_effects(text_lines):
         if m:
             out.append((m.group(1).strip(), int(m.group(2))))
     return out
+
+# --- THE SENJUTSU BAR MUST NOT BE LEFT ON -------------------------------
+#
+# The amber magatama beside S8 swaps the whole skill bar to the senjutsu set.
+# Pressing it costs nothing and deals no damage, which is what makes it a trap
+# rather than a mistake you notice: S1..S8 still exist and still click, but
+# they are now DIFFERENT JUTSU, so the configured rotation plays a bar the
+# operator never chose and every learned cooldown is about the wrong skill.
+#
+# Observed live, and the cause was ours: the token-decline guard misfired on
+# combat frames and clicked (2346, 962) - the magatama at (2347, 970). That
+# guard is scoped now, but an operator can press it too, so the runner
+# recovers instead of assuming it cannot happen.
+#
+# **THREE STATES, AND THE THIRD IS WHY ABSENCE IS NOT ENOUGH.** The first
+# version read "no magatama" as "senjutsu is on" and called two ordinary
+# combat frames swapped - on those the character simply had NO senjutsu
+# button at all. Acting on that would have pressed the toggle and turned
+# senjutsu ON, which is the exact harm this exists to prevent. So each state
+# is read POSITIVELY, from the toggle itself:
+#
+#     amber magatama   the normal bar          amber 0.132  red 0.09-0.13
+#     red hand sign    the SENJUTSU bar        amber 0.018  red 0.177
+#     neither          no senjutsu button      amber 0.02   red 0.02-0.04
+#
+# Amber is the decisive channel (0.132 against 0.018, ~7x); red alone
+# separates on from normal by only 1.4x, because the magatama carries a red
+# swirl of its own. So amber decides first and red only distinguishes the two
+# amber-less cases. Sampled from ONE battle plus two archive frames: two
+# states confirmed and a third ruled in, not a distribution measured.
+SENJ_AMBER = ((12, 150, 150), (28, 255, 255))
+SENJ_RED_LO = ((0, 140, 90), (10, 255, 255))
+SENJ_RED_HI = ((170, 140, 90), (180, 255, 255))
+SENJ_WIN = 70            # half-width of the window around the toggle
+SENJ_AMBER_ON = 0.06     # midway between 0.132 and 0.018
+SENJ_RED_ON = 0.10       # midway between 0.177 and 0.036
+
+NORMAL_BAR = "normal"
+SENJUTSU_BAR = "senjutsu"
+NO_SENJUTSU = "absent"
+
+
+def _senj_fracs(frame_bgr, geo):
+    if geo is None:
+        return None
+    try:
+        cx, cy = geo.senjutsu()
+    except Exception:
+        return None
+    h, w = frame_bgr.shape[:2]
+    x0, x1 = max(0, cx - SENJ_WIN), min(w, cx + SENJ_WIN)
+    y0, y1 = max(0, cy - SENJ_WIN), min(h, cy + SENJ_WIN)
+    if x1 - x0 < 40 or y1 - y0 < 40:
+        return None
+    hsv = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+
+    def frac(*ranges):
+        m = None
+        for lo, hi in ranges:
+            one = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+            m = one if m is None else (m | one)
+        return float(m.mean()) / 255.0
+
+    return frac(SENJ_AMBER), frac(SENJ_RED_LO, SENJ_RED_HI)
+
+
+# CALIBRATED ON webgl ONLY, and keyed by backend for the same reason
+# `COOLING_GATES` is: this reads COLOUR, and colour is exactly what the
+# backends render differently - this file's own notes record a gold button
+# rendering purple on one of them. The thresholds above came from a webgl
+# session, so every other backend answers UNKNOWN rather than confidently.
+#
+# That is not a gap in cover. The protection that matters is the NO-CLICK
+# GUARD, which is pure geometry and therefore backend-independent; this
+# detector only powers the recovery, and recovery means pressing a button, so
+# an uncalibrated guess is worse than leaving it alone.
+#
+# To calibrate wgpu: open the toggle on that backend and measure the amber
+# and red fractions in the same window, the way the webgl numbers were taken.
+SENJ_BACKENDS = {"webgl"}
+
+
+def skill_bar_state(frame_bgr, geo, renderer=None):
+    """`normal` / `senjutsu` / `absent`, or None when it cannot tell.
+
+    None matters: 'fixing' this means PRESSING a button, so a guess is worse
+    than doing nothing.
+    """
+    if renderer is None:
+        try:
+            import perceive
+            renderer = perceive.get_renderer()
+        except Exception:
+            renderer = None
+    if renderer not in SENJ_BACKENDS:
+        return None
+    f = _senj_fracs(frame_bgr, geo)
+    if f is None:
+        return None
+    amber, red = f
+    if amber >= SENJ_AMBER_ON:
+        return NORMAL_BAR
+    if red >= SENJ_RED_ON:
+        return SENJUTSU_BAR
+    return NO_SENJUTSU

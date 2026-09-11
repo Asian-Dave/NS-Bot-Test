@@ -56,6 +56,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # Outcomes. Deliberately explicit strings — they end up in logs and counters.
+# The bar swap animates; measured usable again well inside this.
+SENJ_SETTLE = 1.6
+# The orb measured 83x86, and S8's centre is 133 px away, so 60 covers the
+# control comfortably while staying clear of the nearest real slot.
+SENJ_GUARD_R = 60
+
 VICTORY = "victory"
 DEFEAT = "defeat"
 ABORTED = "aborted"       # we chose to Run (watchdog)
@@ -326,6 +332,46 @@ class BattleRunner:
             if geo is None:
                 self.log.warning("battle: command bar gated but geometry failed")
                 return STALLED, {"rounds": rounds, "acted": acted}
+
+            # FORBID THE SENJUTSU TOGGLE FOR EVERYTHING ELSE THIS TURN.
+            # Re-armed per turn because it is anchor-derived and the anchor
+            # can move; a guard that defends where a control USED to be is
+            # worse than none, which this project has already paid for once.
+            try:
+                self.actor.guard_point(*geo.senjutsu(), SENJ_GUARD_R,
+                                       "the senjutsu toggle")
+            except Exception:
+                pass
+
+            # THE SKILL BAR MUST BE THE ONE THE ROTATION WAS WRITTEN FOR.
+            # An accidental press of the senjutsu toggle swaps S1..S8 for a
+            # different set - the slots still click, so nothing looks wrong
+            # while the bot plays jutsu nobody chose. Put it back BEFORE
+            # acting, and only on a positive reading: `absent` (no senjutsu
+            # button on this character) and None must do nothing, because the
+            # "fix" is itself a press of that toggle.
+            if combat.skill_bar_state(bgr, geo) == combat.SENJUTSU_BAR:
+                self.log.warning("battle: the SENJUTSU bar is showing - the "
+                                 "rotation refers to the normal jutsu, so "
+                                 "switching back")
+                self.actor.allow_point("the senjutsu toggle")
+                try:
+                    self.actor.click_pixel(*geo.senjutsu(),
+                                           why="restore the normal skill bar")
+                finally:
+                    self.actor.guard_point(*geo.senjutsu(), SENJ_GUARD_R,
+                                           "the senjutsu toggle")
+                time.sleep(SENJ_SETTLE)
+                bgr = self.capture.frame(gray=False)
+                gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                back = combat.skill_bar_state(bgr, geo)
+                if back == combat.SENJUTSU_BAR:
+                    # Say so rather than pressing again: a toggle that did not
+                    # toggle means this is not the control we think it is.
+                    self.log.warning("battle: it is STILL showing senjutsu - "
+                                     "not pressing again")
+                else:
+                    self.log.info("battle: normal skill bar restored (%s)", back)
 
             verdict = self._observe_progress(bgr, geo)
             if verdict in ("stalled", "regenerating"):
