@@ -3060,6 +3060,25 @@ relative string and was invisible. The assertion now reads the module source
 instead - the right move whenever a platform-specific value cannot exist on the
 platform running the test.
 
+### A FAILED LOG REDIRECT MUST NOT STOP THE RELAUNCH
+
+From Windows, pressing Stop:
+
+    could not relaunch: [Errno 13] Permission denied: '...\run/app.log'
+    stopped by the operator - relaunch failed
+
+which is the dead-panel state Stop exists to prevent - the panel lives in the
+PAGE, survives the process, and is left with no receiver. The launcher
+redirects with cmd's `>> run\app.log`, and **cmd opens that file without
+sharing writes**, so the child's open for append is refused. POSIX allows the
+same open, which is why it never showed up here.
+
+The bug is in the error handling, not the file: where the child's output goes
+is a convenience, whether the child STARTS is the point. `_child_output`
+degrades - the shared log, then a private `app-<pid>.log`, then `DEVNULL` -
+and never raises out of the relaunch. The test executes that chain with every
+path denied rather than reading it.
+
 ### `os.kill(pid, 0)` IS A KILL ON WINDOWS, NOT A PROBE
 
 Reported from a Windows machine: *"when I clicked stop it did not immediately
@@ -4167,6 +4186,43 @@ a control because it is the affirmative one, check whether the screen is
 OFFERING A CHOICE. The ladder's whole design is "the only control on this
 screen is the check, so pressing it is safe" - and that premise silently
 stopped being true the first time the game asked a question.
+
+### AND THEN IT FIRED DURING AN ORDINARY BATTLE — the scoping was the fix
+
+The decline above shipped, and the guard clicked the TURN-ORDER MARKER in the
+middle of a farm fight, twice in one battle:
+
+    gate: a dialog is blocking this wait and offers a CHOICE
+          (green (2112, 949) / red (2346, 962)) - declining
+    CLICK px=(2346,962) decline a blocking two-button dialog
+
+Neither is a dialog button. The "green" is a skill-slot icon, the "red" is the
+turn marker - two coloured discs on one row, which is all the shape test asked
+for.
+
+**The regression was moving the guard without carrying its scoping.** In the
+ladder it was consulted ONLY where a green check had already matched, and the
+note above says exactly why - free-standing it fired on 4 of 125 frames, and
+"a safety check that fires on unrelated screens would licence clicking red
+things at random". It then had to move into `Gate.wait_for_any`, because a
+RUNNING TASK never reaches the ladder and so nobody answered the real prompt -
+but a gate has no green check to scope against, and the scoping was simply
+dropped.
+
+**The replacement scoping is a positive reading of "this is a modal": the
+PANEL.** A dialog is flat between its two buttons; a battlefield is not.
+
+    the real revive dialog         colour std   2.8
+    three combat/unknown frames    colour std  61.5 .. 65.4
+
+A gate at 20 is an order of magnitude clear of both, and takes the reference
+set from 4 false fires to **0 of 138** with the real prompt still detected.
+
+**The general lesson, and it is not about dialogs:** when a check moves to a
+new caller, its GUARDS have to move with it. The thing that made it safe was
+never the shape test - it was the context it was asked in. Shape alone is a
+coincidence waiting to happen, and the log line will sound confident when it
+does.
 
 ## EUDEMON GARDEN — the boss ladder, and a second rotation for the hunts
 

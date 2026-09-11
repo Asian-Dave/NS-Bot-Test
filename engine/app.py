@@ -866,12 +866,34 @@ class Runner:
         except Exception:
             pass
 
+        # WHERE THE CHILD'S OUTPUT GOES MUST NEVER DECIDE WHETHER IT STARTS.
+        #
+        # Reported from Windows: pressing Stop killed the bot and printed
+        # `could not relaunch: [Errno 13] Permission denied: run/app.log`,
+        # leaving the panel with no receiver - precisely the dead-panel state
+        # Stop was rewritten to prevent. The launcher redirects with cmd's
+        # `>> run\app.log`, and cmd opens that file WITHOUT sharing writes, so
+        # a second open for append is refused. On POSIX the same open
+        # succeeds, which is why it was never seen here.
+        #
+        # The relaunch is the point; the log destination is a convenience. So
+        # it degrades instead of failing: the shared log, else a private one
+        # named for the child, else no redirection at all.
+        def _child_output():
+            attempts = [("run/app.log", "the shared log"),
+                        (f"run/app-{os.getpid()}.log", "a private log")]
+            for rel, what in attempts:
+                try:
+                    # APPEND, so a restart never erases the record of
+                    # whatever the operator pressed Stop about.
+                    return open(os.path.join(ROOT, rel), "a"), what
+                except OSError as ex:
+                    print(f"  (cannot write {rel}: {ex}) ", flush=True)
+            return subprocess.DEVNULL, "no log (the console is gone)"
+
         started = False
         try:
-            log_path = os.path.join(ROOT, "run/app.log")
-            # APPEND, so the restart does not erase the record of whatever the
-            # operator pressed Stop about.
-            fh = open(log_path, "a")
+            fh, where = _child_output()
             kwargs = {"stdout": fh, "stderr": subprocess.STDOUT,
                       "stdin": subprocess.DEVNULL, "cwd": ROOT}
             if hasattr(os, "setsid"):
@@ -884,8 +906,8 @@ class Runner:
             print(f"  could not relaunch: {e}", flush=True)
 
         if started:
-            print("  stopped and cleared - relaunching attached "
-                  "(the panel comes back on its own)", flush=True)
+            print(f"  stopped and cleared - relaunching attached, writing to "
+                  f"{where} (the panel comes back on its own)", flush=True)
         else:
             print("  stopped by the operator - relaunch failed, so run: "
                   ".venv/bin/python engine/app.py --attach", flush=True)

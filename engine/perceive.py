@@ -614,6 +614,20 @@ CHOICE_MIN_AREA = 800
 CHOICE_SQUARE = 30          # a disc, not a bar
 CHOICE_SAME_ROW = 18        # measured 847 vs 850, i.e. 3
 CHOICE_APART = (180, 420)   # measured 275
+# **A DIALOG HAS A FLAT PANEL BETWEEN ITS TWO BUTTONS.** Without this the
+# detector fires on ordinary COMBAT frames - a green skill icon and the red
+# turn-order marker are two coloured discs on the same row - and the gate then
+# clicked the turn marker mid-battle twice in one fight. Measured on the strip
+# between the controls:
+#
+#     the real revive dialog      colour std   2.8
+#     three combat/unknown frames colour std  61.5 .. 65.4
+#
+# so 20 sits an order of magnitude clear of both. This is the positive reading
+# of "this is a modal", where size and spacing alone are only a shape.
+CHOICE_PANEL_STD = 20.0
+CHOICE_PANEL_INSET = 60     # skip the discs themselves
+CHOICE_PANEL_PAD = 40
 # Inside the game canvas only. A first version matched art at x=223,
 # which is desktop wallpaper - the game starts at 760.
 CHOICE_BAND_X = (760, 2680)
@@ -665,9 +679,25 @@ def choice_dialog(frame_bgr):
             # the two controls of one dialog are drawn the same size
             if abs(gw - rw) > 25 or abs(gh - rh) > 25:
                 continue
+            if not _flat_between(frame_bgr, gx, gy, rx, ry):
+                continue
             if best is None or dx < best[0]:
                 best = (dx, (gx, gy), (rx, ry))
     if best is None:
         return None
     return {"accept": best[1], "decline": best[2]}
+
+
+def _flat_between(frame, gx, gy, rx, ry):
+    """Is the strip between the two controls a flat dialog panel?"""
+    import numpy as _np
+    h, w = frame.shape[:2]
+    x0 = max(0, min(gx, rx) + CHOICE_PANEL_INSET)
+    x1 = min(w, max(gx, rx) - CHOICE_PANEL_INSET)
+    y0 = max(0, min(gy, ry) - CHOICE_PANEL_PAD)
+    y1 = min(h, max(gy, ry) + CHOICE_PANEL_PAD)
+    if x1 - x0 < 20 or y1 - y0 < 20:
+        return False
+    band = frame[y0:y1, x0:x1]
+    return float(band.reshape(-1, 3).std(axis=0).mean()) <= CHOICE_PANEL_STD
 

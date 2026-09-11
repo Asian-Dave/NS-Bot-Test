@@ -8,6 +8,8 @@ frame on disk or a number that was actually observed in game.
 
 Run:  .venv/bin/python tests/test_battle_stack.py
 """
+import builtins
+import subprocess
 import glob
 import inspect
 import logging
@@ -6564,6 +6566,156 @@ def test_a_rescan_can_drop_a_boss_and_keeps_identity_across_events():
           f"a retired index is never reused ({eu._next_key('C', fake, [])})")
 
 
+
+def test_the_token_guard_does_not_fire_during_an_ordinary_battle():
+    """It DID, live, and clicked the turn-order marker mid-fight.
+
+    The decline was first written into the resume ladder and scoped to the one
+    rung where a green check had already matched - and CLAUDE.md says plainly
+    why: as a free-standing detector it fired on 4 of 125 reference frames,
+    and "a safety check that fires on unrelated screens would licence clicking
+    red things at random". Moving it into `Gate.wait_for_any` (so a RUNNING
+    TASK could answer the prompt, which the ladder never sees) dropped that
+    scoping, and there is no green check to scope against inside a gate.
+
+    Observed twice in one farm battle:
+
+        gate: a dialog is blocking this wait and offers a CHOICE
+              (green (2112, 949) / red (2346, 962)) - declining
+        CLICK px=(2346,962) decline a blocking two-button dialog
+
+    Those are not dialog buttons. The "green" is a skill-slot icon and the
+    "red" is the turn-order marker - two coloured discs on one row, which is
+    all the shape test ever asked for.
+
+    **The positive reading is the PANEL.** A dialog is flat between its two
+    buttons; a battlefield is not:
+
+        the real revive dialog        colour std   2.8
+        three combat/unknown frames   colour std  61.5 .. 65.4
+    """
+    print("\nthe token guard does not fire during an ordinary battle")
+    import perceive as pmod
+
+    real = cv2.imread(os.path.join(ROOT, "ref/auto/battle/revive_prompt.png"))
+    check(real is not None, "the revive prompt is on disk")
+    if real is not None:
+        ch = pmod.choice_dialog(real)
+        check(ch is not None, f"the REAL dialog is still detected ({ch})")
+        if ch:
+            check(ch["decline"] == (1897, 850),
+                  f"and still declines the red control ({ch['decline']})")
+
+    # --- the frames it actually misfired on ----------------------------
+    misfired = ["ref/auto/battle/cooldown_msg_AT_1788945626.png",
+                "ref/auto/battle/cooldown_msg_AT_1788945659.png",
+                "ref/auto/battle/cooldown_msg_DO_1788945642.png"]
+    for rel in misfired:
+        f = cv2.imread(os.path.join(ROOT, rel))
+        if f is None:
+            continue
+        got = pmod.choice_dialog(f)
+        check(got is None,
+              f"{os.path.basename(rel)}: a combat frame is NOT a dialog "
+              f"({got})")
+
+    # --- and nothing else in the whole reference set -------------------
+    fired = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer", "ss", "eudemon", "hh"):
+        for path in sorted(glob.glob(os.path.join(ROOT, f"ref/auto/{d}/*.png"))):
+            if os.path.basename(path) == "revive_prompt.png":
+                continue
+            f = cv2.imread(path)
+            if f is not None and pmod.choice_dialog(f):
+                fired.append(os.path.basename(path))
+    check(not fired,
+          f"no frame in the reference set reads as a dialog ({fired[:4]})")
+
+    # --- the panel test must be REQUIRED, not advisory -----------------
+    src = inspect.getsource(pmod.choice_dialog)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    check("_flat_between" in body,
+          "choice_dialog consults the flat-panel test")
+    check("continue" in body.split("_flat_between")[1][:120],
+          "and a pair that fails it is REJECTED, not merely scored lower")
+
+
+
+def test_a_failed_log_redirect_cannot_stop_the_relaunch():
+    """Reported from Windows: Stop killed the bot and did not come back.
+
+        could not relaunch: [Errno 13] Permission denied:
+            'C:\\...\\run/app.log'
+        stopped by the operator - relaunch failed
+
+    That is exactly the dead-panel state Stop was rewritten to prevent: the
+    panel lives in the PAGE, so it survives the process and is left with no
+    receiver. The launcher redirects with cmd's `>> run\\app.log`, and cmd
+    opens that file WITHOUT sharing writes, so the child's open for append is
+    refused. On POSIX the same open succeeds, which is why it was never seen
+    here - the bug is in the ERROR HANDLING, not the file.
+
+    Where the child's output goes is a convenience; whether the child starts
+    is the point. So the redirect degrades - shared log, then a private one,
+    then none - and never raises out of the relaunch.
+    """
+    print("\na failed log redirect cannot stop the relaunch")
+    import app as app_mod
+
+    src = inspect.getsource(app_mod.Runner._respawn)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+
+    check("_child_output" in body, "the redirect is chosen by a helper")
+    check("DEVNULL" in body,
+          "and its last resort is no redirection at all, so a locked log "
+          "cannot stop the bot coming back")
+    # The open MUST be guarded. An unguarded one is the reported bug.
+    opens = [ln for ln in body.splitlines() if "open(" in ln and "app" in ln]
+    check(all("try" not in ln for ln in opens) and "except OSError" in body,
+          "the open sits inside try/except OSError")
+
+    # --- EXECUTE the fallback chain, with every path refused -----------
+    fn = None
+    for const in src.split("def _child_output")[1:2]:
+        fn = const
+    check(fn is not None, "the helper is defined inside _respawn")
+
+    real_open = builtins.open
+    tried = []
+
+    def deny(path, *a, **k):
+        if isinstance(path, str) and "app" in os.path.basename(path) \
+                and path.endswith(".log"):
+            tried.append(os.path.basename(path))
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+
+    # Rebuild the helper in isolation rather than calling _respawn, which
+    # would os._exit the test suite.
+    ns = {"os": os, "subprocess": subprocess, "ROOT": ROOT, "print": lambda *a, **k: None}
+    code = "def _child_output():" + src.split("def _child_output():")[1]
+    code = code.split("\n        started = False")[0]
+    code = "\n".join(ln[8:] if ln.startswith("        ") else ln
+                     for ln in code.splitlines())
+    try:
+        builtins.open = deny
+        exec(compile(code, "<helper>", "exec"), ns)
+        fh, where = ns["_child_output"]()
+    finally:
+        builtins.open = real_open
+
+    check(fh is subprocess.DEVNULL,
+          f"with every log path refused it still returns a usable handle "
+          f"({fh!r})")
+    check(len(tried) == 2,
+          f"after trying the shared log AND a private one ({tried})")
+    check("no log" in where, f"and says so plainly ({where!r})")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -6643,7 +6795,9 @@ def main():
                test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby,
                test_a_two_button_dialog_is_declined_never_accepted,
                test_the_whole_boss_list_is_harvested_so_the_panel_can_offer_it,
-               test_a_rescan_can_drop_a_boss_and_keeps_identity_across_events):
+               test_a_rescan_can_drop_a_boss_and_keeps_identity_across_events,
+               test_the_token_guard_does_not_fire_during_an_ordinary_battle,
+               test_a_failed_log_redirect_cannot_stop_the_relaunch):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
