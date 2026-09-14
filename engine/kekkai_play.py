@@ -635,6 +635,9 @@ def crop_digit(frame, xy):
 # the two representations are NOT interchangeable and mixing them would be
 # silently wrong - see the measurement in `digit_mask`.
 INK_DIR = "ref/auto/tp/digits_ink"
+# Which digits the last `load_exemplars` took from a renderer
+# variant directory, for logging. Never a key in the exemplar map.
+LAST_VARIANT = None
 
 # The glyph is a minority of the disc's area. Measured on a live webgl row,
 # taking the darkest 30% inside the disc gives mask fractions of 0.150 (green
@@ -761,7 +764,46 @@ def load_exemplars():
     # bright-pixel mask and are measurably incompatible with the ink mask - see
     # `digit_mask`. They are left in place as the record of what wgpu draws,
     # and simply not loaded.
-    for p in sorted(glob.glob(os.path.join(ROOT, INK_DIR, "*.png"))):
+    # PER-RENDERER OVERRIDE, PER DIGIT - the same shape as `tpl/<renderer>/`.
+    #
+    # The operator asked for "a reader that behaves based on the render", and
+    # they were right to: every exemplar here was harvested on webgl, and
+    # switching the backend to wgpu made the reader fail in the OPPOSITE
+    # direction - green fell to 0.786 where it had been reading 0.853..0.946,
+    # while gold rose to 0.863. The glyphs are close but not the same, because
+    # wgpu draws the text stroke webgl omits.
+    #
+    # The consequence was not a visible error. The solver simply never got
+    # past guess 1, so its history stayed empty and every retry replayed the
+    # SAME deterministic opening guess - which from outside looks like the bot
+    # clicking one pattern over and over.
+    #
+    # Overriding per DIGIT rather than wholesale is what makes this usable:
+    # a backend needs only the digits that actually fail on it, and everything
+    # else falls back to the shared set. Same reasoning as the template
+    # variants, where six crops were enough and the rest held.
+    rend = None
+    try:
+        import perceive
+        rend = perceive.get_renderer()
+    except Exception:
+        pass
+    paths = sorted(glob.glob(os.path.join(ROOT, INK_DIR, "*.png")))
+    swapped = set()
+    if rend:
+        var = sorted(glob.glob(os.path.join(ROOT, INK_DIR, rend, "*.png")))
+        if var:
+            # A digit present in the variant directory REPLACES the shared
+            # ones for that digit; mixing renderings of one glyph is what this
+            # file already measured going wrong.
+            for vp in var:
+                h = os.path.basename(vp).split("_")[0].split(".")[0]
+                if h.isdigit():
+                    swapped.add(h)
+            paths = [q for q in paths
+                     if os.path.basename(q).split("_")[0].split(".")[0]
+                     not in swapped] + var
+    for p in paths:
         n = os.path.splitext(os.path.basename(p))[0]
         head = n.split("_")[0]
         if not head.isdigit():
@@ -773,6 +815,12 @@ def load_exemplars():
         # so no re-binarising. Re-thresholding a mask is how two
         # representations quietly stop being comparable.
         out.setdefault(int(head), []).append(g)
+    # NOT a key in `out`. `read_digit` iterates this dict and treats every key
+    # as a digit VALUE, so a bookkeeping entry in there would be offered as a
+    # possible reading - the silent-corruption failure this module already
+    # guards against everywhere else.
+    global LAST_VARIANT
+    LAST_VARIANT = (rend, sorted(swapped)) if swapped else None
     return out
 
 
@@ -818,6 +866,9 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2,
     if not ex:
         log.info("no digit exemplars in %s - cannot read feedback", INK_DIR)
         return None, 0
+    if LAST_VARIANT:
+        log.info("digit exemplars: %s variants for %s (the rest are shared)",
+                 LAST_VARIANT[0], ", ".join(LAST_VARIANT[1]))
     pool_all = kekkai.candidates(length)
     hist_a, hist_b = [], []          # A: green=cp,gold=wp   B: green=wp,gold=cp
     alive_a = alive_b = True
@@ -944,7 +995,20 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2,
         gv, gc = read_digit(frame, g_xy, ex)
         ov, oc = read_digit(frame, o_xy, ex)
         if gv is None or ov is None:
+            # SAVE INTO THE RENDERER'S OWN DIRECTORY. A crop harvested on
+            # wgpu is not an exemplar for webgl - that mismatch is the whole
+            # reason this is per-renderer - so it must not land where the
+            # shared set lives, or classifying it would poison the backend it
+            # came from. On an unknown renderer it falls back to the shared
+            # directory, which is where the original set was harvested.
             d = os.path.join(ROOT, INK_DIR)
+            try:
+                import perceive as _p
+                _r = _p.get_renderer()
+                if _r:
+                    d = os.path.join(d, _r)
+            except Exception:
+                pass
             os.makedirs(d, exist_ok=True)
             cv2.imwrite(os.path.join(d, f"UNREAD_green_{n}.png"),
                         digit_mask(frame, g_xy))

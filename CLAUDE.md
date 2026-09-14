@@ -1308,6 +1308,43 @@ solver had narrowed 216 candidates down to it correctly and then threw the win
 away. This is the SAME trap documented just below for digit reading — check for
 a closed panel FIRST — walked into again by a later edit one branch higher.
 
+### THE DIGIT READER FOLLOWS THE RENDERER TOO — per digit, like the templates
+
+Switching the backend to wgpu made the kekkai reader fail in the OPPOSITE
+direction from the webgl bug it was built for. Measured live on the same
+mission, minutes apart:
+
+    webgl   green 0.853 .. 0.946 (reads)   gold 0.673 .. 0.736 (refused)
+    wgpu    green 0.786 (refused)          gold 0.863 (reads)
+
+The glyphs are close but not the same - wgpu draws the text stroke webgl
+omits - and **every ink exemplar in the shared set was harvested on webgl**.
+
+**The symptom was not an error, it was repetition.** An unread counter stops
+the solver at guess 1, so its history stays empty, so the next attempt
+recomputes the SAME deterministic opening guess. From outside that is a bot
+clicking one pattern over and over, which is what the operator reported. They
+also proposed the fix - a reader keyed to the render - which is exactly the
+shape this project already uses for `tpl/<renderer>/`.
+
+`digits_ink/<renderer>/` overrides the shared set **per DIGIT**: a backend
+needs only the digits that actually fail on it, everything else falls back.
+Same reasoning as the template variants, where six crops were enough. The
+variant REPLACES a digit rather than adding to it, because mixing two
+renderings of one glyph is a mistake this file has already measured going
+wrong twice.
+
+Two details worth keeping:
+
+* **Harvested `UNREAD_*` crops are written into the renderer's own
+  directory.** A wgpu crop is not an exemplar for webgl, and filing it with
+  the shared set would poison the backend it came from.
+* **The "which digits were substituted" record is NOT a key in the exemplar
+  map.** `read_digit` iterates that dict and treats every key as a possible
+  digit VALUE, so bookkeeping in there would be offered as a reading - the
+  silent-corruption failure this module guards against everywhere else. It
+  lives in `LAST_VARIANT`.
+
 ### THE TWO DISCS RENDER DIGITS DIFFERENTLY — harvest per (digit, disc)
 
 This is why the digit reader keeps blocking a mission, and it is systematic, not

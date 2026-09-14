@@ -7051,6 +7051,85 @@ def test_the_rune_solver_does_not_rebuild_a_set_per_candidate():
           f"- the un-hoisted form took 48.92s at length 6")
 
 
+
+def test_digit_exemplars_can_be_overridden_per_renderer():
+    """The reader has to behave per backend, and the failure was silent.
+
+    Every ink exemplar was harvested on webgl. Switching the game to wgpu made
+    the reader fail in the OPPOSITE direction - measured live, green fell to
+    0.786 where it had been reading 0.853..0.946, while gold rose to 0.863.
+    The glyphs are close but not the same: wgpu draws the text stroke webgl
+    omits.
+
+    **What that looked like from outside was a bot clicking one pattern over
+    and over.** It is not a loop: an unread counter stops the solver at guess
+    1, so the history stays empty, so the next attempt recomputes the SAME
+    deterministic opening guess. Nothing errored.
+
+    So the exemplars follow the renderer, PER DIGIT, the same shape as
+    `tpl/<renderer>/`: a backend needs only the digits that actually fail on
+    it and everything else falls back to the shared set. Harvested crops are
+    written into the renderer's own directory too - a wgpu crop is not an
+    exemplar for webgl, and filing it with the shared set would poison the
+    backend it came from.
+    """
+    print("\ndigit exemplars can be overridden per renderer")
+    import kekkai_play as kp
+    import perceive as pmod
+
+    ink = os.path.join(ROOT, kp.INK_DIR)
+    var = os.path.join(ink, "wgpu-webgl")
+    probe = os.path.join(var, "3_probe.png")
+    was = pmod.get_renderer()
+    made = not os.path.isdir(var)
+    try:
+        os.makedirs(var, exist_ok=True)
+        cv2.imwrite(probe, np.zeros((52, 52), np.uint8))
+
+        pmod.set_renderer("webgl")
+        shared = kp.load_exemplars()
+        shared_variant = kp.LAST_VARIANT
+        pmod.set_renderer("wgpu-webgl")
+        swapped = kp.load_exemplars()
+        swapped_variant = kp.LAST_VARIANT
+
+        check(shared_variant is None,
+              "webgl uses the shared set (no variant directory for it)")
+        check(swapped_variant and swapped_variant[0] == "wgpu-webgl"
+              and "3" in swapped_variant[1],
+              f"wgpu reports which digits it substituted ({swapped_variant})")
+        check(len(swapped[3]) == 1,
+              f"the variant REPLACES that digit rather than mixing renderings "
+              f"({len(swapped[3])} vs {len(shared[3])} shared)")
+        for d in shared:
+            if d != 3:
+                check(len(shared[d]) == len(swapped[d]),
+                      f"digit {d} still falls back to the shared set")
+
+        # the bookkeeping must never look like a digit
+        check(all(isinstance(k, int) for k in swapped),
+              f"no non-digit key leaks into the exemplar map "
+              f"({[k for k in swapped if not isinstance(k, int)]})")
+    finally:
+        for f in (probe,):
+            if os.path.exists(f):
+                os.remove(f)
+        if made and os.path.isdir(var) and not os.listdir(var):
+            os.rmdir(var)
+        if was:
+            pmod.set_renderer(was)
+        else:
+            pmod.clear_renderer()
+
+    # --- harvested crops go to the renderer's own directory -------------
+    src = inspect.getsource(kp.solve_live)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("get_renderer" in body,
+          "the UNREAD crops are filed under the renderer that produced them")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -7136,7 +7215,8 @@ def main():
                test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone,
                test_an_unreadable_command_line_keeps_the_lock,
                test_a_banked_ss_combat_mission_is_not_closed_out_twice,
-               test_the_rune_solver_does_not_rebuild_a_set_per_candidate):
+               test_the_rune_solver_does_not_rebuild_a_set_per_candidate,
+               test_digit_exemplars_can_be_overridden_per_renderer):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
