@@ -2000,12 +2000,27 @@ def _lock_holder(path, marker="app.py"):
     # The marker is only the fallback for a legacy lock that recorded no
     # command, and it is deliberately not applied when identity already matched:
     # a legitimate launch may not have "app.py" in its command line at all.
+    # UNREADABLE IS NOT DISPROVED, and on Windows it is common.
+    #
+    # `_proc_cmd` shells out - PowerShell there, `ps` on POSIX - and it returns
+    # "" whenever that fails: an execution policy blocking PowerShell, `wmic`
+    # absent on a recent Windows, a locked-down box. The first version read an
+    # empty answer as "not the holder we recorded" and DROPPED THE LOCK, so on
+    # exactly those machines the one guard against two bots clicking one game
+    # was inert - and this file already records eight instances stacking up.
+    #
+    # So an unreadable command line keeps the lock, which is the same
+    # safe-direction choice `_alive` makes for the same reason: a false
+    # "still running" costs a refused launch the operator can clear by killing
+    # a pid, while a false "stale" costs a duplicate nobody notices.
+    if not cmd:
+        return pid
     if saved:
-        if cmd and cmd == saved:
+        if cmd == saved:
             return pid
         _drop_lock(path)
         return None
-    if cmd and marker not in cmd:
+    if marker not in cmd:
         _drop_lock(path)
         return None
     return pid

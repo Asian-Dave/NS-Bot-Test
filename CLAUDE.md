@@ -3130,6 +3130,32 @@ correct code — the trap this suite keeps re-learning). It also spawns a real
 child, probes it four times and asserts it is still running, which the old
 code would have killed.
 
+### AN UNREADABLE COMMAND LINE MUST KEEP THE LOCK, NOT DROP IT
+
+The pid lock verifies IDENTITY by comparing the holder's live command line
+against the one recorded at claim time, and `_proc_cmd` shells out to get it -
+PowerShell on Windows, `ps` on POSIX. It returns `""` whenever that fails: an
+execution policy blocking PowerShell, `wmic` absent on a recent Windows, a
+locked-down machine.
+
+The first version read an empty answer as "not the holder we recorded" and
+**dropped the lock**. So on exactly those machines the one guard against two
+bots clicking the same game was inert on every launch - and this file already
+records eight instances stacking up once.
+
+Unknown is now HELD, which is the same safe-direction choice `_alive` makes
+and for the same reason: a false "still running" costs a refused launch the
+operator clears by killing a pid, while a false "stale" costs a duplicate
+nobody notices. What is NOT relaxed is a command line that reads and
+DISAGREES - that still drops the lock. **Unknown is held; contradicted is
+released.**
+
+Note this is the third Windows fault of the same shape: a POSIX helper whose
+failure mode on Windows is silence rather than an error, read as a negative
+answer. `_dead` shelling out to `ps`, `_proc_cmd` returning "" for every pid,
+and now the lock dropping on that "". When a probe can fail, decide what its
+SILENCE means before trusting it.
+
 ### AND TWO WINDOWS REPORTS THAT WERE NOT BUGS AT ALL
 
 The same machine reported the window still scrollable and webgl not working

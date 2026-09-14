@@ -9,6 +9,8 @@ frame on disk or a number that was actually observed in game.
 Run:  .venv/bin/python tests/test_battle_stack.py
 """
 import builtins
+import json
+import tempfile
 import subprocess
 import glob
 import inspect
@@ -6849,6 +6851,73 @@ def test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone():
           "arming comes before the recovery that has to lift it")
 
 
+
+def test_an_unreadable_command_line_keeps_the_lock():
+    """On Windows it DROPPED the lock, which is the dangerous direction.
+
+    `_proc_cmd` shells out - PowerShell on Windows, `ps` on POSIX - and
+    returns "" whenever that fails: an execution policy blocking PowerShell,
+    `wmic` absent on a recent Windows, a locked-down machine. The first
+    version read an empty answer as "not the holder we recorded" and dropped
+    the lock, so on exactly those machines the ONE guard against two bots
+    clicking the same game was inert on every launch.
+
+    The safe direction is the one `_alive` already takes, and for the same
+    reason: a false "still running" costs a refused launch the operator clears
+    by killing a pid, while a false "stale" costs a duplicate nobody notices -
+    and this project has records of eight instances stacking up.
+
+    Note what is NOT relaxed: a command line that READS and disagrees still
+    drops the lock. Unknown is held; contradicted is released.
+    """
+    print("\nan unreadable command line keeps the lock")
+    import app as app_mod
+
+    d = tempfile.mkdtemp()
+    lock = os.path.join(d, "app.lock")
+    me = os.getpid()
+    LIKE_US = "/x/.venv/bin/python engine/app.py --attach"
+    real = app_mod._proc_cmd
+
+    def holder(saved, proc_cmd):
+        with open(lock, "w") as f:
+            json.dump({"pid": me, "cmd": saved}, f)
+        app_mod._proc_cmd = lambda pid: proc_cmd
+        try:
+            return app_mod._lock_holder(lock), os.path.exists(lock)
+        finally:
+            app_mod._proc_cmd = real
+
+    got, kept = holder(LIKE_US, "")
+    check(got == me and kept,
+          "a recorded lock whose command line cannot be READ is still held "
+          f"(got {got}, file {'kept' if kept else 'dropped'})")
+
+    got, _ = holder(LIKE_US, LIKE_US)
+    check(got == me, "a matching command line is held")
+
+    got, kept = holder(LIKE_US, "/usr/bin/somethingelse")
+    check(got is None and not kept,
+          "a command line that READS and DISAGREES is still stale - unknown "
+          "is held, contradicted is released")
+
+    got, _ = holder("", LIKE_US)
+    check(got == me, "a legacy bare lock naming this program is held")
+
+    got, kept = holder("", "/usr/bin/somethingelse")
+    check(got is None and not kept,
+          "and a legacy bare lock naming a stranger is not")
+
+    # the empty answer must be handled BEFORE the identity comparison
+    src = inspect.getsource(app_mod._lock_holder)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("if not cmd:" in body, "the unreadable case is handled explicitly")
+    check(body.index("if not cmd:") < body.index("if saved:"),
+          "and before the identity test that would otherwise drop it")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -6931,7 +7000,8 @@ def main():
                test_a_rescan_can_drop_a_boss_and_keeps_identity_across_events,
                test_the_token_guard_does_not_fire_during_an_ordinary_battle,
                test_a_failed_log_redirect_cannot_stop_the_relaunch,
-               test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone):
+               test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone,
+               test_an_unreadable_command_line_keeps_the_lock):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
