@@ -6918,6 +6918,82 @@ def test_an_unreadable_command_line_keeps_the_lock():
           "and before the identity test that would otherwise drop it")
 
 
+
+def test_a_banked_ss_combat_mission_is_not_closed_out_twice():
+    """It was, and it recorded a WON SS mission as a failure.
+
+    Measured live, 47 seconds apart:
+
+        07:48:35  mission: SUCCESS after 1 battles, closed out to the lobby
+        07:48:35  mission: success {... 'closed_out': True}
+        07:49:22  close-out timed out after 45s
+        07:49:22  mission did not complete; it stays in the list
+
+    `run_one` ignored what `play_combat` returned - `_run_mission` returned
+    None - and then ran `tp.close_out` unconditionally. That waits for a
+    Mission Success panel, which the mission runner had already dismissed, so
+    it could only time out. One SS attempt per occurrence, and they do not
+    come back.
+
+    **The distinction that matters**, because CLAUDE.md says close_out must
+    always be asked: for the PUZZLE drivers that rule holds, since a driver's
+    verdict about its own stage is only an OPINION. A mission runner's
+    `closed_out` is not an opinion - it IS that measurement, already taken:
+    green check acknowledged, panel confirmed cleared, lobby confirmed back.
+    Re-taking it can only fail.
+    """
+    print("\na banked SS combat mission is not closed out twice")
+    import ss as ss_mod
+    import tp as tp_mod
+
+    calls = {"n": 0}
+    real_close, real_ident, real_open = (tp_mod.close_out, ss_mod.identify,
+                                         ss_mod.open_puzzle)
+
+    class _Cap:
+        def frame(self, gray=False):
+            return np.zeros((1440, 3440, 3), np.uint8)
+
+    def run(outcome):
+        calls["n"] = 0
+        got = ss_mod.run_one(_Cap(), None, _Log(),
+                             play_combat=lambda: outcome)
+        return got, calls["n"]
+
+    try:
+        tp_mod.close_out = lambda *a, **k: (
+            calls.__setitem__("n", calls["n"] + 1), True)[1]
+        ss_mod.identify = lambda *a, **k: "combat"
+        ss_mod.open_puzzle = lambda *a, **k: False
+
+        banked, n = run(("success", {"closed_out": True}))
+        check(banked is True and n == 0,
+              f"a mission the runner banked is NOT closed out again "
+              f"(banked={banked}, close_out called {n}x)")
+
+        for outcome, label in (
+                (("success", {"closed_out": False}), "success, not closed out"),
+                (("stalled", {"closed_out": None}), "stalled"),
+                (None, "the runner returned nothing")):
+            banked, n = run(outcome)
+            check(n == 1,
+                  f"{label}: close_out IS still asked ({n}x) - it remains the "
+                  f"measurement whenever the runner did not take it")
+    finally:
+        tp_mod.close_out, ss_mod.identify, ss_mod.open_puzzle = (
+            real_close, real_ident, real_open)
+
+    # --- and the runner must hand its verdict back at all ---------------
+    import app as app_mod
+    src = inspect.getsource(app_mod.Runner._run_mission)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("return out, stats" in body,
+          "_run_mission returns its outcome, so a caller can tell a banked "
+          "mission from a lost one")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -7001,7 +7077,8 @@ def main():
                test_the_token_guard_does_not_fire_during_an_ordinary_battle,
                test_a_failed_log_redirect_cannot_stop_the_relaunch,
                test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone,
-               test_an_unreadable_command_line_keeps_the_lock):
+               test_an_unreadable_command_line_keeps_the_lock,
+               test_a_banked_ss_combat_mission_is_not_closed_out_twice):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

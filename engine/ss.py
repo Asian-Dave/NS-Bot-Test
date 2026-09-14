@@ -628,7 +628,29 @@ def run_one(cap, actor, log, tpls=None, play_combat=None, relog=None):
         if play_combat is None:
             log.info("SS: this is a battle and no battle runner was supplied")
             return False
-        play_combat()
+        # IF THE RUNNER ALREADY BANKED IT, DO NOT CLOSE OUT AGAIN.
+        #
+        # `close_out` is the measurement that establishes a banked mission,
+        # and for the PUZZLE drivers it must always be asked - their verdict
+        # about their own stage is only an opinion. A mission runner's
+        # `closed_out` is not an opinion: it IS that measurement, already
+        # taken (green check acknowledged, panel confirmed cleared, lobby
+        # confirmed back). Re-taking it can only fail, because the panel it
+        # looks for has already been dismissed.
+        #
+        # Measured live, and it cost a won SS mission:
+        #     07:48:35  mission: SUCCESS ... closed_out: True
+        #     07:49:22  close-out timed out after 45s
+        #     07:49:22  mission did not complete
+        outcome = play_combat()
+        try:
+            verdict, stats = outcome
+        except (TypeError, ValueError):
+            verdict, stats = None, None
+        if verdict == "success" and (stats or {}).get("closed_out"):
+            log.info("SS: the mission runner banked it and returned to the "
+                     "lobby - not closing out a second time")
+            return True
     else:
         # SAVE THE SCREEN. Three of the five SS missions have never been
         # opened, and every unrecognised screen in this project turned out to

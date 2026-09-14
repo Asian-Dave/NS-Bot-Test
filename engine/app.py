@@ -1465,8 +1465,15 @@ class Runner:
             out, stats = r.run()
             self.note = f"mission: {out} {stats}"
             self.log.info("%s", self.note)
+            # RETURN IT. This used to return None, so a caller could not tell
+            # a banked mission from a lost one - and `ss.run_one` then ran its
+            # own close-out over a mission the runner had ALREADY closed out,
+            # waited 45s for a panel that was gone, and recorded a WIN as a
+            # failure. One SS attempt per occurrence, and they do not come back.
+            return out, stats
         except Exception as e:
             self._setback(f"mission runner: {type(e).__name__}: {e}")
+            return None, None
 
     def browser_alive(self, timeout=2.0):
         """Is the BROWSER still there? (not: is our page still there)

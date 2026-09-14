@@ -3393,6 +3393,31 @@ bright one:
     filled rows   0.160 .. 0.215 (SS, including the black-rune rows), 0.168 (TP)
     empty rows    0.009 .. 0.089 (both layouts, both renderers)
 
+### The kekkai digit set grows by CLASSIFYING what it refused
+
+A live SS rune mission stopped at guess 1: *"could not read row 0 (green 0.853
+/ gold 0.708)"*. Only the GOLD digit failed - 0.708 against the 0.80 gate -
+and the refusal was correct, because a wrong counter corrupts the solver
+silently. It still cost the mission.
+
+The reader saves what defeated it as `UNREAD_<disc>_<n>.png`, and the fix is
+to look at them and rename them to their value. Both failures were the digit
+**3 on the gold disc**, correctly identified (runner-up `2` at 0.45, a 0.28
+margin) but under the gate: the set simply had no exemplar of that rendering.
+Added as `3_gold_ss2` / `3_gold_ss3`, they now score **0.877 / 0.879** against
+each other leave-one-out, comfortably clear.
+
+**Validate by leave-one-out before trusting a new exemplar.** Score every
+exemplar against all the OTHERS and check it still classifies as its own
+digit: a bad addition would make some other digit read wrong, which is far
+worse than a refusal. Every digit with two or more exemplars passes.
+
+Note the three that "fail" that check - 4, 5 and 6 - are each their digit's
+ONLY exemplar, so removing it leaves nothing to match and the best score is
+necessarily a wrong digit at 0.39..0.58, far below the gate. They would be
+REFUSED in use, not misread. That is the correct behaviour and also a standing
+gap: those three digits will stop a mission if they appear in a new rendering.
+
 ### `solve_live` CAN RESUME, because rows are the scarce resource
 
 It used to start a fresh model on every call, so a restart replayed the same
@@ -4928,6 +4953,34 @@ rather than naming the two.
 The same edit removed the rune branch's veto on `close_out`, for the reason
 already recorded there: a driver's opinion about its own stage is not the
 measurement that establishes a banked mission.
+
+### A WON SS MISSION WAS RECORDED AS A FAILURE — close_out ran twice
+
+Measured live, 47 seconds apart:
+
+    07:48:35  mission: SUCCESS after 1 battles, closed out to the lobby
+    07:48:35  mission: success {... 'closed_out': True}
+    07:49:22  close-out timed out after 45s
+    07:49:22  mission did not complete; it stays in the list
+
+`ss.run_one`'s combat branch called `play_combat()` and **threw the result
+away** - `Runner._run_mission` returned None, so there was nothing to throw
+away - then ran `tp.close_out` unconditionally. That waits for a Mission
+Success panel which the mission runner had already dismissed, so it could only
+time out. One SS attempt per occurrence, and they do not come back.
+
+**This does NOT contradict the rule that `close_out` must always be asked.**
+That rule is about the PUZZLE drivers, and it holds: a driver's verdict about
+its own stage is an OPINION, so it must not veto the measurement. A mission
+runner's `closed_out` is not an opinion - it IS that measurement, already
+taken: green check acknowledged, panel confirmed cleared, lobby confirmed
+back. Asking again cannot confirm anything, because the evidence has been
+consumed by the first ask.
+
+So the test is "did anyone already take this measurement", not "do I trust
+this component". `_run_mission` returns `(out, stats)` now; every other
+outcome - success without close-out, stalled, or a caller that returns nothing
+- still goes through `close_out` exactly as before.
 
 ### CORRECTION — COMPLETED SS MISSIONS DROP OUT OF THE DAY'S LIST
 
