@@ -174,6 +174,9 @@ class Gate:
     # Checked only after `CHOICE_AFTER_S` of waiting, which costs nothing in
     # the common case: a gate that fires promptly never looks, and a gate that
     # is stuck is precisely the one that should.
+    # How long to keep waiting AFTER a decline before giving up.
+    DECLINE_GRACE = 12.0
+
     CHOICE_AFTER_S = 6.0
     CHOICE_EVERY_S = 3.0
 
@@ -182,6 +185,11 @@ class Gate:
         self.capture, self.log, self.controls = capture, log, controls
         self.actor = actor
         self._last_choice_check = 0.0
+        # WHEN a blocking dialog was last declined, or 0.0. A declined revive
+        # means the fight is OVER - you only get asked when you have died - so
+        # the caller needs to know, and the wait should not run its full
+        # length hoping for a turn that cannot come.
+        self.declined_at = 0.0
         # 0.10, not 0.25. The interval was set when a single combat check cost
         # seconds, so a longer sleep was free; with the command-bar geometry
         # cached that check is 1.6 ms and the capture (~0.14 s) dominates, so the
@@ -231,6 +239,7 @@ class Gate:
         except Exception as e:
             self.log.warning("gate: could not press decline: %s", e)
             return False
+        self.declined_at = now
         return True
 
     def wait_for_any(self, conditions, timeout, clip=None, why=""):
@@ -268,10 +277,29 @@ class Gate:
                                   why or "/".join(names[:3]), c.name, el, polls)
                     return Fired(i, c.name, payload, el, polls)
             el = time.time() - t0
-            if el >= timeout:
+            # A DECLINED DIALOG SHORTENS THE WAIT, because what we were
+            # waiting for is no longer coming.
+            #
+            # Measured live: the bot died, the revive prompt was declined
+            # correctly at 12:31:15, and the battle gate then waited its FULL
+            # 93 s for `command_bar` before reporting "no turn and no result
+            # in 90s" and calling a DEFEAT a stall. Declining a revive ends
+            # the fight - the game takes you back to the village - so every
+            # one of those 74 polls was asking a question already answered.
+            #
+            # A grace window rather than an immediate return, because the
+            # transition is not instant and a defeat panel or cutscene may
+            # still be the thing that fires. The conditions keep priority.
+            limit = timeout
+            if self.declined_at:
+                limit = min(timeout, (self.declined_at - t0) + self.DECLINE_GRACE)
+            if el >= limit:
+                how = ("after declining a blocking dialog - the fight is over, "
+                       "so this was never going to fire"
+                       if self.declined_at and limit < timeout else "")
                 self.log.warning("gate[%s] TIMEOUT after %.1fs (%d polls); "
-                                 "waited on: %s", why or "?", el, polls,
-                                 ", ".join(names))
+                                 "waited on: %s%s", why or "?", el, polls,
+                                 ", ".join(names), (" " + how) if how else "")
                 return TimedOut(el, polls, names)
             time.sleep(self.poll_interval)
 

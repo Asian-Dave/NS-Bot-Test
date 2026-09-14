@@ -4521,6 +4521,38 @@ and they are the opposite way round from what "it is Edge" would suggest:
 
 So before blaming the browser, read the log line that names the backend.
 
+### A DECLINED REVIVE IS A DEFEAT — and it cost 93 seconds to say so
+
+The token guard fired on a REAL prompt for the first time and worked exactly
+as designed:
+
+    12:31:15  gate: a dialog is blocking this wait and offers a CHOICE
+              (green (1622,847) / red (1897,850)) - declining
+    12:31:15  CLICK (1897,850) decline a blocking two-button dialog
+
+Those are the measured coordinates of the revive prompt, and no tokens were
+spent. Then:
+
+    12:32:26  gate[battle turn 4] TIMEOUT after 93.0s (74 polls)
+    12:32:26  battle: no turn and no result in 90s
+    12:32:26  mission: battle 1 -> stalled
+
+**You are only offered a revive when you have DIED.** So once one has been
+declined the fight is over and the game is already on its way back to the
+village - every one of those 74 polls asked a question that had been answered.
+Reporting STALLED is wrong twice: it blames the runner for a screen that
+behaved correctly, and it hides a LOSS from whatever counts wins and losses.
+
+`Gate.declined_at` records the decline; the wait then ends a grace window
+later (12 s) rather than at the full timeout, and the battle runner returns
+DEFEAT. **The grace matters**: the transition is not instant and a defeat
+panel or cutscene may still be what fires, so only the DEADLINE shortens -
+the conditions keep their priority.
+
+Same shape as the Eudemon reward panel: a wait list that does not contain the
+state which actually follows. When adding a new way for a fight to END, ask
+what the gate is still waiting for.
+
 ## EUDEMON GARDEN — the boss ladder, and a second rotation for the hunts
 
 Village -> `Hunting House` label -> submenu -> `Eudemon Garden`. A paged list
@@ -5174,6 +5206,23 @@ for having nothing left to do. That is the negative-definition trap again:
 carries its own anchors and all three read **1.000** on the empty panel against
 0.18..0.35 for anything row-shaped, so the panel's presence is now a positive
 reading.
+
+### A DIRECTORY THE BOT WRITES TO WILL EVENTUALLY HOLD THE THING YOU DENY
+
+Third instance, and this one arrived as a test failure on correct code. The
+`stage_dialog` sweep asserted that NO reference frame reads as a dialog - and
+the bot saves screens it cannot name into `ref/auto/unknown/`, so a live SS
+run eventually deposited a genuine **Mission Fail** dialog there. The detector
+was right; the assertion was stale.
+
+The frame was worth keeping rather than deleting: it is now
+`ref/auto/ss/mission_fail_dialog.png` and serves as the POSITIVE case the
+sweep never had. It also records the derangement bug in the act - ten rows all
+reading `0 / 6`.
+
+The sweep now names its exceptions. Previous instances: the cooldown frames
+and the SS hints frames, both the same lesson - **a glob over a directory the
+bot writes to cannot carry a fixed expectation.**
 
 ### A FIXTURE DIRECTORY THE BOT WRITES TO CANNOT CARRY A HARDCODED EXPECTATION
 

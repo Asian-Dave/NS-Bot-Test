@@ -293,6 +293,24 @@ class BattleRunner:
             if isinstance(fired, Stopped):
                 return STOPPED, {"rounds": rounds, "acted": acted}
             if not fired:
+                # A DECLINED REVIVE IS A DEFEAT, not a stall.
+                #
+                # You are only offered a revive when you have DIED, so once
+                # the gate has declined one the fight is over and the game is
+                # on its way back to the village. Reporting STALLED there is
+                # wrong twice: it blames the runner for a screen that behaved
+                # exactly as it should, and it hides the actual outcome from
+                # whatever counts wins and losses.
+                #
+                # Measured live: died, declined correctly at 12:31:15, then
+                # "no turn and no result in 90s" and `battle 1 -> stalled` on
+                # a fight that was simply LOST.
+                if getattr(self.gate, "declined_at", 0.0):
+                    self.log.info("battle: lost - a revive was offered and "
+                                  "declined (tokens are never spent), so the "
+                                  "fight is over after %d round(s)", rounds)
+                    return DEFEAT, {"rounds": rounds, "acted": acted,
+                                    "ended": "revive_declined"}
                 # Timed out. A static frame while awaiting input is NORMAL per
                 # CLAUDE.md, so a timeout here means the command bar never
                 # appeared at all — genuinely stuck, not merely quiet.

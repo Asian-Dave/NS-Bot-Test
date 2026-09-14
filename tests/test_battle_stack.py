@@ -12,6 +12,7 @@ import builtins
 import json
 import itertools
 import shutil
+import threading
 import tempfile
 import subprocess
 import glob
@@ -5591,18 +5592,37 @@ def test_a_stage_dialog_is_a_solid_button_of_one_fixed_size():
         check(ss_mod.stage_dialog(f) is None,
               f"a solid {w}x{h} blob ({label}'s size) is refused")
 
-    # --- nothing in the whole reference set is a dialog -----------------
+    # --- a REAL dialog must be read as one ------------------------------
+    # `mission_fail_dialog.png` was harvested live - an SS rune stage that ran
+    # out of rows, ten of them reading 0/6. It is the positive case, and it
+    # arrived by FAILING the negative sweep below: the bot saves screens it
+    # cannot name, so a directory it writes to will eventually contain the
+    # very thing the sweep asserts is absent. That is the third time this
+    # suite has been caught that way (the cooldown frames, the SS hints
+    # frames), so the sweep now names its exceptions instead of globbing
+    # blind.
+    real = os.path.join(ROOT, "ref/auto/ss/mission_fail_dialog.png")
+    if os.path.exists(real):
+        im = cv2.imread(real)
+        got = ss_mod.stage_dialog(im)
+        check(got is not None and got[0] == "fail",
+              f"a real Mission Fail dialog IS detected, as a fail ({got})")
+
+    # --- and nothing else in the reference set is --------------------
+    KNOWN_DIALOGS = {"mission_fail_dialog.png"}
     frames = []
     for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
               "renderer", "ss"):
         frames += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    frames = [p for p in frames
+              if os.path.basename(p) not in KNOWN_DIALOGS]
     fires = [(os.path.basename(p), ss_mod.stage_dialog(im))
              for p in sorted(frames)
              if (im := cv2.imread(p)) is not None
              and ss_mod.stage_dialog(im) is not None]
     check(not fires,
-          f"none of {len(frames)} reference frames is read as a dialog "
-          f"({fires[:3]})")
+          f"none of the other {len(frames)} reference frames is read as a "
+          f"dialog ({fires[:3]})")
     # the safety rule this protects, stated where it can fail loudly
     charsel = [p for p in frames if "charsel" in os.path.basename(p)]
     check(charsel, "character-select frames are in the set at all")
@@ -7226,6 +7246,86 @@ def test_a_full_gold_counter_is_not_a_solved_puzzle():
           f"{hits_n}/400 of the time (~1/e), so this was not a rare path")
 
 
+
+def test_a_declined_revive_ends_the_fight_as_a_defeat():
+    """The guard declined correctly, and the runner still called it a stall.
+
+    Measured live:
+
+        12:31:15  gate: a dialog is blocking this wait and offers a CHOICE
+                  (green (1622,847) / red (1897,850)) - declining
+        12:31:15  CLICK (1897,850) decline a blocking two-button dialog
+        12:32:26  gate[battle turn 4] TIMEOUT after 93.0s (74 polls)
+        12:32:26  battle: no turn and no result in 90s
+        12:32:26  mission: battle 1 -> stalled
+
+    **You are only offered a revive when you have DIED**, so once one has been
+    declined the fight is over and the game is on its way back to the village.
+    Waiting 93 seconds for `command_bar` asks a question already answered, and
+    reporting STALLED is wrong twice over: it blames the runner for a screen
+    that behaved exactly as designed, and it hides a LOSS from whatever counts
+    wins and losses.
+
+    Two changes, and the grace window is the careful part: the transition is
+    not instant and a defeat panel or cutscene may still be what fires, so the
+    conditions keep their priority and only the DEADLINE shortens.
+    """
+    print("\na declined revive ends the fight as a defeat")
+    import gate as gate_mod
+    import battle as battle_mod
+
+    class _Cap:
+        def frame(self, gray=False, clip=None):
+            f = np.zeros((1440, 3440, 3), np.uint8)
+            return cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if gray else f
+
+    class _Cond:
+        name = "command_bar"
+
+        def check(self, bgr, gray):
+            return None
+
+    # --- without a decline the wait runs its full length ----------------
+    g = gate_mod.Gate(_Cap(), _Log(), poll_interval=0.02)
+    g.DECLINE_GRACE = 1.0
+    t0 = time.time()
+    g.wait_for_any([_Cond()], timeout=3.0, why="turn")
+    full = time.time() - t0
+    check(2.4 < full < 4.5,
+          f"an ordinary wait still runs to its timeout ({full:.1f}s of 3.0)")
+
+    # --- after a decline it stops, instead of hoping -------------------
+    g2 = gate_mod.Gate(_Cap(), _Log(), poll_interval=0.02)
+    g2.DECLINE_GRACE = 1.0
+    threading.Thread(
+        target=lambda: (time.sleep(0.4),
+                        setattr(g2, "declined_at", time.time())),
+        daemon=True).start()
+    t0 = time.time()
+    g2.wait_for_any([_Cond()], timeout=30.0, why="turn")
+    cut = time.time() - t0
+    check(cut < 5.0,
+          f"a declined dialog cuts the wait short ({cut:.1f}s of 30.0) - live "
+          f"this was 93 s of polling for a turn that could not come")
+    check(cut > 1.0,
+          f"but keeps a grace window, since a defeat panel may still fire "
+          f"({cut:.1f}s)")
+
+    # --- and the outcome is DEFEAT, not STALLED ------------------------
+    src = inspect.getsource(battle_mod.BattleRunner._run)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("declined_at" in body,
+          "the runner asks whether a revive was declined")
+    seg = body.split("declined_at")[1][:400]
+    check("DEFEAT" in seg,
+          "and reports DEFEAT rather than STALLED when it was")
+    check(body.index("declined_at") < body.index("no turn and no result"),
+          "checked BEFORE the generic stall message, or the loss is "
+          "mislabelled before anyone looks")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -7313,7 +7413,8 @@ def main():
                test_a_banked_ss_combat_mission_is_not_closed_out_twice,
                test_the_rune_solver_does_not_rebuild_a_set_per_candidate,
                test_digit_exemplars_can_be_overridden_per_renderer,
-               test_a_full_gold_counter_is_not_a_solved_puzzle):
+               test_a_full_gold_counter_is_not_a_solved_puzzle,
+               test_a_declined_revive_ends_the_fight_as_a_defeat):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
