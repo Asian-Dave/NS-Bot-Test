@@ -1345,6 +1345,34 @@ Two details worth keeping:
   silent-corruption failure this module guards against everywhere else. It
   lives in `LAST_VARIANT`.
 
+### A FULL GOLD COUNTER IS NOT A SOLVE — it is the opposite
+
+The solve shortcut read `if gv == length or ov == length`, and the gold half
+is exactly backwards. Gold counts runes that are correct but **in the wrong
+place** - the game's own rules panel states that mapping - so `gold == length`
+means every rune is present and NONE is in position.
+
+**It made length-6 stages unwinnable, and not rarely.** With permutation codes
+a fixed opener is a DERANGEMENT of the secret about 1/e of the time; measured
+over 400 random permutation secrets, **140**. Live it produced a loop that
+does not read as a bug at all:
+
+    resuming a puzzle that already has 1 guess(es) of history
+    guess 1: Green,Red,Blue,Black,Yellow,White  (pool A=46656 B=46656)
+    feedback: green=0 gold=6
+    ... identical, again and again
+
+**ONE bug, TWO symptoms, and the second one hid the first.** `solve_live`
+returned a guess, so `ss.play` took the SUCCESS branch: it cleared the history
+(`hist = []`) and moved on to the "next" stage - which was the same stage,
+still open. So every pass replayed the same opener against a fresh 46,656 pool
+and burned one of the ten rows. The empty pool looked like a broken resume,
+and the resume was fine; the solve verdict was wrong.
+
+The PANEL CLOSING remains the real solve signal. The counter shortcut only
+covers the frame where the counter is readable but the close has not landed
+yet, and only `green == length` can mean it.
+
 ### THE TWO DISCS RENDER DIGITS DIFFERENTLY — harvest per (digit, disc)
 
 This is why the digit reader keeps blocking a mission, and it is systematic, not

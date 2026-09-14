@@ -7156,6 +7156,76 @@ def test_digit_exemplars_can_be_overridden_per_renderer():
               f"match above the gate (worst {worst:.3f} on {pair})")
 
 
+
+def test_a_full_gold_counter_is_not_a_solved_puzzle():
+    """It was read as SOLVED, and it made length-6 stages unwinnable.
+
+    The solve shortcut read:
+
+        if gv == length or ov == length:   -> SOLVED
+
+    The gold half is the OPPOSITE of a win. Gold counts runes that are correct
+    but in the WRONG PLACE - the game's own rules panel states that mapping -
+    so gold == length means every rune is present and NONE is in position.
+
+    With permutation codes the opening guess is a DERANGEMENT of the secret
+    about 37% of the time (1/e), which scores gold=6 immediately. Live, that
+    produced a loop nobody could read as a bug:
+
+        resuming a puzzle that already has 1 guess(es) of history
+        guess 1: Green,Red,Blue,Black,Yellow,White  (pool A=46656 B=46656)
+        feedback: green=0 gold=6
+        ... identical, again and again
+
+    ONE bug, TWO symptoms. `solve_live` returned a guess, so `ss.play` took
+    the success branch, CLEARED the history (`hist = []`) and moved to the
+    "next" stage - which was the same stage, still open. So every pass replayed
+    the same opener against a fresh 46,656 pool and burned one of the ten rows.
+    """
+    print("\na full gold counter is not a solved puzzle")
+    import kekkai as kk
+    import kekkai_play as kp
+
+    # --- the semantics, from the solver's own scorer --------------------
+    secret = ("Green", "Red", "Blue", "Black", "Yellow", "White")
+    deranged = ("Red", "Green", "Black", "Blue", "White", "Yellow")
+    g, o = kk.score(deranged, secret)
+    check((g, o) == (0, 6),
+          f"a derangement scores green=0 gold=6 at length 6 ({g}, {o})")
+    check(deranged != secret,
+          "and it is NOT the secret - so gold==length cannot mean solved")
+
+    exact = kk.score(secret, secret)
+    check(exact == (6, 0),
+          f"the real answer scores green=6 gold=0 ({exact})")
+
+    # --- the code must key on GREEN only --------------------------------
+    src = inspect.getsource(kp.solve_live)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    hits = [ln.strip() for ln in body.splitlines()
+            if "== length" in ln and "if" in ln]
+    check(hits, "the solve shortcut is still there to check")
+    for ln in hits:
+        check("ov ==" not in ln,
+              f"the gold counter is not a solve condition: {ln}")
+        check("gv ==" in ln, f"the green counter is: {ln}")
+
+    # --- how often this would fire, so the cost is on the record --------
+    import random
+    random.seed(7)
+    runes = list(kk.RUNES)
+    hits_n = 0
+    for _ in range(400):
+        sec = tuple(random.sample(runes, 6))
+        if kk.score(tuple(runes), sec)[1] == 6:
+            hits_n += 1
+    check(hits_n > 80,
+          f"a fixed opener is a derangement of a permutation secret "
+          f"{hits_n}/400 of the time (~1/e), so this was not a rare path")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -7242,7 +7312,8 @@ def main():
                test_an_unreadable_command_line_keeps_the_lock,
                test_a_banked_ss_combat_mission_is_not_closed_out_twice,
                test_the_rune_solver_does_not_rebuild_a_set_per_candidate,
-               test_digit_exemplars_can_be_overridden_per_renderer):
+               test_digit_exemplars_can_be_overridden_per_renderer,
+               test_a_full_gold_counter_is_not_a_solved_puzzle):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

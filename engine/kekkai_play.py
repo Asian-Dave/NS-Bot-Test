@@ -1047,8 +1047,30 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2,
                 on_history(list(hist_a))
             return None, n + 1
         log.info("   feedback: green=%d gold=%d", gv, ov)
-        if gv == length or ov == length:
-            log.info("   a counter reached %d -> SOLVED: %s", length,
+        # ONLY THE GREEN COUNTER CAN MEAN SOLVED.
+        #
+        # This read `gv == length or ov == length`, and the gold half is the
+        # exact opposite of a win: gold counts runes that are CORRECT BUT IN
+        # THE WRONG PLACE, so gold == length means every rune is present and
+        # NONE is in position. The game's own rules panel states that mapping.
+        #
+        # It made length-6 stages unwinnable, and often. With permutation
+        # codes the opening guess is a derangement of the secret about 37% of
+        # the time (1/e), which reads gold=6 immediately - so the solver
+        # declared SOLVED, `ss.play` found the puzzle still open, re-entered,
+        # replayed the same opener and burned another of the ten rows. That is
+        # the loop the operator saw:
+        #
+        #     resuming a puzzle that already has 1 guess(es) of history
+        #     guess 1: Green,Red,Blue,Black,Yellow,White  (pool A=46656)
+        #     feedback: green=0 gold=6
+        #     ... and again, and again
+        #
+        # The PANEL CLOSING is the real solve signal and is handled above;
+        # this is only a shortcut for the frame where the counter is readable
+        # but the close has not landed yet.
+        if gv == length:
+            log.info("   green reached %d -> SOLVED: %s", length,
                      ",".join(guess))
             return guess, n + 1
         hist_a.append((guess, gv, ov))
