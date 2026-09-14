@@ -1373,6 +1373,43 @@ The PANEL CLOSING remains the real solve signal. The counter shortcut only
 covers the frame where the counter is readable but the close has not landed
 yet, and only `green == length` can mean it.
 
+### THE EXEMPLARS MUST BE COMMITTED — `ref/auto/` is ignored by default
+
+`.gitignore` excludes `ref/auto/`, and the fixtures that matter are
+FORCE-ADDED past it. Only the original twelve digit exemplars were, so every
+crop harvested since lived on one machine and reached nobody - which makes a
+"fallback for other backends" worthless, since the exemplars ARE the fallback.
+
+Force-add a newly classified exemplar the same way, or the next machine hits
+the failure this set was built to remove. `UNREAD_*` stays untracked: it is
+unclassified by definition, and committing it would invite someone to trust it.
+
+### A FULL SS PASS ON wgpu, AND HOW THE SET WAS FILLED CHEAPLY
+
+All of a day's SS missions banked on wgpu - balance, lights and rune - with
+the list finishing empty. Every family was dispatched BY SIGHT
+(`identify` reads the board off the screen; the mission title only hints),
+which is what let one pass cover three different minigames.
+
+The rune stages are the ones that need exemplars, and the cheap way to fill
+them is NOT one digit per failed mission:
+
+* the reader saves the WHOLE PANEL beside the two crops, and the scroll shows
+  every played row at once;
+* **the log already records the feedback for every row it DID read**, so those
+  rows' labels are confirmed rather than guessed, and only the unread row has
+  to be read off the image;
+* one frame therefore yielded EIGHT labelled exemplars.
+
+Then cross-check the set for false matches - worst measured 0.621 against the
+0.80 gate - because a small per-backend set is where a confident wrong reading
+would come from, and a wrong counter corrupts the solver silently where an
+unread one only stops it.
+
+Coverage now: wgpu 0..4 with two to four exemplars each; **5 and 6 still fall
+back to the shared set and will refuse**. Feedback counters are usually small,
+so that gap is survivable, and it fills itself the same free way.
+
 ### THE TWO DISCS RENDER DIGITS DIFFERENTLY — harvest per (digit, disc)
 
 This is why the digit reader keeps blocking a mission, and it is systematic, not
