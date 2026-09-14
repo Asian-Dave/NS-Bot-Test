@@ -3418,6 +3418,32 @@ necessarily a wrong digit at 0.39..0.58, far below the gate. They would be
 REFUSED in use, not misread. That is the correct behaviour and also a standing
 gap: those three digits will stop a mission if they appear in a new rendering.
 
+### WHY SS FROZE AND TP NEVER DID — a set rebuilt per candidate
+
+53 seconds of 100% CPU before the first guess of a length-6 stage, which from
+outside is indistinguishable from a hang. **The solver was not the problem**:
+`next_guess` measures 0.10s and the per-guess image work totals 12ms.
+
+It was one line in `solve_live`, intersecting the two hypotheses' pools:
+
+    both = [c for c in pa if c in set(pb)]
+
+`set(pb)` is rebuilt once PER ELEMENT of pa, so the cost is
+O(len(pa) x len(pb)). On the first guess both pools are the FULL space:
+
+    length 6   46,656 x 46,656   48.92 s        hoisted: 0.0019 s   ~25,000x
+    length 3      216 x 216       0.00 s
+
+**That is the whole answer to "why is SS so much harsher than the TP
+kekkai".** Same code, same solver; the TP kekkai is length 3 where the pool is
+216, and SS reaches length 6 where it is 46,656. The cost is quadratic in the
+pool and the pool is exponential in the code length, so the difference is
+216^2 vs 46,656^2 - about 46,000x, which matches the measurement.
+
+General note, and it is the same shape as the OpenCV thread sweep: the
+expensive thing was not the algorithm anyone would suspect. Measure where the
+time goes before optimising the part that looks clever.
+
 ### `solve_live` CAN RESUME, because rows are the scarce resource
 
 It used to start a fresh model on every call, so a restart replayed the same

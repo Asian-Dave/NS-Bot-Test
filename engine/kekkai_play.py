@@ -871,7 +871,15 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2,
             return None, n
 
         # Prefer a guess consistent with every surviving hypothesis.
-        both = [c for c in pa if c in set(pb)] if (alive_a and alive_b) else []
+        # HOIST THE SET. Written as `c in set(pb)` this rebuilt the whole set
+        # once PER ELEMENT of pa, which is O(len(pa) x len(pb)) - and on the
+        # first guess of a length-6 stage both pools are the full 46,656, so
+        # it measured **48.92s against 0.0019s hoisted, a 25,000x difference**.
+        # That was the "the bot is frozen" the operator saw, and it is also
+        # exactly why TP never stuttered: at length 3 the pool is 216 and the
+        # same line costs 0.00s. The cost is quadratic in the code length.
+        pb_set = set(pb) if (alive_a and alive_b) else ()
+        both = [c for c in pa if c in pb_set] if (alive_a and alive_b) else []
         pool = both or (pa if alive_a else pb)
         guess = kekkai.next_guess(length, hist_a if alive_a else hist_b) \
             if len(pool) == len(pa or pb) else pool[0]

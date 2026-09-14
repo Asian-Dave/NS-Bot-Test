@@ -6994,6 +6994,63 @@ def test_a_banked_ss_combat_mission_is_not_closed_out_twice():
           "mission from a lost one")
 
 
+
+def test_the_rune_solver_does_not_rebuild_a_set_per_candidate():
+    """53 SECONDS OF 100% CPU before the first guess. It read as a freeze.
+
+    `solve_live` intersects the two hypotheses' pools, and it was written:
+
+        both = [c for c in pa if c in set(pb)]
+
+    `set(pb)` is rebuilt once PER ELEMENT of pa, so the cost is
+    O(len(pa) x len(pb)). On the first guess of a length-6 stage BOTH pools
+    are the full 46,656 codes, and it measured:
+
+        set() inside the comprehension   48.92 s
+        hoisted out                       0.0019 s      ~25,000x
+
+    That is also exactly why TP never stuttered and SS did: the TP kekkai is
+    length 3, where the pool is 216 and the same line costs 0.00 s. The cost
+    is quadratic in the pool, and the pool is exponential in the code length.
+
+    The operator asked why SS burned so much CPU when TP does not - the honest
+    answer was a comprehension, not the solver, which measured 0.10 s.
+    """
+    print("\nthe rune solver does not rebuild a set per candidate")
+    import kekkai_play as kp
+    import kekkai as kk
+
+    src = inspect.getsource(kp.solve_live)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    lines = [ln for ln in body.splitlines() if "for c in pa" in ln]
+    check(lines, "the intersection is still there to check")
+    for ln in lines:
+        check("set(" not in ln,
+              f"the set is NOT rebuilt inside the comprehension: {ln.strip()}")
+    check("pb_set" in body, "it is hoisted into a name first")
+
+    # --- and the hoisted form is genuinely equivalent -------------------
+    pa = kk.candidates(3, kk.RUNES)
+    pb = pa[::2]
+    naive = [c for c in pa if c in set(pb)]
+    s2 = set(pb)
+    fast = [c for c in pa if c in s2]
+    check(naive == fast,
+          f"same answer either way ({len(fast)} survivors)")
+
+    # --- the cost is what actually changed -----------------------------
+    big_a = kk.candidates(5, kk.RUNES)
+    t0 = time.time()
+    s3 = set(big_a)
+    _ = [c for c in big_a if c in s3]
+    hoisted = time.time() - t0
+    check(hoisted < 2.0,
+          f"intersecting a length-5 pool with itself is fast ({hoisted:.3f}s) "
+          f"- the un-hoisted form took 48.92s at length 6")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -7078,7 +7135,8 @@ def main():
                test_a_failed_log_redirect_cannot_stop_the_relaunch,
                test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone,
                test_an_unreadable_command_line_keeps_the_lock,
-               test_a_banked_ss_combat_mission_is_not_closed_out_twice):
+               test_a_banked_ss_combat_mission_is_not_closed_out_twice,
+               test_the_rune_solver_does_not_rebuild_a_set_per_candidate):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
