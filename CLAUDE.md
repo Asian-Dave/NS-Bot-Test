@@ -3481,6 +3481,25 @@ General note, and it is the same shape as the OpenCV thread sweep: the
 expensive thing was not the algorithm anyone would suspect. Measure where the
 time goes before optimising the part that looks clever.
 
+### HARVEST A WHOLE SCROLL FROM ONE SAVED FRAME, not one digit per mission
+
+Each refusal costs an SS attempt, so harvesting one digit at a time is the
+expensive way to build a set. The reader already saves the WHOLE PANEL
+(`UNREAD_frame_*.png`) beside the two crops, and the scroll shows every played
+row at once - so one saved frame yields several labelled exemplars for free.
+
+Done for wgpu from a single frame: rows read `1/4` and `2/3`, giving exemplars
+for four digits in one pass, plus a `0` from the gold column. Read the DIGITS
+OFF THE PANEL rather than off the mask - a wgpu mask is fragmented (the ink
+pass takes the dark body and wgpu's white outline is excluded), and guessing
+from a broken mask is exactly how a wrong counter gets in.
+
+**Then cross-check the new set for false matches**, because a fresh
+per-backend set is small: score every exemplar against every OTHER digit's and
+require the worst to sit under the 0.80 gate. Measured 0.606 (a `1` against a
+`4`), so no wgpu reading can be confidently wrong. The suite pins this for
+every variant directory, since these directories GROW during live play.
+
 ### `solve_live` CAN RESUME, because rows are the scarce resource
 
 It used to start a fresh model on every call, so a restart replayed the same
@@ -3498,7 +3517,25 @@ Measured working: stage 1 resumed from two answers and solved in four more;
 stage 2 resumed three times across digit harvests and still finished inside its
 ten rows.
 
-### The digit exemplars are complete, 0 to 6
+### The digit exemplars are complete, 0 to 6 — ON ONE BACKEND ONLY
+
+**CORRECTION to the heading above, which overstated it.** The 0..6 set is
+`digits_ink/`, and it is a MIX: scored today it reads green well and gold
+marginally on webgl (0.853..0.946 / 0.673..0.736) and the other way round on
+wgpu (0.786 / 0.863). So it was harvested across sessions on more than one
+backend and is fully calibrated for neither.
+
+The older `digits/` directory - described elsewhere in this file as "the
+record of what wgpu draws" - holds only **0, 1, 2, 3**, not 0..6. Neither set
+covers a backend completely.
+
+Which backend the winning SS run actually used is NOT recorded and cannot be
+recovered from the files. **There is no note anywhere in this file claiming SS
+requires wgpu or is impossible on webgl**, and it is worth saying plainly
+because that belief came up later as a reason to switch backends.
+
+The per-renderer split below makes the question moot: each backend carries the
+digits it needs and falls back for the rest.
 
 Harvested during the clear, both discs. The set was the whole reason the solver
 kept stopping, and every stop was correct behaviour - an unread counter is

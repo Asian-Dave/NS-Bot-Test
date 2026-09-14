@@ -10,6 +10,8 @@ Run:  .venv/bin/python tests/test_battle_stack.py
 """
 import builtins
 import json
+import itertools
+import shutil
 import tempfile
 import subprocess
 import glob
@@ -7055,67 +7057,63 @@ def test_the_rune_solver_does_not_rebuild_a_set_per_candidate():
 def test_digit_exemplars_can_be_overridden_per_renderer():
     """The reader has to behave per backend, and the failure was silent.
 
-    Every ink exemplar was harvested on webgl. Switching the game to wgpu made
-    the reader fail in the OPPOSITE direction - measured live, green fell to
-    0.786 where it had been reading 0.853..0.946, while gold rose to 0.863.
-    The glyphs are close but not the same: wgpu draws the text stroke webgl
-    omits.
+    Every ink exemplar in the shared set was harvested on webgl. Switching the
+    game to wgpu made the reader fail in the OPPOSITE direction - measured
+    live, green fell to 0.786 where it had been reading 0.853..0.946, while
+    gold rose to 0.863. wgpu draws the text stroke webgl omits.
 
     **What that looked like from outside was a bot clicking one pattern over
     and over.** It is not a loop: an unread counter stops the solver at guess
     1, so the history stays empty, so the next attempt recomputes the SAME
     deterministic opening guess. Nothing errored.
 
-    So the exemplars follow the renderer, PER DIGIT, the same shape as
-    `tpl/<renderer>/`: a backend needs only the digits that actually fail on
-    it and everything else falls back to the shared set. Harvested crops are
-    written into the renderer's own directory too - a wgpu crop is not an
-    exemplar for webgl, and filing it with the shared set would poison the
-    backend it came from.
+    So exemplars follow the renderer, PER DIGIT, the same shape as
+    `tpl/<renderer>/`: a backend needs only the digits that fail on it.
+
+    **This test uses a THROWAWAY renderer name**, never a real one. The bot
+    HARVESTS into these directories during live play, and a test pinned to
+    what a real backend happens to hold today fails the moment a mission adds
+    a crop - which this suite has already been burned by twice (the cooldown
+    frames, the SS hints frames).
     """
     print("\ndigit exemplars can be overridden per renderer")
     import kekkai_play as kp
     import perceive as pmod
 
+    FAKE = "test-backend-not-real"
     ink = os.path.join(ROOT, kp.INK_DIR)
-    var = os.path.join(ink, "wgpu-webgl")
-    probe = os.path.join(var, "3_probe.png")
+    var = os.path.join(ink, FAKE)
     was = pmod.get_renderer()
-    made = not os.path.isdir(var)
     try:
         os.makedirs(var, exist_ok=True)
-        cv2.imwrite(probe, np.zeros((52, 52), np.uint8))
+        # one digit only, so the fallback for every other digit is visible
+        cv2.imwrite(os.path.join(var, "3_probe.png"), np.zeros((52, 52), np.uint8))
 
         pmod.set_renderer("webgl")
         shared = kp.load_exemplars()
         shared_variant = kp.LAST_VARIANT
-        pmod.set_renderer("wgpu-webgl")
+        pmod.set_renderer(FAKE)
         swapped = kp.load_exemplars()
         swapped_variant = kp.LAST_VARIANT
 
-        check(shared_variant is None,
-              "webgl uses the shared set (no variant directory for it)")
-        check(swapped_variant and swapped_variant[0] == "wgpu-webgl"
-              and "3" in swapped_variant[1],
-              f"wgpu reports which digits it substituted ({swapped_variant})")
+        check(shared_variant is None or FAKE not in str(shared_variant),
+              "a real backend does not pick up the test directory")
+        check(swapped_variant and swapped_variant[0] == FAKE
+              and swapped_variant[1] == ["3"],
+              f"the variant reports exactly which digits it substituted "
+              f"({swapped_variant})")
         check(len(swapped[3]) == 1,
               f"the variant REPLACES that digit rather than mixing renderings "
               f"({len(swapped[3])} vs {len(shared[3])} shared)")
         for d in shared:
             if d != 3:
                 check(len(shared[d]) == len(swapped[d]),
-                      f"digit {d} still falls back to the shared set")
-
-        # the bookkeeping must never look like a digit
+                      f"digit {d} falls back to the shared set")
         check(all(isinstance(k, int) for k in swapped),
               f"no non-digit key leaks into the exemplar map "
               f"({[k for k in swapped if not isinstance(k, int)]})")
     finally:
-        for f in (probe,):
-            if os.path.exists(f):
-                os.remove(f)
-        if made and os.path.isdir(var) and not os.listdir(var):
-            os.rmdir(var)
+        shutil.rmtree(var, ignore_errors=True)
         if was:
             pmod.set_renderer(was)
         else:
@@ -7127,7 +7125,35 @@ def test_digit_exemplars_can_be_overridden_per_renderer():
     body = body[0] + "".join(body[2:]) if len(body) > 2 else src
     body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
     check("get_renderer" in body,
-          "the UNREAD crops are filed under the renderer that produced them")
+          "UNREAD crops are filed under the renderer that produced them, so "
+          "classifying one cannot poison another backend")
+
+    # --- and no exemplar may FALSELY match a different digit -------------
+    # A fresh per-backend set is small, so this is the check that matters:
+    # a wrong reading corrupts the solver silently, an unread one only stops.
+    import glob as _glob
+    for d in sorted(_glob.glob(os.path.join(ink, "*", ""))):
+        files = [p for p in sorted(_glob.glob(os.path.join(d, "*.png")))
+                 if os.path.basename(p).split("_")[0].split(".")[0].isdigit()]
+        if len(files) < 2:
+            continue
+        worst, pair = 0.0, None
+        for a, b in itertools.permutations(files, 2):
+            ta = int(os.path.basename(a).split("_")[0].split(".")[0])
+            tb = int(os.path.basename(b).split("_")[0].split(".")[0])
+            if ta == tb:
+                continue
+            pa = cv2.imread(a, cv2.IMREAD_GRAYSCALE)
+            g = kp.tight_glyph(cv2.imread(b, cv2.IMREAD_GRAYSCALE))
+            if g.shape[0] > pa.shape[0] or g.shape[1] > pa.shape[1]:
+                continue
+            m = float(cv2.minMaxLoc(
+                cv2.matchTemplate(pa, g, cv2.TM_CCOEFF_NORMED))[1])
+            if m > worst:
+                worst, pair = m, f"{ta} vs {tb}"
+        check(worst < 0.80,
+              f"{os.path.basename(d.rstrip(os.sep))}: no cross-digit false "
+              f"match above the gate (worst {worst:.3f} on {pair})")
 
 
 def main():
