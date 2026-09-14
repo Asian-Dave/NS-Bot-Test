@@ -1406,6 +1406,18 @@ Then cross-check the set for false matches - worst measured 0.621 against the
 would come from, and a wrong counter corrupts the solver silently where an
 unread one only stops it.
 
+**THE TP PANEL NEEDS ITS OWN SAMPLES TOO, and not because of scale.** The SS
+and TP kekkai draw their history at different x (SS 2058, TP 1998) and the
+first TP kekkai on wgpu still refused: green 0.788, gold 0.726. Both had
+identified the RIGHT digit and merely sat under the gate, and the glyph boxes
+measured 35x37 against the SS exemplars' 29..41 x 34..38 - so the layouts
+render at the same size and this is thin coverage, not a geometry or scaling
+fault. Two crops from that panel took both to 1.000.
+
+Worth separating those two explanations before acting: a size mismatch would
+need the mask or the radius changed, where thin coverage needs one more
+sample. Measure the glyph box before assuming the harder one.
+
 Coverage now: wgpu 0..4 with two to four exemplars each; **5 and 6 still fall
 back to the shared set and will refuse**. Feedback counters are usually small,
 so that gap is survivable, and it fills itself the same free way.
