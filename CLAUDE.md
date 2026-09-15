@@ -1422,6 +1422,39 @@ Coverage now: wgpu 0..4 with two to four exemplars each; **5 and 6 still fall
 back to the shared set and will refuse**. Feedback counters are usually small,
 so that gap is survivable, and it fills itself the same free way.
 
+### THE DIGIT GATE WAS SET TOO HIGH — 0.80 refused a FIFTH of good reads
+
+Three missions stalled in a row on "could not read row N", each score
+agonisingly close to the gate: **0.794, 0.799, 0.771, 0.726, 0.708** - and
+EVERY ONE had already identified the right digit. Adding an exemplar per
+refusal is whack-a-mole; the gate itself was wrong.
+
+Measured leave-one-out over every exemplar held. "Right" means the set
+identified it; "wrong" means its own digit was REMOVED first, so the best
+match can only be another digit and must be refused:
+
+    correct reads (33)   0.726 .. 0.987
+    wrong   reads (35)   0.396 .. 0.627
+
+They separate with a **0.10 gap**, and 0.80 sits INSIDE the correct range. At
+0.70 every correct read is accepted and every unknown still refused - 33/33
+and 35/35.
+
+**MARGIN WAS TRIED AS THE DISCRIMINATOR AND REJECTED**, which is worth
+recording because it is the obvious idea and it does not work here: a WRONG
+answer reached **1.86x** over its runner-up while a RIGHT one fell to
+**1.23x**. They overlap, so a margin-only rule would licence confident wrong
+readings - and this file's standing rule is that a wrong counter corrupts the
+solver silently where a refusal merely stops it. Margin survives only as a
+SECOND condition (1.15x), defence in depth rather than the test.
+
+**The general shape, and it is the third time in this project.** A threshold
+calibrated once, against one backend or one sample, drifts into rejecting the
+thing it was meant to admit - the TP village anchor at 0.90 against a
+calibrated 0.88, the command bar gated at 0.85 when the real range was
+0.746..0.949, and now this. When refusals cluster JUST under a gate and each
+one names the correct answer, suspect the gate before the reader.
+
 ### THE TWO DISCS RENDER DIGITS DIFFERENTLY — harvest per (digit, disc)
 
 This is why the digit reader keeps blocking a mission, and it is systematic, not

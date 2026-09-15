@@ -727,17 +727,46 @@ def tight_glyph(mask, pad=2):
     return mask[max(0, y0 - pad):y1 + pad + 1, max(0, x0 - pad):x1 + pad + 1]
 
 
-def read_digit(frame, xy, exemplars, gate=0.80):
+# THE GATE WAS 0.80 AND IT WAS REJECTING CORRECT READS.
+#
+# Measured leave-one-out over every exemplar held - each scored against the
+# OTHERS, so "right" means the set identified it and "wrong" means its own
+# digit had been removed and the best match is necessarily another digit:
+#
+#     correct reads (33)   0.726 .. 0.987
+#     wrong   reads (35)   0.396 .. 0.627
+#
+# They separate with a 0.10 gap, and **0.80 sits inside the correct range** -
+# it refused 7 of 33 good reads, 21%. Live that is a stalled mission each
+# time: 0.794, 0.799, 0.771, 0.726, 0.708 were all the RIGHT digit, refused.
+#
+# 0.70 accepts every correct read and rejects every wrong one on this data.
+#
+# MARGIN WAS TRIED AS THE DISCRIMINATOR AND REJECTED. A wrong answer reached
+# 1.86x over its runner-up while a right one fell to 1.23x - they overlap, so
+# margin ALONE would licence confident wrong readings. It is kept only as a
+# second condition, because a wrong read corrupts the solver silently where a
+# refusal merely stops it, and defence in depth is cheap here.
+DIGIT_GATE = 0.70
+DIGIT_MARGIN = 1.15
+
+
+def read_digit(frame, xy, exemplars, gate=DIGIT_GATE, margin=DIGIT_MARGIN):
     """Classify a digit crop against saved exemplars. Returns (value, conf).
 
-    Returns (None, best) when nothing clears `gate` — an unread counter must NOT
-    be silently treated as a zero. A wrong 0 is indistinguishable from a real one
-    and would corrupt the solver's model, which then converges on nothing.
+    Returns (None, best) when the evidence is not good enough — an unread
+    counter must NOT be silently treated as a zero. A wrong 0 is
+    indistinguishable from a real one and would corrupt the solver's model,
+    which then converges on nothing.
+
+    BOTH conditions must hold: the score clears `gate`, AND it beats the best
+    score from any OTHER digit by `margin`. See the note above for why neither
+    alone is enough.
     """
     if not exemplars:
         return None, 0.0
     patch = digit_mask(frame, xy)
-    best, bestv = 0.0, None
+    per = {}
     for val, imgs in exemplars.items():
         for img in (imgs if isinstance(imgs, list) else [imgs]):
             g = tight_glyph(img)
@@ -745,9 +774,18 @@ def read_digit(frame, xy, exemplars, gate=0.80):
                 continue
             r = cv2.matchTemplate(patch, g, cv2.TM_CCOEFF_NORMED)
             m = float(cv2.minMaxLoc(r)[1])
-            if m > best:
-                best, bestv = m, val
-    return (bestv, best) if best >= gate else (None, best)
+            if m > per.get(val, 0.0):
+                per[val] = m
+    if not per:
+        return None, 0.0
+    ranked = sorted(per.items(), key=lambda kv: -kv[1])
+    bestv, best = ranked[0]
+    rival = ranked[1][1] if len(ranked) > 1 else 0.0
+    if best < gate:
+        return None, best
+    if rival > 0 and best < rival * margin:
+        return None, best
+    return bestv, best
 
 
 def load_exemplars():

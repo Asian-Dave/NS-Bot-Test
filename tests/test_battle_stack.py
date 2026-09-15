@@ -7326,6 +7326,111 @@ def test_a_declined_revive_ends_the_fight_as_a_defeat():
           "mislabelled before anyone looks")
 
 
+
+def test_the_digit_gate_admits_correct_reads_and_still_refuses_unknowns():
+    """0.80 was refusing a FIFTH of the reads it should have accepted.
+
+    Every refusal costs a mission - the solver stops, the ladder cannot name a
+    half-played puzzle, and it relogs. Live, the refused scores were 0.794,
+    0.799, 0.771, 0.726 and 0.708, and EVERY ONE had already identified the
+    right digit. The gate, not the reader, was wrong.
+
+    Measured leave-one-out over every exemplar held. "Right" means the set
+    identified it; "wrong" means its own digit was REMOVED first, so the best
+    match is necessarily another digit and must be refused:
+
+        correct reads (33)   0.726 .. 0.987
+        wrong   reads (35)   0.396 .. 0.627
+
+    A 0.10 gap, with 0.80 sitting INSIDE the correct range.
+
+    **Margin was tried as the discriminator and rejected**, which is worth
+    recording because it looks like the obvious answer: a wrong answer reached
+    1.86x over its runner-up while a right one fell to 1.23x. They overlap, so
+    a margin-only gate would licence confident WRONG readings - and a wrong
+    counter corrupts the solver silently where a refusal merely stops it. It
+    survives only as a second condition.
+    """
+    print("\nthe digit gate admits correct reads and still refuses unknowns")
+    import kekkai_play as kp
+    import perceive as pmod
+
+    was = pmod.get_renderer()
+    try:
+        pmod.set_renderer("wgpu-webgl")
+        ex = kp.load_exemplars()
+        check(ex, "there are exemplars to test with")
+
+        def decide(patch, pool):
+            per = {}
+            for val, imgs in pool.items():
+                for img in imgs:
+                    g = kp.tight_glyph(img)
+                    if g.shape[0] > patch.shape[0] or g.shape[1] > patch.shape[1]:
+                        continue
+                    m = float(cv2.minMaxLoc(cv2.matchTemplate(
+                        patch, g, cv2.TM_CCOEFF_NORMED))[1])
+                    if m > per.get(val, 0.0):
+                        per[val] = m
+            if not per:
+                return None, 0.0
+            r = sorted(per.items(), key=lambda kv: -kv[1])
+            bv, bs = r[0]
+            rv = r[1][1] if len(r) > 1 else 0.0
+            if bs < kp.DIGIT_GATE:
+                return None, bs
+            if rv > 0 and bs < rv * kp.DIGIT_MARGIN:
+                return None, bs
+            return bv, bs
+
+        files = [p for p in sorted(glob.glob(
+            os.path.join(ROOT, "ref/auto/tp/digits_ink/**/*.png"), recursive=True))
+            if os.path.basename(p).split("_")[0].split(".")[0].isdigit()]
+        check(len(files) > 20, f"a meaningful set to measure ({len(files)})")
+
+        misread, refused, accepted_unknown = [], [], []
+        for path in files:
+            truth = int(os.path.basename(path).split("_")[0].split(".")[0])
+            patch = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if patch is None:
+                continue
+            sub = {}
+            for val, imgs in ex.items():
+                keep = [im for im in imgs
+                        if not (im.shape == patch.shape and (im == patch).all())]
+                if keep:
+                    sub[val] = keep
+            if truth in sub:
+                v, c = decide(patch, sub)
+                if v is None:
+                    refused.append((os.path.basename(path), round(c, 3)))
+                elif v != truth:
+                    misread.append((os.path.basename(path), v, round(c, 3)))
+            # own digit removed: the answer can only be wrong, so refuse it
+            v2, c2 = decide(patch, {k: v for k, v in sub.items() if k != truth})
+            if v2 is not None:
+                accepted_unknown.append((os.path.basename(path), v2, round(c2, 3)))
+
+        check(not misread, f"no exemplar is read as the WRONG digit ({misread[:3]})")
+        check(not refused,
+              f"and none is refused either - the gate no longer rejects "
+              f"correct reads ({refused[:3]})")
+        check(not accepted_unknown,
+              f"while a glyph whose digit has NO exemplar is still REFUSED, "
+              f"never guessed ({accepted_unknown[:3]})")
+
+        check(kp.DIGIT_GATE < 0.80,
+              f"the gate came down from 0.80 ({kp.DIGIT_GATE})")
+        check(kp.DIGIT_GATE > 0.63,
+              f"but stays clear of the 0.627 a WRONG read reached "
+              f"({kp.DIGIT_GATE})")
+    finally:
+        if was:
+            pmod.set_renderer(was)
+        else:
+            pmod.clear_renderer()
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -7414,7 +7519,8 @@ def main():
                test_the_rune_solver_does_not_rebuild_a_set_per_candidate,
                test_digit_exemplars_can_be_overridden_per_renderer,
                test_a_full_gold_counter_is_not_a_solved_puzzle,
-               test_a_declined_revive_ends_the_fight_as_a_defeat):
+               test_a_declined_revive_ends_the_fight_as_a_defeat,
+               test_the_digit_gate_admits_correct_reads_and_still_refuses_unknowns):
         fn()
     print("\n" + "=" * 62)
     if FAILS:
