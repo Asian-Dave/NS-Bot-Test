@@ -3626,6 +3626,41 @@ Note the last stall of the winning run was the digit **6** - the win condition
 itself. The game acted on it and cleared the stage while the solver could not
 read it, so the mission succeeded without the bot knowing why.
 
+### VERIFIED END TO END ON wgpu — five families, one pass, nothing to fix
+
+The first SS pass that needed no intervention: **5 started, 5 banked**, list
+finishing empty, with every family dispatched BY SIGHT (two combats, a rune,
+a balance and a lights - `identify` reads the board, the title only hints).
+
+Each fix above was confirmed live rather than only in the suite:
+
+* **the double close-out** - `the mission runner banked it and returned to the
+  lobby - not closing out a second time`, twice. That path previously waited
+  45 s for an already-dismissed panel and filed a WIN as a failure.
+* **the derangement false-solve** - stage 2 hit `green=0 gold=6`, the exact
+  feedback that used to declare victory and loop, and it continued and solved
+  on the next guess.
+* **the per-renderer digit set** - `digit exemplars: wgpu-webgl variants for
+  0, 1, 2, 3, 4`, with zero refusals across two rune missions and eleven
+  counters.
+* **greyed-slot detection** - working, because that gate IS calibrated for
+  wgpu and is not for webgl. A concrete reason to prefer wgpu that has nothing
+  to do with the digit question.
+
+**One behaviour that looks like a fault and is not.** On a combat mission the
+watchdog reported `watchdog=stalled` and deliberately did NOT flee:
+
+    battle: watchdog=stalled - NOT fleeing, because Run fails the mission.
+            Fighting on; max_rounds=60 still bounds this.
+
+It won six seconds later. Fleeing an SS mission forfeits it, so the restraint
+is correct and the bound is what keeps it safe.
+
+**Still untested:** wgpu digits **5 and 6** never appeared. They remain
+single-exemplar fallbacks from the webgl set and will REFUSE rather than
+misread, so a future rune stage can still stall there - a known gap, and one
+that fills itself from a saved panel.
+
 ## TP NOW BANKS — and the last blocker was a hand-picked threshold
 
 Five TP missions banked in one session across all three families: hand-seal
