@@ -4,10 +4,20 @@ UI-level automation for Ninja Saga, a Flash game running on Ruffle. The bot look
 at rendered pixels and clicks. It does not touch game memory, network traffic or
 the server protocol.
 
-**Status: farms story missions and TP training unattended.** Grade selection,
-mission choice, dialogue, traversal, combat and close-out all run without help,
-and all three TP minigames are solved end to end. Measured over one session:
-18 story missions banked back to back, ~172s per cycle, with no intervention.
+**Status: farms story missions, TP training, SS training and the Eudemon
+Garden boss ladder unattended.** Grade selection, mission choice, dialogue,
+traversal, combat and close-out all run without help; all three TP minigames
+and all three SS minigames are solved end to end; and the Eudemon hunt fills a
+party, fights a boss and returns to the village on a loop.
+
+Measured, in single sessions with no intervention:
+
+| | |
+|---|---|
+| story missions | 18 banked back to back, ~172 s per cycle |
+| TP training | 5 of 5 banked, the day's list finishing empty |
+| SS training | 5 of 5 banked — two combats, a rune, a balance, a lights |
+| Eudemon Garden | 8 bosses banked in a row, recruiting a party each lap |
 
 ---
 
@@ -89,13 +99,16 @@ The panel offers:
 
 | | |
 |---|---|
-| **Task** | resume to lobby, TP training, farm missions, exam rune puzzle, idle |
+| **Task** | resume to lobby, TP training, SS training, Eudemon hunt, farm missions, exam rune puzzle, idle |
 | **Run** | run / pause / relog / stop, and quit |
 | **Stop** | aborts the task, clears its progress, and relaunches attached — no terminal trip |
 | **Quit** | removes the panel and exits for good |
 | **Farm target** | grade (auto, S, A, B, C) and mission (highest, or a pinned page/row) |
 | **Skill order** | click `AT CH DO S1..S8` to build a priority order; Attack is the floor |
-| **Focus mode** | hides the page chrome and pins the game to the top |
+| **Hunt skill order** | a *second* rotation used only by Eudemon/Hunting House fights; empty falls back to the main order, never to Attack-only |
+| **Eudemon bosses** | every boss the scan has seen, by name — click one to skip it |
+| **Scan bosses now** | pages the whole garden and refreshes that list; runs on click when nothing else is |
+| **View** | focus mode, window size, renderer and server |
 
 Farm target and skill order take effect on the **next** mission and persist to
 `run/`, outside the tracked config. If no bot is attached the panel says so
@@ -132,9 +145,11 @@ first padlock and takes the last unlocked row before it, then plays the mission:
 dialogue, traversal, combat, and the Mission Success close-out. A grade that
 runs out of pages before showing a padlock stops on its last page instead.
 
-In combat, a skill that is cooling is **not clicked at all** — the game draws a
-cooling tile in true greyscale (measured saturation 0.0 inside the tile against
-164.0 for a ready one) and prints its remaining count on it. Cooldown lengths
+In combat, a skill that is cooling is **not clicked at all** — on wgpu, where
+the game draws a cooling tile in true greyscale (measured saturation 0.0 inside
+the tile against 164.0 for a ready one). webgl does not apply that grey-out, so
+there the reading is *unknown* and the skill is tried; see the renderer section.
+Cooldown lengths
 are also learned by bracketing them from outcomes, since the game does not
 expose them. Enemies are found by MOVEMENT rather than colour, which cannot be
 fooled by scenery — with the exception of *animated* scenery, so a mover that
@@ -154,6 +169,36 @@ different mission entirely.
 | Scroll (memory board) | solved — cleared 20/20 with 51s to spare |
 | Potion (hand-seal memorisation) | solved — five levels including an eight-sign round |
 
+**SS training.** Five missions a day at five times the TP reward, in three
+families — and, like TP, the family is read off the screen rather than from the
+mission name, so one pass can cover three different minigames without being
+told which is which.
+
+| minigame | state |
+|---|---|
+| Sage Power Seal (rune Mastermind, multi-stage) | solved — stages escalate 5 → 6 runes, length read per stage from the seal's node count |
+| Balance Control (subset sum) | solved — the target is *derived* (half the invariant total), so a hidden `??` sum costs nothing |
+| Sage Sealed Boxes (Lights Out) | solved — 3x3 over GF(2), verified against all 512 states |
+
+Two things make the rune family harder than its TP cousin, and both are about
+the budget: a stage allows **ten guesses** and running out fails the *mission*,
+not the stage. So the solver never spends a guess probing, and it resumes from
+the rows already on the scroll rather than restarting.
+
+**Eudemon Garden.** A boss ladder reached through the Hunting House. Each lap
+recruits a party, enters the garden, fights, and ends back in the village —
+because teammates leave after every boss, so a party filled once is gone by the
+second fight.
+
+* **Bosses are read off the list**, not configured: 14 on this account across
+  three pages, with rank from the badge colour (SS/S/A/B/C separate on hue
+  *and* saturation — SS and B are 120 vs 101 in hue alone, too close to call).
+* **The panel's skip list is by fingerprint**, so an entry still names the same
+  boss after the list reflows, and a boss that an event removes is *retired*
+  rather than forgotten — it returns as itself, with your choice intact.
+* **Party members are friends at or below your level**, strongest first. NPC
+  recruits are token-priced and excluded three separate ways.
+
 **Exam rune puzzle.** The same Mastermind the Kekkai TP mission uses, which the
 exams also run — verified over code lengths 2 to 5 (their four table sizes),
 with the length read from the seal's node count rather than configured. The
@@ -161,6 +206,44 @@ with the length read from the seal's node count rather than configured. The
 yet. So navigate to the exam yourself and press Run; if there is no puzzle on
 screen the bot says so and saves the frame, which is what the navigation would
 be built from.
+
+## The renderer changes the pixels
+
+Ruffle can draw through `wgpu-webgl` (the default), `webgl` or `canvas`, and
+the panel switches between them. **This is not cosmetic: it changes what the
+bot sees.** Measured on the same screen minutes apart, with only the backend
+changed:
+
+| anchor | wgpu-webgl | webgl |
+|---|---|---|
+| `mission_room_entry` | 0.997 | 0.531 |
+| `result_panel` | 1.000 | 0.341 |
+| `mission_success` | 1.000 | 0.418 |
+
+The split is not "legacy webgl is broken" — `webgl` and `canvas` agree with
+each other to 0.001 and both disagree with wgpu. wgpu draws text **with its
+stroke**; the others draw a thinner, unstroked face. Anything that is art is
+pixel-identical; anything whose discriminating content is *lettering* is not.
+
+So three things follow the backend, and each falls back per item rather than
+wholesale:
+
+* **`tpl/<renderer>/`** overrides a template crop by name. Eight take the farm
+  from "cannot leave the village" on webgl to a mission banked end to end.
+* **`ref/auto/tp/digits_ink/<renderer>/`** overrides a kekkai digit exemplar by
+  digit — a backend needs only the digits that actually fail on it.
+* **The cooling-skill gate** reads colour, so it is calibrated per backend. It
+  is measured for wgpu and **not** for webgl, where an uncalibrated backend
+  answers *unknown* rather than confidently wrong.
+
+That last one is the practical difference today: on wgpu a cooling skill is
+skipped outright, on webgl it is clicked and costs a ~6 s resolve timeout.
+Nothing else prefers one backend over the other — both render at ~120 fps
+against a 24 fps SWF.
+
+`renderMode` is stored by the *site*, in `localStorage`, so it is per browser
+profile and does not travel between machines. Before diagnosing a platform
+difference, read the log line that names the backend.
 
 ## Performance and unattended running
 
@@ -218,13 +301,16 @@ pausing, bounded so a deterministic fault still stops and says so.
 | `engine/farm.py` | grade and mission selection |
 | `engine/resume.py` | the ladder that gets back to the lobby from anywhere |
 | `engine/kekkai*.py`, `cards.py`, `seals.py` | the three TP minigames |
+| `engine/ss.py`, `balance.py`, `lights.py` | SS training: the multi-stage rune puzzle, Balance Control, Lights Out |
+| `engine/eudemon.py`, `roster.py` | the Eudemon boss ladder and party recruiting |
+| `engine/recut.py` | re-cuts a template for a renderer that draws it differently |
 | `Start NS Bot.command`, `.bat`, `start-ns-bot.sh` | double-click launchers |
 | `Configs/` | thresholds, geometry, rotation — no logic in code |
 | `tpl/` | templates |
 | `CLAUDE.md` | measured constants, corrections, and why each one is there |
 | `engine/presence.py` | keeps the machine out of the idle state during a run |
 | `engine/tasks.py` | what a task is: the registry the panel and the loop share |
-| `tests/test_battle_stack.py` | 759 checks against recorded frames |
+| `tests/test_battle_stack.py` | 1,245 checks against recorded frames |
 
 ## Safety
 
@@ -233,6 +319,23 @@ Enforced in code, not by convention:
 * **Never clicked, at any confidence:** character deletion, and the once-per-day
   actions (daily claim, wishing tree, lucky spin). Blocked in the policy and
   again at the click site.
+* **Tokens — the premium currency — are never spent.** Losing a boss raises
+  *"Do you want to revive by using 50 token?"* with a green check and a red X,
+  and the ladder's generic "acknowledge a lone green check" rung matched that
+  check at **0.979**. The distinction it was missing is structural: one green
+  check is an *acknowledgement*, a green check **and** a red X is a *choice* —
+  and pressing green accepts. A dialog offering both is now declined, never
+  accepted, recognised by the flat panel between its two buttons (colour std
+  2.8 against 61–65 on a battlefield). NPC party recruits are token-priced and
+  excluded three ways.
+* **The senjutsu orb is never pressed.** The magatama beside `S8` swaps the
+  whole skill bar to the senjutsu set — it costs nothing and animates nothing,
+  so `S1..S8` keep clicking while playing jutsu nobody chose. It is a no-click
+  point, re-armed every turn from the command-bar anchor, and if the bar has
+  been swapped anyway the runner puts it back.
+* **`Share` is never clicked** on a reward panel. It publishes to a social
+  feed. The close-out presses the panel's X, located by template and
+  constrained to its corner.
 * **Credentials are never handled.** The browser profile holds the session; on a
   logged-out or login screen the bot halts and says so.
 * **The control panel is a no-click zone.** It is injected into the game's page,
@@ -253,10 +356,18 @@ Enforced in code, not by convention:
   inside one. A relog covers it — character select is a screen the ladder
   knows — but a fight it cannot end still has no exit of its own.
 * **The skill-cooldown refusal message has no template.** Cooling skills are
-  detected from the icon instead (a cooling tile is drawn in true greyscale,
-  measured saturation 0.0 against 164.0), so this costs nothing today; the
-  early-out is written and dormant, and activates by itself if the message is
-  ever cut to `tpl/skill_cooldown.png`.
+  detected from the icon instead, so on wgpu this costs nothing; the early-out
+  is written and dormant, and activates by itself if the message is ever cut to
+  `tpl/skill_cooldown.png`. On **webgl** it would earn its keep, because the
+  icon check abstains there and each unusable skill costs a ~6 s timeout.
+* **The kekkai digit exemplars are incomplete per backend.** They are harvested
+  from play, and a digit with no exemplar is *refused*, never guessed — which
+  stops a mission rather than corrupting the solver, but stops it all the same.
+  wgpu currently covers 0–4; 5 and 6 fall back to the shared set. Each refusal
+  saves the whole panel, and one saved panel yields several labelled exemplars
+  because the log records the feedback for every row it *did* read.
+* **wgpu is calibrated for cooling skills and webgl is not**, so the two
+  backends are not equally good at the same things. Neither is strictly better.
 * **`cv2` thread count cannot be capped on this build.** The macOS wheel uses
   GCD, where `setNumThreads` is a no-op, so the only way to reduce CPU burn is
   to do less work. The call is kept for Linux/Windows wheels, which honour it.
@@ -287,6 +398,12 @@ a measurement:
 * two page arrows that are indistinguishable at 3x magnification separate at
   1.000 vs 0.806 under `matchTemplate`
 * a command-bar check that "felt slow" was 12.3 seconds of scale sweeping
+* an SS puzzle that "froze" for 53 seconds was a `set()` rebuilt once per
+  candidate — 48.92 s against 0.0019 s hoisted, and the reason the same code
+  never stuttered on TP is simply that its pool is 216 rather than 46,656
+* a digit reader that kept stalling was not misreading anything: its gate sat
+  at 0.80 while correct reads measured 0.726–0.987 and wrong ones 0.396–0.627,
+  so it was refusing a fifth of the answers it should have accepted
 
 Thresholds and masks are calibrated against reference frames for that reason, and
 `CLAUDE.md` records the specifics — including the corrections, which are the most
