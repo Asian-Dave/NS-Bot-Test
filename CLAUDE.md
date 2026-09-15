@@ -79,8 +79,9 @@ Scale sensitivity is content-dependent and matters a lot:
 
 So geometry must be pinned, and `cv2.matchTemplate` is not scale-invariant.
 
-Prefer pixel reads over OCR: HP/CP bars via `bar_fill_ratio`, cooldowns via
-`is_desaturated` (mean HSV saturation), numbers via digit templates if ever needed
+Prefer pixel reads over OCR: HP bars via `perceive.find_enemy_bars` (a bright-red
+run along the bar), cooldowns via `combat.slot_cooling`, numbers via digit templates
+if ever needed
 (Ruffle rasterises deterministically, so digit templates beat OCR).
 
 Bad template targets: **semi-transparent labels over animated art** (the village
@@ -2213,7 +2214,8 @@ Findings that changed our design, kept because the reasoning still applies:
   our client before use - their client is ~800x440, ours 960x720.
 * **No HP/CP reading anywhere.** `FindAllInRange` has no callers outside
   `PixelSearch.cs`; `FindPixelColorRange` has one thin wrapper
-  (`FormMain.cs:14479`). Our `bar_fill_ratio` work is not redundant.
+  (`FormMain.cs:14479`). Our own bar reading (`perceive.find_enemy_bars`) is
+  not redundant.
 * **No round/turn counter** (zero refs in `FormMain.cs`) and no flee/run path.
   Their only failsafe is a wall-clock **"Stuck Timeout"** (" stuck more than 3
   times"), which is time-based and would NOT catch a regenerating enemy - the
@@ -2488,6 +2490,43 @@ It reads a COUNTER rather than taking screenshots on purpose. A second CDP
 client taking clipped screenshots re-applies device metrics and resizes the
 page under the bot — that is what pressed Relog and dropped the session once
 already.
+
+### DEAD CODE, MEASURED RATHER THAN GUESSED AT
+
+A tidy-up pass, done by asking the code rather than reading it:
+
+* **Modules imported by nothing:** only `calibrate.py` qualified. Everything
+  else in that list is a standalone instrument with its own `__main__`, which
+  this file already records as deliberately kept.
+* **Functions referenced nowhere but their own definition:** 16, totalling
+  **200 lines**, removed. Checked first for references as STRINGS (getattr,
+  config, prose), because a name can be live without ever appearing as a call.
+* **`calibrate.py` ran its whole calibration sweep AT IMPORT** - no `__main__`
+  guard, so `import calibrate` performed a sixteen-template multi-scale sweep
+  and printed a table. Nothing imports it, which is the only reason that never
+  surfaced. Now guarded.
+* **The ROI clamp existed four times over** - the four lines this file already
+  warns about ("unclamped, a 1920-wide frame fed a region starting at x=1950
+  and OpenCV threw"). Now `perceive.clamp_roi`, which returns None for an
+  unusable region so a caller says "nothing here" instead of slicing empty.
+
+**Two of the removed functions were NAMED IN THE DOCS** as the way something is
+done - `bar_fill_ratio` for HP bars, `is_desaturated` for cooldowns - both
+superseded by `find_enemy_bars` and `slot_cooling` long before. Deleting code
+whose prose survives leaves the most-read file describing a mechanism that does
+not exist, so the docs were corrected in the same pass.
+
+**And a test that fired on correct code was deleted rather than patched.** A
+general "does the prose name anything real" sweep cannot tell our functions
+from stdlib calls, config keys (`battle.rotation`), parameter names or
+filenames (`cdp.py`); it took four rounds of special-casing and still failed.
+It was replaced by a narrow check on the two names actually removed. This
+file's own rule: a guard that fires on correct code gets deleted.
+
+**What the measurement also showed: there is not much bloat.** 200 dead lines
+in 20,218 is under 1%. The remaining duplication is per-module import
+boilerplate and the argparse blocks of standalone tools, both of which are
+load-bearing where they are.
 
 ## THE REFACTOR: one entry point, one declaration of a task
 

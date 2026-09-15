@@ -92,13 +92,6 @@ class Actor:
         self._sleep(self.post_click)
         return ax, ay
 
-    def click_match(self, match, why=""):
-        if not match.found:
-            self.log.warning("refusing to click %s: not found", match.name)
-            return None
-        return self.click_pixel(*match.center, why=why or match.name)
-
-
 class Controls:
     """Pause / stop switch.
 

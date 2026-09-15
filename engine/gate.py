@@ -104,11 +104,6 @@ def pixel(name, x, y, bgr, tolerance=0):
     return Condition(name, _check, note=f"pixel({x},{y})=={bgr} tol={tolerance}")
 
 
-def predicate(name, fn, note=""):
-    """Condition from any callable(frame_bgr, frame_gray) -> falsy | payload."""
-    return Condition(name, fn, note=note)
-
-
 class Fired:
     """Which condition became true, and what it saw."""
 
@@ -199,15 +194,6 @@ class Gate:
     def _frames(self, clip=None):
         bgr = self.capture.frame(gray=False, clip=clip)
         return bgr, cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-
-    def check_now(self, conditions, clip=None):
-        """Evaluate once against a single fresh capture. No waiting."""
-        bgr, gray = self._frames(clip)
-        for i, c in enumerate(conditions):
-            payload = c.check(bgr, gray)
-            if payload:
-                return Fired(i, c.name, payload, 0.0, 1)
-        return TimedOut(0.0, 1, [c.name for c in conditions])
 
     def _maybe_decline(self, bgr, waited):
         """Decline a two-button dialog that is blocking this wait.

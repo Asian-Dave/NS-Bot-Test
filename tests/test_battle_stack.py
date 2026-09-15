@@ -7431,6 +7431,53 @@ def test_the_digit_gate_admits_correct_reads_and_still_refuses_unknowns():
             pmod.clear_renderer()
 
 
+
+def test_the_docs_do_not_name_the_removed_helpers():
+    """Dead code was removed; the prose that named it was updated with it.
+
+    `bar_fill_ratio` and `is_desaturated` were quoted in CLAUDE.md and in
+    `docs/` as the way HP bars and cooldowns are read, and both had been
+    superseded long ago - by `find_enemy_bars` and `slot_cooling` - without the
+    prose being changed. Deleting them without fixing that would leave the
+    most-read file in the project describing a mechanism that does not exist.
+
+    **This deliberately checks two NAMES, not every name.** A general "does the
+    prose name anything real" sweep was written first and abandoned: it cannot
+    tell our functions from stdlib calls, config keys (`battle.rotation`),
+    parameter names or filenames (`cdp.py`), and it took four rounds of
+    special-casing while still failing on correct docs. This file's own rule is
+    that a guard which fires on correct code gets deleted.
+    """
+    print("\nthe docs do not name the removed helpers")
+    import glob as _glob
+
+    gone = ("bar_fill_ratio", "is_desaturated")
+    engine = "\n".join(open(p).read()
+                       for p in _glob.glob(os.path.join(ROOT, "engine/*.py")))
+    for name in gone:
+        check(f"def {name}" not in engine,
+              f"{name} really is gone from the engine")
+
+    docs = ["CLAUDE.md", "README.md"] + [
+        os.path.relpath(p, ROOT)
+        for p in _glob.glob(os.path.join(ROOT, "docs/*.md"))]
+    checked = 0
+    for rel in docs:
+        path = os.path.join(ROOT, rel)
+        if not os.path.exists(path):
+            continue
+        checked += 1
+        text = open(path).read()
+        for name in gone:
+            check(name not in text, f"{rel} does not still name {name}")
+    check(checked >= 3, f"several docs were actually read ({checked})")
+
+    # and the replacements it now points at DO exist
+    for name in ("find_enemy_bars", "slot_cooling"):
+        check(f"def {name}" in engine,
+              f"the replacement {name} exists")
+
+
 def main():
     for fn in (test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
@@ -7520,7 +7567,8 @@ def main():
                test_digit_exemplars_can_be_overridden_per_renderer,
                test_a_full_gold_counter_is_not_a_solved_puzzle,
                test_a_declined_revive_ends_the_fight_as_a_defeat,
-               test_the_digit_gate_admits_correct_reads_and_still_refuses_unknowns):
+               test_the_digit_gate_admits_correct_reads_and_still_refuses_unknowns,
+               test_the_docs_do_not_name_the_removed_helpers):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

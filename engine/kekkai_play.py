@@ -105,11 +105,10 @@ def find_rune_buttons(frame_bgr, y0=820, y1=1220, x0=760, x1=2680):
     They are a row of equally sized circles, which Hough finds directly - no
     template, and it adapts to wherever the panel has been drawn.
     """
-    h, w = frame_bgr.shape[:2]
-    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
-    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
-    if x1 - x0 < 8 or y1 - y0 < 8:
+    box = perceive.clamp_roi(frame_bgr, x0, y0, x1, y1)
+    if box is None:
         return None
+    x0, y0, x1, y1 = box
     g = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     circles = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1, minDist=60,
                                param1=100, param2=30, minRadius=28,
@@ -192,11 +191,10 @@ def find_confirm_point(frame_bgr, y0=200, y1=900, x0=900, x1=1800):
     A large, round, dark blob inside the puzzle scroll. Measured on a live
     frame: area 32695, bbox 207x201, centre (1261, 387).
     """
-    h, w = frame_bgr.shape[:2]
-    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
-    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
-    if x1 - x0 < 8 or y1 - y0 < 8:
+    box = perceive.clamp_roi(frame_bgr, x0, y0, x1, y1)
+    if box is None:
         return None
+    x0, y0, x1, y1 = box
     g = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     m = cv2.morphologyEx((g < 90).astype(np.uint8) * 255,
                          cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
@@ -396,17 +394,6 @@ def heading_from_spawn(frame, log=None, cap=None):
         log.info("character at x=%d (centre %d) -> spawned %s, heading %s",
                  pos[0], centre, "left" if pos[0] < centre else "right", h)
     return h
-
-
-def read_seals(frame, ex, x0=1300, x1=1900, y0=60, y1=130):
-    """The 'Seals: X / Y' HUD. Returns (done, total) or (None, None).
-
-    Knowing the total is what lets the hunt stop for the right reason instead of
-    on a step budget.
-    """
-    # Digits here are white-on-dark rather than the disc glyphs, so reuse of the
-    # history exemplars is not safe; report unknown rather than guess.
-    return (None, None)
 
 
 # The history scroll's columns are LOCATED, not assumed - see `find_rows`.

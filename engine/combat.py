@@ -13,20 +13,6 @@ from perceive import find, mask_stats, HP_FILL_BGR
 # ---------------------------------------------------------------------------
 # Turn gating
 # ---------------------------------------------------------------------------
-def is_my_turn(frame_gray, attack_tpl):
-    """The command bar's PRESENCE is the turn gate.
-
-    Measured alternatives that do NOT work:
-      * turn-marker position: the Victory panel draws over the bar, and the
-        marker sits at ~99% both when it is your turn and when it is not.
-      * fixed timing: clicks issued during the enemy phase are silently
-        discarded. Roughly a third of a mission's worth of actions were lost
-        this way before switching to detection.
-    """
-    m, _ = find(frame_gray, attack_tpl)
-    return m.found
-
-
 # ---------------------------------------------------------------------------
 # Cooldown detection
 # ---------------------------------------------------------------------------
@@ -59,14 +45,6 @@ class SlotBaseline:
             if s is not None:
                 self.baseline[name] = s
         return dict(self.baseline)
-
-    def on_cooldown(self, frame_bgr, name, cx, cy):
-        base = self.baseline.get(name)
-        s = self._sat(frame_bgr, cx, cy)
-        if base is None or s is None:
-            return None                      # unknown, not False - do not guess
-        return s < base * self.drop_ratio, s, base
-
 
 # ---------------------------------------------------------------------------
 # Progress watchdog  ** the most important guard here **
@@ -444,26 +422,6 @@ class CooldownTracker:
         if cd is None or used is None:
             return 0
         return max(0, cd - (self.round - used))
-
-    def learn_cooldown(self, slot, rounds):
-        """Record an observed cooldown length so it becomes trackable."""
-        self.cooldowns[slot] = int(rounds)
-
-
-def parse_status_effects(text_lines):
-    """Turn on-screen effect labels into (name, rounds_remaining).
-
-    The trailing number is a DURATION IN ROUNDS, not a stack count: the client
-    stores a `duration` on each buff/debuff and decrements it once per round,
-    removing the effect at zero. `Blind(1)` means one round left.
-    """
-    import re
-    out = []
-    for line in text_lines:
-        m = re.match(r"\s*(.+?)\s*\((\d+)\)\s*$", line)
-        if m:
-            out.append((m.group(1).strip(), int(m.group(2))))
-    return out
 
 # --- THE SENJUTSU BAR MUST NOT BE LEFT ON -------------------------------
 #

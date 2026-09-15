@@ -293,26 +293,6 @@ def player_level(frame, log=None):
     return int(text)
 
 
-def team_slots(frame):
-    """(filled, total) from the `Team n/m` badge, or None.
-
-    The badge is the game's own count, which beats inferring occupancy from
-    portraits - it says 0/2 before recruiting and 2/2 after, and it is the
-    only signal that survives the panel being redrawn.
-    """
-    gs = [g for g in _glyphs(frame, band=TEAM_BAND, xr=TEAM_X, max_h=40)
-          if g[3] >= TEAM_MIN_H]
-    if len(gs) != 2:
-        return None
-    vals = []
-    for g in gs:
-        d, _dist, _m = classify(g[4])
-        if d is None:
-            return None
-        vals.append(int(d))
-    return vals[0], vals[1]
-
-
 # --- the recruit buttons -------------------------------------------------
 #
 # **GREEN IS FREE, BLUE COSTS TOKENS.** Each card carries a round `+` at its

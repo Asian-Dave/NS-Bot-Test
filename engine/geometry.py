@@ -409,12 +409,6 @@ class BattleGeometry:
         """Target ring slot centre. key in T1..T8."""
         return self._at(TARGETS, key)
 
-    def slot_box(self, key, size=44.0):
-        """(x, y, w, h) around a skill slot, for saturation / cooldown reads."""
-        cx, cy = self.slot(key)
-        s = int(round(size * self.scale / 0.46))   # 44px was measured at scale .46
-        return (cx - s // 2, cy - s // 2, s, s)
-
     # -- ring inspection -----------------------------------------------------
     def ring_state(self, frame_bgr, probe=24):
         """Which ring slots are present, and whose side each is on.

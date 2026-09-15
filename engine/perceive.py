@@ -422,6 +422,26 @@ def find(frame_gray, tpl: Template, coarse=True):
                  center, scale, size), conf
 
 
+
+def clamp_roi(frame, x0, y0, x1, y1, min_side=8):
+    """Clip a region to the frame. Returns (x0, y0, x1, y1) or None.
+
+    **Every colour-blob detector here needs this**, and the reason is recorded
+    in CLAUDE.md: unclamped, a 1920-wide frame was handed a region starting at
+    x=1950 and OpenCV threw on the empty slice. The same four lines had been
+    written out in four places, which is how one of them ends up fixed and the
+    others do not.
+
+    `None` means there is no usable region - fewer than `min_side` pixels on an
+    axis - so a caller can return "nothing here" instead of slicing empty.
+    """
+    h, w = frame.shape[:2]
+    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
+    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
+    if x1 - x0 < min_side or y1 - y0 < min_side:
+        return None
+    return x0, y0, x1, y1
+
 def find_character(frame_bgr, x0=760, x1=2680, y0=400, y1=950,
                    sat=150, min_area=600, max_area=12000, min_h=95,
                    max_aspect=0.95):
@@ -456,11 +476,10 @@ def find_character(frame_bgr, x0=760, x1=2680, y0=400, y1=950,
     This is shared by mission traversal and the Kekkai runner deliberately -
     they had two different finders and only one of them was fixed.
     """
-    h, w = frame_bgr.shape[:2]
-    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
-    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
-    if x1 - x0 < 8 or y1 - y0 < 8:
+    box = clamp_roi(frame_bgr, x0, y0, x1, y1)
+    if box is None:
         return None
+    x0, y0, x1, y1 = box
     hsv = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
     m = (((hsv[:, :, 1] > sat) & (hsv[:, :, 2] > 60)).astype(np.uint8) * 255)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
@@ -497,31 +516,6 @@ def mask_stats(frame_bgr, lo, hi):
             "centroid": (int(xs.mean()), int(ys.mean())),
             "bbox": (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))}
 
-
-def bar_fill_ratio(frame_bgr, x, y, w, lo, hi):
-    """How full is a horizontal bar, 0..1.
-
-    Reads a 1px scanline and finds how far the fill colour extends. This is the
-    right way to read HP/CP: the values are rasterised text that would need OCR,
-    but the bar itself is a pure geometric measurement.
-    """
-    row = frame_bgr[y:y + 1, x:x + w]
-    m = cv2.inRange(row, np.array(lo, np.uint8), np.array(hi, np.uint8))[0]
-    filled = np.nonzero(m)[0]
-    return 0.0 if len(filled) == 0 else float(filled.max() + 1) / w
-
-
-def is_desaturated(frame_bgr, x, y, w, h, sat_threshold=40):
-    """True if a region looks greyed out — the usual 'on cooldown' tell.
-
-    A ready skill icon is saturated colour; a cooling one is rendered grey. Mean
-    HSV saturation separates them far more reliably than matching two templates.
-    """
-    patch = frame_bgr[y:y + h, x:x + w]
-    if patch.size == 0:
-        return None
-    sat = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)[:, :, 1]
-    return float(sat.mean()) < sat_threshold, float(sat.mean())
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
