@@ -7469,13 +7469,104 @@ def test_the_docs_do_not_name_the_removed_helpers():
         checked += 1
         text = open(path).read()
         for name in gone:
-            check(name not in text, f"{rel} does not still name {name}")
+            # A HISTORICAL NOTE MAY NAME IT. The point is that no doc presents
+            # these as the CURRENT mechanism - a paragraph explaining that they
+            # were removed has to say which, and forbidding that would forbid
+            # recording the change at all. So an occurrence is allowed when its
+            # surroundings say it is gone.
+            #
+            # This test failed for exactly that reason: the removal was written
+            # up in CLAUDE.md naming both functions, AFTER the suite had been
+            # run, and committed without re-running. The rule was wrong and the
+            # order was wrong.
+            for m in re.finditer(re.escape(name), text):
+                ctx = text[max(0, m.start() - 400):m.end() + 400].lower()
+                historical = any(w in ctx for w in
+                                 ("removed", "superseded", "deleted", "no longer"))
+                check(historical,
+                      f"{rel}: `{name}` is only named while explaining that it "
+                      f"was removed, never as the way to do something")
     check(checked >= 3, f"several docs were actually read ({checked})")
 
     # and the replacements it now points at DO exist
     for name in ("find_enemy_bars", "slot_cooling"):
         check(f"def {name}" in engine,
               f"the replacement {name} exists")
+
+
+
+def test_a_eudemon_reward_panel_ends_the_turn_gate():
+    """A WON boss sat on its reward screen for 2m37s and was filed as a stall.
+
+    Measured live, and reported as "the bot is stuck at the reward screen":
+
+        13:14:26  mission: unknown -> command_bar (step 2)
+        13:17:03  mission: battle 1 -> stalled {'rounds': 4, 'acted': 4}
+        13:17:03  eudemon: close the reward panel (X, never Share)
+
+    A Eudemon boss pays out on a TALL PORTRAIT panel closed by a RED X, not
+    the wide banner with a green check the farm and TP use. So `result_panel`,
+    `mission_success` and `cutscene_continue` all miss it, the turn gate waited
+    its full timeout for a command bar that could never come, and a win was
+    recorded as a stall before `close_out` banked it anyway.
+
+    **Third instance of one shape**, after the cutscene ending and the
+    Mission Success ending: a wait list that does not contain the state which
+    actually follows. When adding a new way for a fight to END, ask what the
+    gate is still waiting for.
+
+    The detector is a POSITIVE reading - `eudemon.reward_panel` returns None
+    whenever the garden LIST is on screen - so it cannot fire on the boss list,
+    and a story mission never draws this panel at all.
+    """
+    print("\na eudemon reward panel ends the turn gate")
+    import mission as mission_mod
+    import battle as battle_mod
+
+    real = os.path.join(ROOT, "ref/auto/eudemon/reward_panel.png")
+    check(os.path.exists(real), "the payout fixture is on disk")
+    if os.path.exists(real):
+        got = mission_mod._eudemon_reward(cv2.imread(real))
+        check(got is not None, f"the payout panel is detected ({got})")
+
+    # --- it must NOT fire on the garden list, or a lap would "win" ------
+    for n in (1, 2, 3):
+        g = cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{n}.png"))
+        if g is None:
+            continue
+        check(mission_mod._eudemon_reward(g) is None,
+              f"garden page {n} is not read as a payout")
+
+    # --- nor anywhere else in the reference set ------------------------
+    fires = []
+    for d in ("mission", "lobby", "battle", "tp", "ss", "renderer",
+              "unknown", "panels"):
+        for path in sorted(glob.glob(os.path.join(ROOT, f"ref/auto/{d}/*.png"))):
+            if os.path.basename(path) == "reward_panel.png":
+                continue
+            im = cv2.imread(path)
+            if im is not None and mission_mod._eudemon_reward(im):
+                fires.append(os.path.basename(path))
+    check(not fires, f"and on no other reference frame ({fires[:4]})")
+
+    # --- the gate waits on it, and calls it a WIN ----------------------
+    src = inspect.getsource(battle_mod.BattleRunner._run)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("eudemon_reward" in body, "the turn gate waits on it")
+    check(body.index("eudemon_reward") < body.index('"command_bar"'),
+          "and before falling through to command_bar")
+    seg = body.split('fired.name == "eudemon_reward"')
+    check(len(seg) > 1, "the outcome is handled by name")
+    if len(seg) > 1:
+        check("VICTORY" in seg[1][:300],
+              "and reported as a VICTORY, not a stall")
+
+    # --- the condition is actually built ------------------------------
+    cond_src = inspect.getsource(mission_mod.MissionRunner._build_conditions)
+    check("eudemon_reward" in cond_src,
+          "and _build_conditions provides it, or the gate can never see it")
 
 
 def main():
@@ -7568,7 +7659,8 @@ def main():
                test_a_full_gold_counter_is_not_a_solved_puzzle,
                test_a_declined_revive_ends_the_fight_as_a_defeat,
                test_the_digit_gate_admits_correct_reads_and_still_refuses_unknowns,
-               test_the_docs_do_not_name_the_removed_helpers):
+               test_the_docs_do_not_name_the_removed_helpers,
+               test_a_eudemon_reward_panel_ends_the_turn_gate):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

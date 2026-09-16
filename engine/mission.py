@@ -56,7 +56,7 @@ import numpy as np
 
 import battle as battle_mod
 import perceive
-from gate import Stopped, template as cond_template
+from gate import Condition, Stopped, template as cond_template
 from geometry import BattleGeometry
 
 
@@ -111,6 +111,20 @@ REQUIRED_TEMPLATES = {
         "frame classify as 'cutscene'. It must be RE-CUT before use."),
 }
 
+
+
+def _eudemon_reward(frame_bgr):
+    """The Eudemon payout panel's close X, or None. Never raises.
+
+    Imported lazily and defensively: `mission.py` is the generic runner and
+    must not hard-depend on the Eudemon module, and a detector that throws
+    would take down a gate poll rather than simply not firing.
+    """
+    try:
+        import eudemon as _eu
+        return _eu.reward_panel(frame_bgr)
+    except Exception:
+        return None
 
 class MissionOutcome:
     SUCCESS = "success"
@@ -197,6 +211,29 @@ class MissionRunner:
                 c[key] = cond_template(key, t[key])
         if "loading_text" in t:
             c["loading"] = cond_template("loading", t["loading_text"])
+        # A EUDEMON WIN IS AN ENDING THE GATE DID NOT KNOW.
+        #
+        # A boss pays out on a TALL PORTRAIT panel closed by a RED X, not the
+        # wide banner with a green check that the farm and TP use - so none of
+        # `result_panel`, `mission_success` or `cutscene_continue` matches it
+        # and the turn gate waited out its FULL timeout for a command bar that
+        # could never come. Measured live:
+        #
+        #     13:14:26  mission: unknown -> command_bar (step 2)
+        #     13:17:03  mission: battle 1 -> stalled {'rounds': 4}
+        #     13:17:03  eudemon: close the reward panel (X, never Share)
+        #
+        # 2m37s of a WON fight sitting on its reward screen, then filed as a
+        # stall. From outside that is simply "the bot is stuck on the reward
+        # screen", which is exactly how it was reported.
+        #
+        # `eudemon.reward_panel` is a positive reading - it returns None
+        # whenever the garden LIST is on screen - so this cannot fire on the
+        # boss list, and a story mission never draws this panel at all.
+        c["eudemon_reward"] = Condition(
+            "eudemon_reward",
+            lambda bgr, _gray: _eudemon_reward(bgr),
+            note="the Eudemon boss payout panel (red X, no green check)")
         # The lobby anchor. Needed to confirm a mission actually CLOSED OUT: the
         # run is not finished when the Mission Success panel appears, only once
         # its green check has been acknowledged and the game has returned here.

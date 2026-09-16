@@ -4660,6 +4660,44 @@ Same shape as the Eudemon reward panel: a wait list that does not contain the
 state which actually follows. When adding a new way for a fight to END, ask
 what the gate is still waiting for.
 
+### A EUDEMON WIN SAT ON ITS REWARD SCREEN FOR 2m37s — the third ending
+
+Reported as "the bot is stuck at the reward screen". It was not stuck; it was
+waiting for something that could never arrive:
+
+    13:14:26  mission: unknown -> command_bar (step 2)
+    13:17:03  mission: battle 1 -> stalled {'rounds': 4, 'acted': 4}
+    13:17:03  eudemon: close the reward panel (X, never Share)
+
+A Eudemon boss pays out on a TALL PORTRAIT panel closed by a RED X - this file
+already records that - so `result_panel`, `mission_success` and
+`cutscene_continue` all miss it. The turn gate therefore ran its full timeout
+on a WON fight, filed it as a stall, and only then did `close_out` see the
+panel and bank the boss. The reward was on screen the whole time, which is
+precisely what it looks like from outside.
+
+**This is the THIRD instance of one shape**, after the cutscene ending and the
+Mission Success ending, both recorded above with the same symptom. The rule
+worth carrying: **when adding a new way for a fight to END, ask what the gate
+is still waiting for.** A wait list that does not contain the state which
+actually follows reads as a stall every time.
+
+`_eudemon_reward` is a POSITIVE reading - `eudemon.reward_panel` returns None
+whenever the garden LIST is on screen - so it cannot fire on the boss list, and
+a story mission never draws this panel at all. Measured: detected at
+(2132, 242) on the payout fixture, 0 false fires across the reference set, and
+None on all three garden pages. The runner returns VICTORY and leaves the panel
+alone, because dismissing it is the lap's job and that dismissal is the
+measurement that banks the boss.
+
+**And a process note, because it cost a red suite.** The test for the previous
+cleanup was run, then CLAUDE.md was edited to describe that cleanup - naming
+the two removed functions - and the commit went out without re-running. The
+suite had been failing since. Two lessons: re-run after touching anything the
+tests assert about, and a rule that forbids NAMING a removed thing forbids
+recording its removal. The check now allows an occurrence whose surroundings
+say it is gone.
+
 ## EUDEMON GARDEN — the boss ladder, and a second rotation for the hunts
 
 Village -> `Hunting House` label -> submenu -> `Eudemon Garden`. A paged list
