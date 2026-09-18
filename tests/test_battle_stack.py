@@ -7569,8 +7569,129 @@ def test_a_eudemon_reward_panel_ends_the_turn_gate():
           "and _build_conditions provides it, or the gate can never see it")
 
 
+def test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it():
+    """A won boss left the runner WALKING ON ITS OWN REWARD SCREEN.
+
+    The turn gate was taught this panel and `classify` was not, so control came
+    back from a VICTORY, nothing in the priority order matched, and the frame
+    read "unknown". `looks_like_mission_scene` cannot veto it either, so the
+    runner traversed on top of the payout panel until the 25-repeat guard fired.
+
+    Measured live across five bosses - 8:09, 8:15, 8:14, 2:07 and ~10:00 - with
+    the "character" and the "enemy" at byte-identical coordinates every pass,
+    the static-object signature. The cost was not only the delay: it was ~25
+    BLIND CLICKS on a panel that carries a `Share` button, which this project
+    forbids pressing.
+
+    Sixth instance of the negative-definition shape, and the second time this
+    one panel was taught to one caller and not the other.
+
+    THE TEST CALLS `run()`. Two UnboundLocalErrors have shipped in this project
+    behind passing source-level assertions (`arrow`, `play`), and this file's
+    own rule is that a test which reads code cannot catch code that does not
+    run.
+    """
+    print("\nthe runner stops on a eudemon payout instead of walking on it")
+    import mission as mission_mod
+
+    real = os.path.join(ROOT, "ref/auto/eudemon/reward_panel.png")
+    if not os.path.exists(real):
+        check(False, "the payout fixture is on disk")
+        return
+    frame = cv2.imread(real)
+
+    # --- classify must NAME it, not fall through to "unknown" ----------
+    r = mission_mod.MissionRunner.__new__(mission_mod.MissionRunner)
+    r.conditions = {"eudemon_reward": mission_mod.Condition(
+        "eudemon_reward", lambda b, _g: mission_mod._eudemon_reward(b))}
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    state, _payload = mission_mod.MissionRunner.classify(r, frame, gray)
+    check(state == "eudemon_reward",
+          f"the payout panel classifies as itself, not 'unknown' ({state})")
+
+    # --- and it is asked LAST, so the farm does not pay for it ---------
+    csrc = inspect.getsource(mission_mod.MissionRunner.classify)
+    body = csrc.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else csrc
+    order_line = [l for l in body.splitlines() if "order = (" in l]
+    check(bool(order_line), "classify still declares an explicit order")
+    tail = body[body.index("order = ("):]
+    tail = tail[:tail.index(")")]
+    check(tail.rstrip().rstrip(",").endswith('"eudemon_reward"'),
+          "and eudemon_reward is asked LAST - it is the expensive check")
+
+    # --- EXECUTE run() on that frame: it must stop, not walk -----------
+    class _Cap:
+        def frame(self, gray=False):
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if gray else frame
+
+    walked = []
+
+    class _Actor:
+        def click_pixel(self, x, y, why=""):
+            walked.append((x, y, why))
+
+        click = click_pixel
+
+    class _Log:
+        def info(self, *a, **k):
+            pass
+
+        warning = error = debug = info
+
+    inst = mission_mod.MissionRunner.__new__(mission_mod.MissionRunner)
+    inst.conditions = r.conditions
+    inst.capture = _Cap()
+    inst.actor = _Actor()
+    inst.log = _Log()
+    inst.controls = None
+    inst.grade = "A"
+    inst.max_steps = 40
+    inst.cfg = {}
+    inst.stats = {"battles": 0, "victories": 0, "aborted": 0,
+                  "cutscenes": 0, "steps": 0, "closed_out": None}
+
+    try:
+        out, stats = mission_mod.MissionRunner.run(inst)
+        ran = True
+    except Exception as e:                      # noqa: BLE001 - reporting it IS the test
+        out, stats, ran = None, None, False
+        check(False, f"run() raised on a payout frame: {type(e).__name__}: {e}")
+
+    if ran:
+        check(stats["steps"] <= 2,
+              f"it stops on the FIRST look, not after 25 repeats "
+              f"(steps={stats['steps']})")
+        check(not walked,
+              f"and never clicks the panel - Share lives on it ({walked[:3]})")
+
+    # --- it must NOT dismiss the panel: that is the lap's measurement --
+    rsrc = inspect.getsource(mission_mod.MissionRunner.run)
+    seg = rsrc.split('state == "eudemon_reward"')
+    check(len(seg) > 1, "run() handles the payout state by name")
+    if len(seg) > 1:
+        # SCOPE THIS TO THE HANDLER, AND STRIP COMMENTS. A first version read
+        # 1800 raw characters past the branch, which runs into the NEXT
+        # handlers - and the comment explaining this fix says "close_out"
+        # itself. It failed on correct code, which this project's own rule
+        # says to fix rather than live with. The invariant is about the
+        # handler's CODE, so take only as far as its return and drop prose.
+        # STRIP COMMENTS FIRST, THEN LOOK. Slicing to the first "return" before
+        # stripping found the word inside the comment ("play_combat()'s return")
+        # and cut the handler off above its own code - a second way for this
+        # assertion to fail on correct code. Prose is not code; drop it first.
+        code = "\n".join(ln.split("#")[0] for ln in seg[1].splitlines())
+        idx = code.find("return")
+        check(idx != -1, "and returns rather than falling through")
+        body = code[:idx] if idx != -1 else code
+        check("close_out" not in body and "reward_panel(" not in body,
+              "and does not dismiss it - close_out is what banks the boss")
+
+
+
 def main():
-    for fn in (test_geometry_classification, test_two_geometries,
+    for fn in (test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it,
+               test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
                test_skill_rotation, test_command_bar_layout,
                test_preflight, test_find_all_suppression,
