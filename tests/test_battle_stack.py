@@ -7689,8 +7689,89 @@ def test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it():
 
 
 
+def test_the_attempts_counter_reads_a_zero():
+    """`x0` means no tries left - and the reader could NEVER say so.
+
+    The `count == 0` branch has always existed in `hunt`; it had simply never
+    fired, because `exemplars()` returned an EMPTY dict (the `count_digits`
+    directory was created and never filled), so `count_at` bailed on its third
+    line for every row of every page. Every live log read `SSxNone`, `CxNone`.
+
+    Two measured faults behind it, and the module note's "the digit merges with
+    the panel border" was the symptom rather than the cause:
+
+      * the digits are drawn ACROSS a dark vertical bar at x~1640, so the old
+        (1560, 1660) window returned one blob of the FULL ROI height - 68x107
+        against a digit's true 38..54 x 41..49;
+      * `g < 90` selects that bar too. Only SATURATION separates them: over the
+        dark pixels of one cell the ink sits at median S=0 and the bar at
+        S=140, so the mask is black AND unsaturated and the ink survives even
+        where it crosses the bar - which is where a `0` is drawn.
+
+    The `0` exemplars are harvested from a REAL exhausted row. Two bosses were
+    farmed to zero in one session and the garden was captured while they read
+    `x0`; inventing that crop is the eyeball mistake this project keeps paying
+    for.
+
+    A FALSE ZERO IS THE DANGEROUS DIRECTION - it would skip a boss that still
+    has attempts, for a whole day. A refusal costs one wasted Battle press,
+    which is what the authority already is. So this asserts no frame yields a
+    spurious 0, and tolerates None.
+    """
+    print("\nthe attempts counter reads a zero")
+    import eudemon as eu
+
+    ex = eu.exemplars()
+    check(bool(ex), f"the counter exemplar set is not empty ({sorted(ex)})")
+    check("0" in ex, "and it contains a 0, harvested from a real exhausted row")
+
+    # --- leave-one-out: a new exemplar must not corrupt its neighbours ---
+    flat = [(d, e) for d, es in ex.items() for e in es]
+    wrong = []
+    for i, (d, q) in enumerate(flat):
+        scored = sorted((float(np.abs(q - e).mean()), d2)
+                        for j, (d2, e) in enumerate(flat) if j != i)
+        if scored and scored[0][1] != d:
+            wrong.append((d, scored[0][1]))
+    check(not wrong, f"every exemplar still classifies as itself ({wrong})")
+
+    # --- the exhausted fixture must read 0 on its exhausted rows ---------
+    ex_path = os.path.join(ROOT, "ref/auto/eudemon/exhausted_counts.png")
+    if os.path.exists(ex_path):
+        f = cv2.imread(ex_path)
+        got = [eu.count_at(f, y) for y in eu.plates(f)]
+        check(got[:2] == [0, 0],
+              f"the two farmed-out bosses read x0 ({got})")
+        check(got[2] == 1, f"and the row beside them still reads 1 ({got})")
+    else:
+        check(False, "the exhausted-row fixture is on disk")
+
+    # --- and NO frame may invent a zero ---------------------------------
+    false_zeros = []
+    for rel in ("ref/auto/eudemon/page1.png", "ref/auto/eudemon/page2.png",
+                "ref/auto/eudemon/page3.png"):
+        path = os.path.join(ROOT, rel)
+        f = cv2.imread(path)
+        if f is None:
+            continue
+        for y in eu.plates(f):
+            if eu.count_at(f, y) == 0:
+                false_zeros.append((os.path.basename(rel), y))
+    check(not false_zeros,
+          f"no row on a healthy page reads a spurious 0 ({false_zeros})")
+
+    # --- page 1's four SS rows read 1, which is the known truth ---------
+    p1 = cv2.imread(os.path.join(ROOT, "ref/auto/eudemon/page1.png"))
+    if p1 is not None:
+        got = [eu.count_at(p1, y) for y in eu.plates(p1)]
+        check(got[:4] == [1, 1, 1, 1],
+              f"the four SS rows read x1 ({got})")
+
+
+
 def main():
-    for fn in (test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it,
+    for fn in (test_the_attempts_counter_reads_a_zero,
+               test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it,
                test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
                test_skill_rotation, test_command_bar_layout,

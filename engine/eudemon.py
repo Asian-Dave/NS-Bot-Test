@@ -90,8 +90,28 @@ ROW_Y = (300, 453, 611, 769, 926)
 ROW_H = 67
 PLATE_X = (1033, 1376)
 BADGE_X = (1376, 1460)
-COUNT_X = (1560, 1660)
-COUNT_H = (70, 105)
+# THE COUNTER WINDOW IS NARROW ON PURPOSE, and both edges were measured.
+#
+# The old window (1560, 1660) with a plain `g < 90` mask could NEVER read a
+# digit, and the module note's "the count digit merges with the panel border"
+# was the symptom rather than the cause. Two things were wrong:
+#
+#   * the digits are drawn ACROSS a dark vertical bar at x~1640, so a window
+#     reaching it hands back one blob of the FULL ROI height (measured 68x107
+#     against a digit's true 38..54 x 41..49). 1638 is the last edge at which
+#     `0` and `1` still isolate cleanly - at 1642 the bar merges again.
+#   * `g < 90` also selects that bar, because it is dark. Only SATURATION
+#     separates them: measured over the dark pixels of one cell, the ink sits
+#     at median S=0 (pure black) and the bar at median S=140. So the mask is
+#     black AND unsaturated, and the ink survives even where it overlaps the
+#     bar - which is exactly where a `0` and a `3` are drawn.
+#
+# 1578 is the left edge: it clears the `x` glyph (which ends at 1571) without
+# reaching the digit (which starts at 1584).
+COUNT_X = (1578, 1638)
+COUNT_MAX_V = 40        # ink is near-black; measured darkest px BGR (2,0,0)
+COUNT_MAX_S = 60        # ink S=0, the maroon bar S=140 - a 2.3x gap
+COUNT_H = (30, 60)      # measured digits: 41..49 tall
 
 PAGE_PREV = (1215, 1095)
 PAGE_NEXT = (1400, 1095)
@@ -168,8 +188,12 @@ def count_at(frame, y):
     x0, x1 = max(0, COUNT_X[0]), min(w, COUNT_X[1])
     if y1 - y0 < 8 or x1 - x0 < 8:
         return None
-    g = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
-    m = (g < 90).astype(np.uint8) * 255
+    cell = frame[y0:y1, x0:x1]
+    g = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+    sat = cv2.cvtColor(cell, cv2.COLOR_BGR2HSV)[:, :, 1]
+    # BLACK **AND** UNSATURATED. Dark alone catches the maroon border bar the
+    # digits are drawn across - see the note beside COUNT_X.
+    m = ((g < COUNT_MAX_V) & (sat < COUNT_MAX_S)).astype(np.uint8) * 255
     n, lab, st, _ce = cv2.connectedComponentsWithStats(m)
     ex = exemplars()
     if not ex:
@@ -177,7 +201,7 @@ def count_at(frame, y):
     digits = []
     for i in range(1, n):
         x, yy, bw, bh, a = st[i]
-        if a < 400 or not (COUNT_H[0] <= bh <= COUNT_H[1]) or bw > 90:
+        if a < 300 or not (COUNT_H[0] <= bh <= COUNT_H[1]) or bw > 90:
             continue
         digits.append((int(x), (lab[yy:yy + bh, x:x + bw] == i).astype(np.uint8) * 255))
     if not digits:
