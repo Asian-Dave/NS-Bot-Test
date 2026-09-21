@@ -2519,9 +2519,15 @@ def test_no_viewport_lets_the_panel_cover_the_game():
     import dock as dock_mod
 
     game_w, panel_w = 960, dock_mod.WIDTH
+    # WHERE THE GAME SITS DECIDES THE FLOOR. Centred, the page puts it at
+    # (W-960)/2 and ignores the panel, so W >= 1720. Flush-left it starts at
+    # 0 and only has to end before the panel, so W >= 1340. Deriving it from
+    # the mode rather than hardcoding is the point: an offered size that
+    # breaks the bot is worse than not offering it, and the answer differs.
+    flush = getattr(app_mod, "FLUSH_LEFT", False)
     for vp in app_mod.VIEWPORTS:
         w = vp["w"]
-        left = (w - game_w) / 2.0          # the page centres it
+        left = 0.0 if flush else (w - game_w) / 2.0
         right = left + game_w
         panel_left = w - panel_w
         check(right <= panel_left,
@@ -2529,9 +2535,20 @@ def test_no_viewport_lets_the_panel_cover_the_game():
               f"{panel_left:.0f} - clear")
         check(w >= app_mod.MIN_VIEWPORT_W,
               f"{vp['label']} is at or above the {app_mod.MIN_VIEWPORT_W} floor")
-    check(app_mod.MIN_VIEWPORT_W >= 2 * (game_w / 2 + panel_w),
-          f"the floor itself is derived, not guessed "
-          f"({2 * (game_w / 2 + panel_w):.0f})")
+    derived = (game_w + panel_w) if flush else 2 * (game_w / 2 + panel_w)
+    check(app_mod.MIN_VIEWPORT_W >= derived,
+          f"the floor itself is derived, not guessed ({derived:.0f}, "
+          f"flush_left={flush})")
+
+    # FLUSH-LEFT MOVES THE CANVAS 760 CAPTURED PX, and 47 hardcoded
+    # coordinates across 13 modules were measured with it elsewhere. Only
+    # `Capture.normalise` makes that safe, by translating the frame back to
+    # the reference layout. Shipping one without the other would miss every
+    # constant at once, each module blaming itself.
+    if flush:
+        from capture import Capture
+        check(Capture.normalise,
+              "flush-left requires frame normalisation, or 47 constants miss")
 
     # AND AT LEAST ONE SIZE MUST SHOW THE WHOLE GAME.
     #

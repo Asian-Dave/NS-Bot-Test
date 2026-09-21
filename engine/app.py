@@ -146,11 +146,29 @@ GRADES = ["auto", "S", "A", "B", "C"]
 #
 # Scrolling stays LOCKED either way: `__nsbotScrollLock` rides with focus
 # mode and is independent of the viewport.
-MIN_VIEWPORT_W = 1720
+# FLUSH LEFT: pull the game to x=0 and drop the dead wallpaper strip.
+#
+# With the game CENTRED the floor is 1720, because the page centres it in the
+# full viewport while ignoring the panel:  (W+960)/2 <= W-380  ->  W >= 1720.
+# Flush-left the arithmetic is simply  960 <= W-380  ->  W >= 1340, so 380 px
+# of wasted width disappears.
+#
+# This moves the canvas 760 captured px, which used to be unthinkable: 47
+# hardcoded coordinates across 13 modules were measured with it elsewhere and
+# only three modules correct for drift. `Capture.normalise` is what makes it
+# safe - the frame is translated back to the reference layout, so every
+# constant still lands and the inverse is applied once at the click door. Do
+# not set this True with `Capture.normalise` False.
+FLUSH_LEFT = True
+MIN_VIEWPORT_W = 1340 if FLUSH_LEFT else 1720
 VIEWPORTS = [
     {"key": "1720x720@2", "label": "1720x720", "w": 1720, "h": 720, "dpr": 2},
     {"key": "1720x900@2", "label": "1720x900 (whole game)",
      "w": 1720, "h": 900, "dpr": 2},
+] + ([
+    {"key": "1340x900@2", "label": "1340x900 (no dead strip)",
+     "w": 1340, "h": 900, "dpr": 2},
+] if FLUSH_LEFT else []) + [
     {"key": "1920x900@2", "label": "1920x900", "w": 1920, "h": 900, "dpr": 2},
     {"key": "2200x980@2", "label": "2200x980", "w": 2200, "h": 980, "dpr": 2},
     {"key": "2560x1080@2", "label": "2560x1080", "w": 2560, "h": 1080, "dpr": 2},
@@ -1709,10 +1727,26 @@ class Runner:
             # This cannot cause the jumping that re-APPLYING focus used to,
             # because `align` is a no-op when the game is already in place - it
             # returns "aligned" and touches nothing.
+            # ASSERT FLUSH-LEFT BEFORE ALIGNING. It is a page-side flag, and a
+            # reload re-injects the bootstrap with it back at its default - the
+            # standing rule that any cached belief about page state dies with a
+            # navigation. Setting it is idempotent and `align` does the work,
+            # so re-asserting each cycle costs one evaluate.
+            # ASSERT IT EITHER WAY, never "skip when off". Removing the code
+            # that SETS a margin does not clear a margin already applied - the
+            # trap the first attempt at this left in the DOM, and one I walked
+            # straight back into: with the flag off the call was skipped, so a
+            # stale inline -380px survived a restart and the game stayed
+            # shifted (and clipped) with nothing left to explain it.
+            try:
+                self.dock.flush_left(FLUSH_LEFT)
+            except Exception:
+                pass
             try:
                 r = self.dock.align()
-                if r == "realigned":
-                    self.log.info("focus: the game had drifted; re-aligned")
+                if isinstance(r, str) and r.startswith("realigned"):
+                    self.log.info("focus: the game had drifted; re-aligned (%s)",
+                                  r.split(":")[-1])
                 self.focus_aligned = True
             except Exception:
                 pass

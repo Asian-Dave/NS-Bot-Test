@@ -381,14 +381,110 @@ _BOOTSTRAP = r"""
       st.textContent = "#game-container{top:0 !important;}";
       document.documentElement.appendChild(st);
     }
-    const r = g.getBoundingClientRect();
-    if (Math.abs(r.y) <= 1) return "aligned";
-    if (!g.hasAttribute("data-nsbot-mt")) {
-      g.setAttribute("data-nsbot-mt", g.style.marginTop || "");
+    // FLUSH LEFT, AND EACH AXIS CONVERGES ON ITS OWN MEASUREMENT.
+    //
+    // This was tried once and reverted, and the recorded cause was not the
+    // idea but the arithmetic: both corrections were computed from ONE rect,
+    // and setting marginLeft REFLOWS the page, so the `r.y` used a line later
+    // was already stale. Each pass over-corrected, the margins compounded -
+    // marginTop reached 177px - and the game was pushed down and clipped.
+    //
+    // So X is applied first, the rect is RE-MEASURED, and only then is Y
+    // considered. Measured on the live page today, the reflow does not in
+    // fact move Y at all (x 380 -> 0, y 0 -> 0), because
+    // `#game-container{top:0 !important}` - which did not exist at the time of
+    // that attempt - pins it. The re-measure is kept regardless: it costs one
+    // rect read and it is the difference between "did not move this time" and
+    // "cannot move".
+    let r = g.getBoundingClientRect();
+    let moved = null;
+    if (window.__nsbotFlushLeft && Math.abs(r.x) > 1) {
+      const host = window.__nsbotFlushHost();
+      if (host) {
+        if (!host.hasAttribute("data-nsbot-ml")) {
+          host.setAttribute("data-nsbot-ml", host.style.marginLeft || "");
+        }
+        // CONVERGE, DO NOT COMPUTE ONCE. The host is centred by the page, so
+        // marginLeft does not map 1:1 onto its position - setting it replaces
+        // whatever was centring it and the box JUMPS. Measured: one pass from
+        // x=380 overshot to -360, and a second landed on 0. Two passes is the
+        // normal case; three is the bound.
+        for (let i = 0; i < 3; i++) {
+          const x = g.getBoundingClientRect().x;
+          if (Math.abs(x) <= 1) break;
+          const cur = parseFloat(getComputedStyle(host).marginLeft) || 0;
+          host.style.marginLeft = Math.round(cur - x) + "px";
+        }
+        moved = "x";
+      }
+      r = g.getBoundingClientRect();     // the reflow invalidated the old one
     }
-    const cur = parseFloat(getComputedStyle(g).marginTop) || 0;
-    g.style.marginTop = Math.round(cur - r.y) + "px";
-    return "realigned";
+    if (Math.abs(r.y) > 1) {
+      if (!g.hasAttribute("data-nsbot-mt")) {
+        g.setAttribute("data-nsbot-mt", g.style.marginTop || "");
+      }
+      const cur = parseFloat(getComputedStyle(g).marginTop) || 0;
+      g.style.marginTop = Math.round(cur - r.y) + "px";
+      moved = moved ? "xy" : "y";
+    }
+    return moved ? ("realigned:" + moved) : "aligned";
+  };
+
+  // TURNING IT OFF MUST UNDO IT. Removing the code that SETS a margin does
+  // not clear a margin already applied - that is the second trap the reverted
+  // attempt hit, where a stale inline offset persisted in the DOM and the
+  // game stayed broken until it was explicitly cleared.
+  // SHIFT THE OUTERMOST CENTRED BOX, NOT THE GAME ITSELF.
+  //
+  // Moving the iframe is what broke this the first time AND the second. The
+  // iframe sits inside `div.iframe-clipper`, which is `overflow:hidden` and
+  // does NOT move with it - so a marginLeft on the iframe slides the game out
+  // from under its own clipper and the left 380 CSS px are simply cut off.
+  // Measured, and it is not subtle once you score for it: `lobby_logo` went
+  // 1.000 -> 0.260 and `mission_room_entry` 1.000 -> 0.651, while
+  // `lobby_rail_fortune` stayed 1.000 because it lives on the RIGHT of the
+  // game and survived the crop. A half-visible game that still matches some
+  // anchors is the worst possible failure - it looks like a perception bug.
+  //
+  // The centring happens far above: the chain is
+  //   iframe.game-iframe -> div.iframe-clipper(hidden) -> #game-container
+  //   -> #panels-wrapper -> main.main-content -> div.site-wrapper
+  //   -> #content-container (full width)
+  // so the thing to move is the outermost box NARROWER than the page.
+  window.__nsbotFlushHost = () => {
+    const g = gameEl();
+    if (!g) return null;
+    const vw = document.documentElement.clientWidth;
+    let host = g, el = g.parentElement;
+    while (el && el !== document.body) {
+      if (el.getBoundingClientRect().width < vw - 1) host = el;
+      el = el.parentElement;
+    }
+    return host === g ? null : host;
+  };
+
+  // TURNING IT OFF MUST UNDO IT. Removing the code that SETS a margin does
+  // not clear a margin already applied - the trap the first attempt left in
+  // the DOM, and one walked into again here: with the flag merely skipped
+  // rather than asserted, a stale -380px survived a restart and the game
+  // stayed shifted and clipped with nothing left to explain it. So the
+  // caller asserts this every cycle with a boolean, never by not calling.
+  window.__nsbotSetFlushLeft = (on) => {
+    window.__nsbotFlushLeft = !!on;
+    const g = gameEl();
+    if (!on) {
+      for (const el of document.querySelectorAll("[data-nsbot-ml]")) {
+        el.style.marginLeft = el.getAttribute("data-nsbot-ml");
+        el.removeAttribute("data-nsbot-ml");
+      }
+      if (g) g.style.marginLeft = "";     // belt and braces: an older build
+                                          // put the margin on the iframe
+    }
+    if (window.__nsbotAlign) window.__nsbotAlign();
+    const r = g ? g.getBoundingClientRect() : null;
+    return JSON.stringify({flushLeft: window.__nsbotFlushLeft,
+                           x: r ? Math.round(r.x) : null,
+                           y: r ? Math.round(r.y) : null});
   };
 
   // Renders by UPDATING values, never by rewriting the panel.
@@ -901,9 +997,25 @@ class Dock:
             "  ? 'ok' : 'empty')")
 
     def align(self):
-        """Re-assert top alignment once the layout has settled."""
+        """Re-assert top (and, when asked, left) alignment once settled."""
         return self.cdp.evaluate(
             "(window.__nsbotAlign ? window.__nsbotAlign() : 'no-panel')")
+
+    def flush_left(self, on=True):
+        """Pull the game to x=0, removing the dead strip beside it.
+
+        ASK THE PAGE rather than remembering, for the same reason focus mode
+        does: a reload re-injects the bootstrap on the new document with the
+        flag back at its default, and a Python-side belief would then be
+        wrong without anything raising. `align` re-asserts it every cycle.
+
+        Turning it OFF restores the margin it saved - removing the code that
+        sets a margin does not clear one already applied, which is the trap
+        the first attempt at this left behind in the DOM.
+        """
+        return self.cdp.evaluate(
+            "(window.__nsbotSetFlushLeft ? window.__nsbotSetFlushLeft(%s)"
+            " : 'no-panel')" % ("true" if on else "false"))
 
     def scroll_lock(self, on=True):
         """Remove the page scroll (or restore it). Renderer-independent.
