@@ -2512,6 +2512,28 @@ def test_no_viewport_lets_the_panel_cover_the_game():
           f"the floor itself is derived, not guessed "
           f"({2 * (game_w / 2 + panel_w):.0f})")
 
+    # AND AT LEAST ONE SIZE MUST SHOW THE WHOLE GAME.
+    #
+    # The converse of the rule above: an offered size that breaks the bot is
+    # worse than not offering it, but offering ONLY sizes that hide part of
+    # the game is its own fault. The game is 839 CSS tall; at the historical
+    # 720 the bottom 119 px are below the fold, and the SS hints panel's green
+    # button lives there - the only exit from the Balance Control and Sage
+    # Sealed Boxes rules screens, measured at y=1404..1410 against a 1440
+    # frame. Reported from Windows as the balance minigame being unreachable.
+    game_h = 839
+    tall = [v for v in app_mod.VIEWPORTS if v["h"] >= game_h]
+    check(bool(tall),
+          f"some offered viewport is >= {game_h} CSS tall, so the whole game "
+          f"(and the SS hints button) can be seen ({[v['label'] for v in tall]})")
+    # ...and one of them must keep the reference WIDTH, because width
+    # re-centres the game and moves every absolute constant, while height only
+    # reveals more of a top-aligned one.
+    same_w = [v for v in tall if v["w"] == app_mod.VIEWPORT[0]]
+    check(bool(same_w),
+          f"and one of those keeps the reference width {app_mod.VIEWPORT[0]}, "
+          f"so no x constant moves ({[v['label'] for v in same_w]})")
+
 
 def test_panel_recovers_its_content_after_a_reload():
     """A reload leaves the panel a bare skeleton; it must be re-rendered.
@@ -7769,8 +7791,65 @@ def test_the_attempts_counter_reads_a_zero():
 
 
 
+def test_a_relog_keeps_the_operators_window_size():
+    """A chosen window size was reverted within a second of being chosen.
+
+    Applying a size RELOADS, and `relog` re-pinned the hardcoded `VIEWPORT`.
+    So the handler pinned 900, `relog` pinned 720 straight back, and the
+    captured frame stayed 3440x1440 - measured live. Every later relog did it
+    again, and relog is also the cure for an unreadable screen, a post-defeat
+    recovery and a wake from sleep.
+
+    It is not cosmetic. At 720 the bottom 119 CSS px of the 839-tall game are
+    below the fold, and that band holds the SS hints panel's green button -
+    the only exit from the Balance Control and Sage Sealed Boxes rules
+    screens. Reported from Windows as the balance minigame being unreachable.
+
+    Same shape as the reward panel: a rule taught to one caller, not the
+    other. So this asserts there is ONE place that answers the question, and
+    that neither caller re-pins the constant behind it.
+    """
+    print("\na relog keeps the operator's window size")
+    import app as app_mod
+
+    check(hasattr(app_mod, "chosen_viewport"),
+          "there is a single place that answers 'which viewport'")
+
+    # --- neither site may pin the bare constant -------------------------
+    for name, fn in (("relog", app_mod.Runner.relog),
+                     ("attach", app_mod.attach)):
+        src = inspect.getsource(fn)
+        body = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+        pins = [ln for ln in body.splitlines() if "pin_viewport" in ln]
+        check(bool(pins), f"{name} pins the viewport")
+        for ln in pins:
+            check("chosen_viewport" in ln,
+                  f"{name} pins the OPERATOR's size, not the constant "
+                  f"({ln.strip()[:60]})")
+
+    # --- and it really returns the stored choice ------------------------
+    import json as _json
+    import tempfile
+    real = app_mod._read_json
+    try:
+        tall = next((v for v in app_mod.VIEWPORTS if v["h"] >= 839), None)
+        check(tall is not None, "a whole-game size is offered at all")
+        if tall:
+            app_mod._read_json = lambda rel, default: {"key": tall["key"]}
+            got = app_mod.chosen_viewport()
+            check(got == (tall["w"], tall["h"], tall["dpr"]),
+                  f"a stored choice is honoured ({got})")
+        app_mod._read_json = lambda rel, default: {}
+        check(app_mod.chosen_viewport() == app_mod.VIEWPORT,
+              "and no stored choice falls back to the reference")
+    finally:
+        app_mod._read_json = real
+
+
+
 def main():
-    for fn in (test_the_attempts_counter_reads_a_zero,
+    for fn in (test_a_relog_keeps_the_operators_window_size,
+               test_the_attempts_counter_reads_a_zero,
                test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it,
                test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,

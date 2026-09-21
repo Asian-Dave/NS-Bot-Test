@@ -116,9 +116,41 @@ GRADES = ["auto", "S", "A", "B", "C"]
 # Flush-lefting the game would drop the floor to 1340, and that was tried and
 # REVERTED - see the note in dock.py's focus(). Do not re-add a narrower option
 # here without that working first.
+# HEIGHT IS THE OTHER HALF, and it is a CORRECTNESS setting, not comfort.
+#
+# The game is 960x**839** CSS. At the historical 720 the bottom **119 CSS px
+# (238 captured)** are simply below the fold, and several things live down
+# there: the NPC/friend rail, the recruit `+` row, and - the reason this was
+# added - the SS hints panel's green button, which is the ONLY exit from the
+# Balance Control and Sage Sealed Boxes rules screens. It was measured at
+# y=1404..1410 against a frame that ends at 1440, i.e. a 30..36 px sliver, and
+# `ss.hints_button` only works there by clicking near the blob's TOP because
+# its centre is off screen. Reported from Windows as the balance minigame
+# being unreachable - a thinner sliver, or none at all, and the mission is
+# abandoned on a screen whose only control cannot be pressed.
+#
+# 1720x900 keeps the WIDTH so nothing moves sideways. That distinction is the
+# whole point, and it is measured: width RE-CENTRES the game (x went
+# 380 -> 240 -> 480 -> 160 across 1720/1440/1920/1280), which shifts every
+# absolute constant, while height only reveals more of a top-aligned game. So
+# at the same width every x stays valid, every y stays valid, and the clipped
+# band becomes visible - no template, no geometry and no threshold changes.
+#
+# This is NOT the prohibited resize. `ruffle-player` is untouched; this is
+# `Emulation.setDeviceMetricsOverride`, which the top of CLAUDE.md names as
+# the correct mechanism precisely because it does not desync click -> stage
+# mapping. The recruit rail's bounded player-grow stays what it is - that one
+# is needed because the `+` row is NOT DRAWN at any viewport ("the clip is not
+# the viewport", measured at 800/860/900), which is a different fault from
+# content that is drawn and merely below the fold.
+#
+# Scrolling stays LOCKED either way: `__nsbotScrollLock` rides with focus
+# mode and is independent of the viewport.
 MIN_VIEWPORT_W = 1720
 VIEWPORTS = [
     {"key": "1720x720@2", "label": "1720x720", "w": 1720, "h": 720, "dpr": 2},
+    {"key": "1720x900@2", "label": "1720x900 (whole game)",
+     "w": 1720, "h": 900, "dpr": 2},
     {"key": "1920x900@2", "label": "1920x900", "w": 1920, "h": 900, "dpr": 2},
     {"key": "2200x980@2", "label": "2200x980", "w": 2200, "h": 980, "dpr": 2},
     {"key": "2560x1080@2", "label": "2560x1080", "w": 2560, "h": 1080, "dpr": 2},
@@ -238,6 +270,33 @@ class Disconnected(Exception):
     """The CDP socket died — usually a navigation that tore down the target."""
 
 
+def chosen_viewport():
+    """(w, h, dpr) the OPERATOR picked, or the reference if they picked none.
+
+    THERE MUST BE ONE ANSWER TO THIS, and for a while there were two. `attach`
+    read the stored choice; `relog` re-pinned the hardcoded `VIEWPORT`. Since
+    applying a window size RELOADS - and `relog` is also the cure for an
+    unreadable screen, a post-defeat recovery and a wake from sleep - the
+    operator's choice was overwritten within a second of being made, and again
+    every time anything relogged. Measured: the panel stored `1720x900@2`, the
+    handler pinned 900, `relog` immediately pinned 720 back, and the captured
+    frame stayed 3440x1440.
+
+    That directly contradicts `PROGRESS_FILES`' own note a few lines below,
+    which lists the window size among the preferences that must SURVIVE - and
+    it matters beyond tidiness: at 720 the bottom 119 CSS px of the 839-tall
+    game are below the fold, which is where the SS hints panel's green button
+    lives. That button is the only exit from the Balance Control and Sage
+    Sealed Boxes rules screens.
+
+    Same shape as the reward panel and the character finder: a rule taught to
+    one caller and not the other. One place to ask, so they cannot diverge.
+    """
+    vp = next((v for v in VIEWPORTS
+               if v["key"] == _read_json(VIEWPORT_PATH, {}).get("key")), None)
+    return (vp["w"], vp["h"], vp["dpr"]) if vp else VIEWPORT
+
+
 def attach(port, log, tpls=None, install_dock=True):
     """Build a fresh CDP connection and everything that hangs off it.
 
@@ -250,10 +309,7 @@ def attach(port, log, tpls=None, install_dock=True):
     c.call("Page.enable")
     # Honour the operator's chosen window, so a restart does not silently snap
     # back to the reference size after they picked another.
-    _vp = next((v for v in VIEWPORTS
-                if v["key"] == _read_json(VIEWPORT_PATH, {}).get("key")), None)
-    browser.pin_viewport(c, _vp["w"], _vp["h"], _vp["dpr"]) if _vp else \
-        browser.pin_viewport(c, *VIEWPORT)
+    browser.pin_viewport(c, *chosen_viewport())
     cap = Capture(c)
     actor = Actor(c, cap, log, dry_run=False)
     dk = dock_mod.Dock(c, log)
@@ -940,7 +996,9 @@ class Runner:
         """
         self.cdp.call("Page.reload")
         time.sleep(4.0)
-        browser.pin_viewport(self.cdp, *VIEWPORT)
+        # THE OPERATOR'S SIZE, NOT THE REFERENCE. Pinning `VIEWPORT` here threw
+        # away a window size the moment it was chosen - see `chosen_viewport`.
+        browser.pin_viewport(self.cdp, *chosen_viewport())
         # The reload re-injected the panel with no state and dropped focus.
         # Restore both here rather than leaving it to the next cycle, which a
         # running task may not reach for minutes.
