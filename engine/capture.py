@@ -79,8 +79,13 @@ class Capture:
         # it here would shift it twice. See the note beside `norm_shift`.
         if clip is None and region is None:
             try:
-                dx, dy = self.norm_shift()
+                dx, dy = self.measure_shift()
                 img = self._translate(img, dx, dy)
+                # RECORD WHAT WAS APPLIED. Everything that converts a
+                # coordinate back - clicks, clips, the no-click zone - reads
+                # this rather than re-measuring, so the round trip closes
+                # even while the layout is in flux. See `norm_shift`.
+                self._applied_shift = (dx, dy)
             except Exception:
                 pass                       # an unmeasurable game must not
                                            # break capture; leave it be
@@ -232,15 +237,45 @@ class Capture:
     def norm_shift(self, ttl=1.0):
         """(dx, dy) a captured frame must move so the game sits at reference.
 
-        (0, 0) when normalisation is off, or when the game cannot be located -
-        a missing measurement must never move a click, the same rule
-        `game_offset` already follows.
+        THE INVERSE MUST MATCH THE FORWARD TRANSFORM, NOT A LATER READING.
+        This returns the shift `frame` ACTUALLY APPLIED, because a coordinate
+        being converted back was derived from a frame that was translated by
+        that amount - re-measuring can disagree with it, and then the round
+        trip does not close.
+
+        Measured, and it wedged a run: during a relog the game is briefly
+        unmeasurable, a fresh read returned (0, 0), and a reference-space
+        point was compared against a real-space no-click zone -
+
+            REFUSING click (2555,248) close Eudemon Garden - it lands on the
+            control dock (1920, 0, 760, 1800)
+
+        - though 2555 - 760 = 1795 is well clear of it. Pinning the applied
+        value makes that impossible by construction rather than by hoping the
+        two measurements agree.
+
+        Before any frame has been taken there is nothing to match, so it
+        measures; and a missing measurement still yields (0, 0) rather than a
+        guess, the rule `game_offset` already follows.
         """
+        if not self.normalise:
+            return (0, 0)
+        applied = getattr(self, "_applied_shift", None)
+        if applied is not None:
+            return applied
+        return self.measure_shift(ttl)
+
+    def measure_shift(self, ttl=1.0):
+        """The shift the CURRENT layout calls for. Used by `frame`."""
         if not self.normalise:
             return (0, 0)
         ox, oy, _sc = self.game_metrics(ttl)
         if not self.game_metrics_ok():
-            return (0, 0)
+            # Nothing measurable. Keep whatever the last frame used rather
+            # than snapping to zero: the coordinates in flight came from that
+            # frame, and disagreeing with them is worse than being slightly
+            # stale. With no history at all, (0, 0) is the honest answer.
+            return getattr(self, "_applied_shift", None) or (0, 0)
         return (-int(ox), -int(oy))
 
     @staticmethod

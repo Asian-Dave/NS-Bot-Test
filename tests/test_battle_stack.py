@@ -8046,13 +8046,32 @@ def test_normalisation_covers_clips_and_the_no_click_zone():
     check(a.blocked_by(1920 + 760 + 10, 100) is not None,
           "a click that really is on the panel is still refused")
 
-    # --- the transient that wedged it must no longer stick ---------------
-    cap._off = (-380, 602, 1.0)        # mid-reload: shift (380, -602)
-    check(cap.norm_shift() == (380, -602),
-          f"the mid-reload transient is what it was ({cap.norm_shift()})")
-    cap._off = (-760, 0, 1.0)          # ...and the next read is correct
-    check(a.blocked_by(2406, 1061) is None,
-          "a transient cannot outlive itself - the shift is read per click")
+    # --- THE INVERSE USES THE SHIFT THE FRAME WAS TRANSLATED WITH --------
+    #
+    # Re-measuring at click time can disagree with the frame the coordinate
+    # came from, and then the round trip does not close. It wedged a run:
+    # during a relog the game is briefly unmeasurable, a fresh read gave
+    # (0, 0), and a reference-space point was compared against a real-space
+    # zone - "REFUSING click (2555,248) close Eudemon Garden ... (1920, 0,
+    # 760, 1800)" though 2555 - 760 = 1795 is well clear of it.
+    cap._applied_shift = (760, 0)      # what the last frame actually used
+    cap._off = (0, 0, 1.0)             # and now the game is unmeasurable...
+    cap._off_ok = False
+    check(cap.norm_shift() == (760, 0),
+          f"the inverse pins the APPLIED shift, not a later reading "
+          f"({cap.norm_shift()})")
+    check(a.blocked_by(2555, 248) is None,
+          "so a legitimate click is not refused while the layout is in flux")
+    check(cap.measure_shift() == (760, 0),
+          "and an unmeasurable layout keeps the last applied shift, not zero")
+
+    # with no history at all, an unmeasurable game is still (0, 0), never a
+    # guess - the rule `game_offset` already follows
+    fresh = Capture.__new__(Capture)
+    fresh.dpr, fresh.normalise = 2, True
+    fresh._off, fresh._off_ok, fresh._off_at = (0, 0, 1.0), False, float("inf")
+    check(fresh.measure_shift() == (0, 0),
+          "with no history, a missing measurement is zero rather than a guess")
 
     # --- nobody may re-introduce a stored, shifted zone -------------------
     import app as app_mod
