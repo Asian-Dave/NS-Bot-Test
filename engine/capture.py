@@ -325,7 +325,24 @@ class Capture:
             sx, sy = float(s.get("x", 0)), float(s.get("y", 0))
         except Exception:
             sx = sy = 0.0
-        clip = (x / self.dpr + sx, y / self.dpr + sy,
+        # UN-NORMALISE THE BOX, KEEP THE ORIGIN NORMALISED.
+        #
+        # The caller hands a box in REFERENCE space (that is where all its
+        # constants live) but the clip is a real page rectangle, so it needs
+        # the same inverse `to_click_coords` applies. The returned ORIGIN does
+        # not: it exists so a point found inside the clip maps back with
+        # `full = clipped + origin`, and `full` is consumed as a reference
+        # coordinate.
+        #
+        # Missing this is what broke the hand-seal board: `panel_frame` clips
+        # around the "Skill :" HUD, the clip was taken 760 px from where the
+        # HUD actually is, `anchor_offset` found nothing, and the round was
+        # abandoned with "cannot locate the panel" - while the classifier,
+        # which uses a FULL frame, had just matched that same HUD at 0.998.
+        # Two capture paths, one taught the new coordinate space and the
+        # other not.
+        dx, dy = self.norm_shift()
+        clip = ((x - dx) / self.dpr + sx, (y - dy) / self.dpr + sy,
                 w / self.dpr, h / self.dpr)
         return clip, (x, y)
 

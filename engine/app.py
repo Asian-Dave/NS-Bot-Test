@@ -339,17 +339,11 @@ def attach(port, log, tpls=None, install_dock=True):
         dk.install(verify=False)
         rect = dk.dock_rect()
         if rect:
-            # SHIFT IT LIKE THE RUNNER DOES. `dock_rect` is real captured px
-            # and every click compared against it comes from a NORMALISED
-            # frame, so an unshifted zone guards the wrong strip. The runner
-            # re-reads this every cycle and will correct it either way, but
-            # getting it right here closes the window before the first cycle.
-            try:
-                dx, dy = cap.norm_shift()
-                if dx or dy:
-                    rect = (rect[0] + dx, rect[1] + dy, rect[2], rect[3])
-            except Exception:
-                pass
+            # RAW, deliberately. `Actor.blocked_by` converts the CLICK into
+            # this space at comparison time rather than storing a shifted
+            # zone - a stored one is a cached belief, and caching it from a
+            # mid-reload measurement is what once left the bot refusing its
+            # own Play button. See the note there.
             actor.no_click_zones.append(rect)
     return c, cap, actor, dk
 
@@ -577,19 +571,12 @@ class Runner:
                     self._overlap_n = 0
         except Exception:
             pass
-        # INTO THE SAME SPACE AS THE CLICKS IT GUARDS. `dock_rect` reads the
-        # live DOM, so it is in REAL captured px, while `Actor.blocked_by`
-        # compares points taken from a NORMALISED frame. Leaving the zone
-        # unshifted would defend a strip the panel is not in - which is
-        # precisely the stale-zone failure this method exists to prevent,
-        # arrived at from the other direction.
-        try:
-            dx, dy = self.cap.norm_shift()
-            if dx or dy:
-                x, y, w, h = rect
-                rect = (x + dx, y + dy, w, h)
-        except Exception:
-            pass
+        # THE ZONE IS STORED RAW, in the page's own coordinates.
+        # `Actor.blocked_by` converts the click instead, at comparison time -
+        # see the note there. Storing a shifted copy made the zone a cached
+        # belief, and one taken mid-reload (shift (380, -602) rather than
+        # (760, 0)) stood until the next cycle, which during a task never
+        # came: the bot refused its own Play button in a tight loop.
         if getattr(self, "_zone", None) != rect:
             # DROP EVERY DOCK-SHAPED ZONE, not just the one we remember.
             #

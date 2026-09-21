@@ -55,9 +55,39 @@ class Actor:
         time.sleep(random.uniform(*rng))
 
     def blocked_by(self, px, py):
-        """The no-click zone or guarded point covering this click, if any."""
+        """The no-click zone or guarded point covering this click, if any.
+
+        TWO SPACES MEET HERE, AND THEY ARE NOT THE SAME ONE.
+
+        * ZONES come from the live DOM (`dock_rect`), so they are REAL page
+          pixels. The point arrives in REFERENCE space, off a normalised
+          frame, so the POINT is converted - not the zone.
+        * POINTS (`no_click_points`, e.g. the senjutsu orb) are derived from
+          battle geometry measured ON a normalised frame, so they are already
+          in reference space and are compared as they are.
+
+        CONVERTING AT COMPARISON TIME, RATHER THAN STORING A SHIFTED ZONE, is
+        deliberate and was arrived at the hard way. A stored zone is a cached
+        belief, and this one was cached from a measurement taken mid-reload -
+        when the game is briefly scrolled and the shift reads (380, -602)
+        instead of (760, 0). That transient was stored, the refresh that would
+        have corrected it only runs BETWEEN cycles, and the resume ladder
+        spins inside a task - so the bad zone stood and the bot refused the
+        Play button forever:
+
+            REFUSING click (2406,1061) resume:play - it lands on the control
+            dock (2300, -602, 760, 1800)
+
+        Read live, a transient costs at most one mis-judged click instead of
+        wedging the run.
+        """
+        try:
+            dx, dy = self.capture.norm_shift()
+        except Exception:
+            dx = dy = 0
+        rx, ry = px - dx, py - dy
         for (zx, zy, zw, zh) in self.no_click_zones:
-            if zx <= px < zx + zw and zy <= py < zy + zh:
+            if zx <= rx < zx + zw and zy <= ry < zy + zh:
                 return (zx, zy, zw, zh)
         for (gx, gy, r, why) in self.no_click_points:
             if (px - gx) ** 2 + (py - gy) ** 2 <= r * r:

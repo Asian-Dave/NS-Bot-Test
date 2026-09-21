@@ -7954,8 +7954,88 @@ def test_a_normalised_frame_puts_every_coordinate_in_one_space():
 
 
 
+def test_normalisation_covers_clips_and_the_no_click_zone():
+    """The two paths the frame translation did NOT reach, both found live.
+
+    1. CLIPPED CAPTURES. `frame` normalises FULL frames only - a clipped one
+       has its own origin - but `clip_for` still received a box in REFERENCE
+       space and turned it straight into a page rectangle. So the clip was
+       taken 760 px from the thing it was aimed at. It broke the hand-seal
+       board: `panel_frame` clips around the "Skill :" HUD, `anchor_offset`
+       found nothing, and the round was abandoned with "cannot locate the
+       panel" - one second after the classifier, which uses a FULL frame,
+       matched that same HUD at 0.998. Two capture paths, one taught the new
+       space and the other not.
+
+    2. THE NO-CLICK ZONE. It was stored pre-shifted, which makes it a cached
+       belief - and it got cached from a measurement taken MID-RELOAD, where
+       the game is briefly scrolled and the shift reads (380, -602) instead
+       of (760, 0). The refresh that would fix it runs between cycles, and
+       the resume ladder spins inside a task, so the bad zone stood and the
+       bot refused its own Play button in a tight loop:
+
+           REFUSING click (2406,1061) resume:play - it lands on the control
+           dock (2300, -602, 760, 1800)
+
+       Now the zone is stored RAW and the CLICK is converted at comparison
+       time, so a transient costs one mis-judged click instead of the run.
+    """
+    print("\nnormalisation covers clips and the no-click zone")
+    from capture import Capture
+    import act as act_mod
+
+    cap = Capture.__new__(Capture)
+    cap.dpr = 2
+    cap.normalise = True
+    cap._off = (-760, 0, 1.0)          # game flush-left
+    cap._off_ok = True
+    cap._off_at = float("inf")
+
+    class _CDP:
+        def evaluate(self, expr):
+            return '{"x": 0, "y": 0}'
+    cap.cdp = _CDP()
+
+    # --- 1. a clip must be aimed at the REAL page, origin stays reference --
+    clip, origin = cap.clip_for(1578, 300, 100, 80)
+    check(abs(clip[0] - (1578 - 760) / 2) < 0.01,
+          f"the clip is un-normalised ({clip[0]}, want {(1578-760)/2})")
+    check(origin == (1578, 300),
+          f"but the origin stays in reference space ({origin})")
+
+    # --- 2. the zone is RAW and the point is converted -------------------
+    a = act_mod.Actor.__new__(act_mod.Actor)
+    a.capture = cap
+    a.no_click_zones = [(1920, 0, 760, 1800)]     # real px, as the DOM gives
+    a.no_click_points = []
+    # a reference-space click on the GAME must pass, though its raw value
+    # falls inside the raw zone
+    check(a.blocked_by(2406, 1061) is None,
+          "a reference-space click on the game is not blocked by a raw zone")
+    # and one genuinely on the panel must still be refused
+    check(a.blocked_by(1920 + 760 + 10, 100) is not None,
+          "a click that really is on the panel is still refused")
+
+    # --- the transient that wedged it must no longer stick ---------------
+    cap._off = (-380, 602, 1.0)        # mid-reload: shift (380, -602)
+    check(cap.norm_shift() == (380, -602),
+          f"the mid-reload transient is what it was ({cap.norm_shift()})")
+    cap._off = (-760, 0, 1.0)          # ...and the next read is correct
+    check(a.blocked_by(2406, 1061) is None,
+          "a transient cannot outlive itself - the shift is read per click")
+
+    # --- nobody may re-introduce a stored, shifted zone -------------------
+    import app as app_mod
+    src = inspect.getsource(app_mod.Runner._refresh_no_click_zone)
+    body = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+    check("norm_shift" not in body,
+          "the zone refresh does not pre-shift; the click is converted instead")
+
+
+
 def main():
-    for fn in (test_a_normalised_frame_puts_every_coordinate_in_one_space,
+    for fn in (test_normalisation_covers_clips_and_the_no_click_zone,
+               test_a_normalised_frame_puts_every_coordinate_in_one_space,
                test_a_relog_keeps_the_operators_window_size,
                test_the_attempts_counter_reads_a_zero,
                test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it,
