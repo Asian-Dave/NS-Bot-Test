@@ -510,6 +510,19 @@ class Runner:
             return
         if not rect:
             return
+        # INTO THE SAME SPACE AS THE CLICKS IT GUARDS. `dock_rect` reads the
+        # live DOM, so it is in REAL captured px, while `Actor.blocked_by`
+        # compares points taken from a NORMALISED frame. Leaving the zone
+        # unshifted would defend a strip the panel is not in - which is
+        # precisely the stale-zone failure this method exists to prevent,
+        # arrived at from the other direction.
+        try:
+            dx, dy = self.cap.norm_shift()
+            if dx or dy:
+                x, y, w, h = rect
+                rect = (x + dx, y + dy, w, h)
+        except Exception:
+            pass
         if getattr(self, "_zone", None) != rect:
             if getattr(self, "_zone", None) in self.actor.no_click_zones:
                 self.actor.no_click_zones.remove(self._zone)

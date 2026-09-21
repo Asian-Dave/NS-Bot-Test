@@ -1981,18 +1981,39 @@ def test_game_drift_is_tracked_and_corrected():
     # The measured failure: iframe at y = -118 CSS, dpr 2 -> -236 captured px.
     cap.cdp.y = -118.0
     off = cap.game_offset(ttl=0)
-    check(off == (0, -236), f"a drifted game is measured as {off}")
+    # TWO MECHANISMS, ONE AT A TIME. `fix` corrects the COORDINATE; frame
+    # normalisation moves the PICTURE so no coordinate needs correcting. They
+    # must never both act, or the shift is applied twice - the half-applied
+    # correction this class exists to document, in its other form. So the
+    # drift contract is asserted in BOTH modes rather than one.
+    cap.normalise = False
+    off = cap.game_offset(ttl=0)
+    check(off == (0, -236), f"off: a drifted game is measured as {off}")
     fx, fy = cap.fix(1434, 483)
     check((fx, fy) == (1434, 247),
-          f"and a card cell is corrected to {(fx, fy)} - close to the 248 "
+          f"off: a card cell is corrected to {(fx, fy)} - close to the 248 "
           f"actually measured on screen")
 
     # The board box moves with it, which is what stops "board gone".
     bx, by, bw, bh = cards_mod.board_box(cap)
     check((bx, by) == (cards_mod.BOARD_BOX[0], cards_mod.BOARD_BOX[1] - 236),
-          "the board box is corrected too")
+          "off: the board box is corrected too")
     check((bw, bh) == (cards_mod.BOARD_BOX[2], cards_mod.BOARD_BOX[3]),
-          "and its size is unchanged - only the origin moves")
+          "off: its size is unchanged - only the origin moves")
+
+    # ON: the frame carries the correction, so the coordinate must not.
+    cap.normalise = True
+    cap._off_at = 0.0                      # re-measure under the new mode
+    check(cap.norm_shift(ttl=0) == (0, 236),
+          f"on: the FRAME is shifted instead ({cap.norm_shift(ttl=0)})")
+    check(cap.game_offset(ttl=0) == (0, 0),
+          "on: so game_offset reports nothing left to correct")
+    check(cap.fix(1434, 483) == (1434, 483),
+          "on: and fix passes through - correcting here would double it")
+    bx2, by2, _w2, _h2 = cards_mod.board_box(cap)
+    check((bx2, by2) == (cards_mod.BOARD_BOX[0], cards_mod.BOARD_BOX[1]),
+          "on: the board box keeps its reference origin, because the picture "
+          "moved under it")
 
     # A game that cannot be found must NEVER move a click.
     class Blind(StubCDP):
@@ -7847,8 +7868,78 @@ def test_a_relog_keeps_the_operators_window_size():
 
 
 
+def test_a_normalised_frame_puts_every_coordinate_in_one_space():
+    """Moving the game would have broken 47 constants in 10 modules at once.
+
+    Every absolute coordinate here was measured with the game at
+    `REFERENCE_ORIGIN`, and `fix` corrects for it having moved - but only for
+    callers that remember. Measured: 47 hardcoded coordinates across 13
+    modules, and exactly three (cards, kekkai_play, mission) correct at all.
+    `click_pixel` deliberately does not, because a template-derived point is
+    already live and would be corrected TWICE - the half-applied correction
+    that left the memory board at "19 faces known, 11 pairs refused".
+
+    So the PICTURE moves instead: a full frame is translated so the game
+    lands where the constants expect, and the inverse is applied at the one
+    door a coordinate leaves by. Then there is nothing to forget.
+
+    THE TEST DRIVES THE SHIFTED PATH. With the game where it has always been
+    the shift is zero and every assertion below would pass against code that
+    does nothing, which is the "passes for the wrong reason" trap this suite
+    keeps re-learning. So the offset is forced.
+    """
+    print("\na normalised frame puts every coordinate in one space")
+    from capture import Capture
+
+    c = Capture.__new__(Capture)
+    c.dpr = 2
+    c.normalise = True
+    c._off = (-760, 0, 1.0)        # the game flush-left
+    c._off_ok = True
+    c._off_at = float("inf")       # never re-measure
+
+    check(c.norm_shift() == (760, 0),
+          f"a displaced game yields the inverse shift ({c.norm_shift()})")
+    check(c.game_offset() == (0, 0),
+          "game_offset is zero while normalising, so nobody double-corrects")
+    check(c.fix(1578, 300) == (1578, 300),
+          f"fix is the identity while normalising ({c.fix(1578, 300)})")
+
+    # a reference coordinate must reach the REAL page point
+    cx, cy = c.to_click_coords(1578, 300)
+    check((cx * c.dpr, cy * c.dpr) == (1578 - 760, 300),
+          f"a click is un-normalised exactly once (css {cx},{cy})")
+
+    # the translation puts real content where the constants look for it
+    img = np.zeros((200, 2680, 3), np.uint8)
+    img[50:60, 100:110] = 255
+    out = Capture._translate(img, 760, 0)
+    xs = np.where(out[:, :, 0] == 255)[1]
+    check(int(xs.min()) == 860,
+          f"content at real x=100 lands at reference x=860 ({int(xs.min())})")
+    check(out.shape[1] == 3440,
+          f"and the canvas GROWS rather than cropping the dock away "
+          f"({out.shape[1]})")
+
+    # the search band must follow the game, not its old place
+    src = inspect.getsource(Capture.apply_search_band)
+    body = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+    check("self.normalise" in body,
+          "the search band knows about normalisation, or it aims at nothing")
+
+    # OFF must be bit-for-bit the historical behaviour
+    c.normalise = False
+    check(c.norm_shift() == (0, 0), "off: no shift")
+    check(c.game_offset() == (-760, 0), "off: game_offset reports the drift")
+    check(c.fix(1578, 300) == (818, 300), "off: fix corrects as it always did")
+    check(c.to_click_coords(1578, 300) == (789.0, 150.0),
+          "off: clicks are untouched")
+
+
+
 def main():
-    for fn in (test_a_relog_keeps_the_operators_window_size,
+    for fn in (test_a_normalised_frame_puts_every_coordinate_in_one_space,
+               test_a_relog_keeps_the_operators_window_size,
                test_the_attempts_counter_reads_a_zero,
                test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it,
                test_geometry_classification, test_two_geometries,
