@@ -1085,6 +1085,19 @@ class Runner:
         # THE OPERATOR'S SIZE, NOT THE REFERENCE. Pinning `VIEWPORT` here threw
         # away a window size the moment it was chosen - see `chosen_viewport`.
         browser.pin_viewport(self.cdp, *chosen_viewport())
+        # AND RE-ASK WHICH BACKEND, because this replaced the document.
+        #
+        # `ensure_renderer_templates` caches its answer and says it "does NOT
+        # re-ask once known: the renderer cannot change while the document
+        # stays put". True - but a relog does not leave it put, and this path
+        # never cleared the cache. Measured live: the bot had `webgl`
+        # variants loaded while `loadedConfig`, `localStorage.renderMode` AND
+        # the pixels all said `wgpu-webgl`, because the value was read once at
+        # 07:06 and the document had been replaced many times since. The
+        # failure is silent - the wrong crops merely score lower, so the bot
+        # limps instead of stopping. Same standing rule as focus mode and
+        # flush-left: a cached belief about page state dies with a navigation.
+        self._renderer_templates_for = None
         # The reload re-injected the panel with no state and dropped focus.
         # Restore both here rather than leaving it to the next cycle, which a
         # running task may not reach for minutes.

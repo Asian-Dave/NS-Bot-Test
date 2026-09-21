@@ -162,6 +162,71 @@ def variant_path(name, default_path, renderer=None):
     return p if os.path.exists(p) else default_path
 
 
+def active_renderer():
+    """The backend whose variants are currently preferred, or None."""
+    return _RENDERER
+
+
+def renderer_from_pixels(gray, min_conf=0.70, min_margin=0.04):
+    """Which backend actually DREW this frame. (verdict, votes) or (None, []).
+
+    ASK THE PICTURE, NOT THE CONFIG. `set_renderer` is fed from
+    `loadedConfig.preferredRenderer`, which is what Ruffle was configured
+    with - and that has been observed disagreeing with what is on screen,
+    because the value is read ONCE and the document is replaced by every
+    relog and window-size change. The consequence is silent: the wrong
+    variant set loads and anchors merely get weaker, so the bot limps rather
+    than failing, and nothing in the log says why.
+
+    The pixels cannot drift like that. This project already measured the
+    difference the backends make - wgpu draws text WITH its stroke, webgl and
+    canvas draw a thinner unstroked face - which is exactly why `tpl/webgl/`
+    exists. So scoring a name's DEFAULT crop against its VARIANT says which
+    one rendered the frame, using assets already on disk.
+
+    Calibrated against frames whose backend is known, and it separates
+    cleanly every time:
+
+        known webgl lobby    lobby_rail_fortune  wgpu 0.895 / webgl 1.000
+        known webgl charsel  char_slot_level     wgpu 0.677 / webgl 1.000
+        known wgpu  charsel  char_slot_level     wgpu 0.965 / webgl 0.716
+        wgpu reference lb0   lobby_rail_fortune  wgpu 1.000 / webgl 0.895
+
+    Only anchors that are actually ON the frame vote (`min_conf`), and a pair
+    too close to call is skipped (`min_margin`) rather than guessed - on a
+    screen carrying none of them the honest answer is None.
+    """
+    votes = []
+    try:
+        vdir = os.path.join(ROOT, VARIANT_DIR, "webgl")
+        if not os.path.isdir(vdir):
+            return None, []
+        for fn in sorted(os.listdir(vdir)):
+            if not fn.endswith(".png") or fn.startswith("_"):
+                continue
+            name = fn[:-4]
+            dflt = os.path.join(ROOT, VARIANT_DIR, f"{name}.png")
+            if not os.path.exists(dflt):
+                continue
+            try:
+                a = find(gray, Template(name, dflt, threshold=0.88))[1]
+                b = find(gray, Template(name, os.path.join(vdir, fn),
+                                        threshold=0.88))[1]
+            except Exception:
+                continue
+            if max(a, b) < min_conf or abs(a - b) < min_margin:
+                continue
+            votes.append((name, round(a, 3), round(b, 3),
+                          "wgpu" if a > b else "webgl"))
+    except Exception:
+        return None, []
+    if not votes:
+        return None, []
+    wgpu = sum(1 for v in votes if v[3] == "wgpu")
+    return ("wgpu" if wgpu * 2 > len(votes)
+            else "webgl" if wgpu * 2 < len(votes) else None), votes
+
+
 def template(name, threshold=0.88, scales=None):
     """The Template for `name`, honouring the active renderer. None if absent.
 

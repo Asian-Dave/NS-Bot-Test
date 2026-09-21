@@ -590,6 +590,52 @@ def play_lights(cap, actor, log, max_stages=12):
     return cleared, "cleared"
 
 
+def check_renderer(cap, log):
+    """Confirm the loaded template set matches what actually drew the screen.
+
+    ASKED OF THE GAME, NOT OF OUR OWN CONFIG. `perceive.set_renderer` is fed
+    from `loadedConfig.preferredRenderer`, read once at startup - and that
+    was measured disagreeing with reality: the bot had `webgl` variants
+    loaded while `loadedConfig`, `localStorage.renderMode` and the pixels all
+    said `wgpu-webgl`, because every relog and window change replaces the
+    document and nothing re-asked.
+
+    It matters most HERE. An SS mission is one attempt and it does not come
+    back, and the wrong crops do not fail loudly - they merely score lower,
+    so a mission is lost to an anchor that "just missed" with nothing in the
+    log naming the cause.
+
+    This only REPORTS. Swapping the template set underneath a running
+    mission would change every threshold mid-flight, which is a worse
+    surprise than a wrong one held steady; the cure is a relog, which now
+    re-reads. Silence means the pixels agree, or that the screen carries
+    none of the anchors that can tell the backends apart.
+    """
+    try:
+        import perceive as _p
+        verdict, votes = _p.renderer_from_pixels(cap.frame(gray=True))
+    except Exception:
+        return None
+    if not verdict:
+        return None
+    active = (_p.active_renderer() or "").lower()
+    # `wgpu-webgl` is the config's name for what the pixels call `wgpu`.
+    same = (verdict == "wgpu" and active.startswith("wgpu")) or \
+           (verdict == "webgl" and active == "webgl") or \
+           (verdict == "wgpu" and not active)
+    if same:
+        log.info("SS: renderer check - the screen was drawn by %s, which "
+                 "matches the loaded templates (%s)",
+                 verdict, active or "defaults")
+    else:
+        log.error("SS: RENDERER MISMATCH - the screen was drawn by %s but "
+                  "the %s templates are loaded (%s). Anchors will score low "
+                  "and this mission may be lost to it; a relog re-reads the "
+                  "backend.", verdict, active or "default",
+                  ", ".join(f"{n} {a}/{b}" for n, a, b, _w in votes[:3]))
+    return verdict
+
+
 def run_one(cap, actor, log, tpls=None, play_combat=None, relog=None):
     """Play ONE already-started SS mission through to its reward. True if banked.
 
@@ -603,6 +649,7 @@ def run_one(cap, actor, log, tpls=None, play_combat=None, relog=None):
     if not open_puzzle(actor, cap, log, tries=5):
         pass                      # not a rune puzzle; identify below decides
     f = cap.frame(gray=False)
+    check_renderer(cap, log)
     kind = identify(f, tpls)
     log.info("SS: this mission is %s", kind or "not recognised")
     if kind == "rune":

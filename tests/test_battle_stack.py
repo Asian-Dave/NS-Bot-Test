@@ -8082,8 +8082,77 @@ def test_normalisation_covers_clips_and_the_no_click_zone():
 
 
 
+def test_the_renderer_is_confirmed_from_the_pixels():
+    """The loaded template set disagreed with what actually drew the screen.
+
+    Measured live: the bot had `webgl` variants loaded while
+    `loadedConfig.preferredRenderer`, `localStorage.renderMode` AND the
+    pixels all said `wgpu-webgl`. `ensure_renderer_templates` reads the
+    backend once and documents that it "does NOT re-ask once known: the
+    renderer cannot change while the document stays put" - true, but a relog
+    replaces the document and that path never cleared the cache, so a value
+    read at 07:06 outlived many reloads.
+
+    The failure is SILENT, which is why it needs a check rather than a fix
+    alone: wrong crops do not miss outright, they merely score lower, so the
+    bot limps and nothing names the cause.
+
+    The pixels cannot go stale. wgpu draws text WITH its stroke and webgl
+    does not - the reason `tpl/webgl/` exists at all - so scoring a name's
+    DEFAULT crop against its VARIANT says which one rendered the frame.
+    """
+    print("\nthe renderer is confirmed from the pixels")
+    import perceive as p
+
+    cases = [("ref/auto/renderer/webgl_lobby.png", "webgl"),
+             ("ref/auto/renderer/webgl_charsel.png", "webgl"),
+             ("ref/auto/renderer/wgpu_charsel.png", "wgpu"),
+             ("ref/auto/lobby/lb0.png", "wgpu")]
+    seen = 0
+    for rel, want in cases:
+        path = os.path.join(ROOT, rel)
+        im = cv2.imread(path)
+        if im is None:
+            continue
+        seen += 1
+        p.clear_search_band()
+        got, votes = p.renderer_from_pixels(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY))
+        check(got == want,
+              f"{os.path.basename(rel)} was drawn by {want} ({got}, "
+              f"{[(v[0], v[3]) for v in votes]})")
+    check(seen >= 3, f"enough labelled frames to calibrate on ({seen})")
+
+    # A SCREEN WITH NONE OF THE ANCHORS MUST ABSTAIN, not guess. Combat
+    # carries no variant-backed anchor, and a confident answer there would
+    # be a coin toss reported as a measurement.
+    combat = cv2.imread(os.path.join(ROOT, "ref/auto/mission/COMBAT.png"))
+    if combat is not None:
+        p.clear_search_band()
+        got, votes = p.renderer_from_pixels(
+            cv2.cvtColor(combat, cv2.COLOR_BGR2GRAY))
+        check(got is None and not votes,
+              f"a frame with no variant anchors abstains ({got}, {votes})")
+
+    # --- and a relog must invalidate the cached backend ------------------
+    import app as app_mod
+    src = inspect.getsource(app_mod.Runner.relog)
+    body = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+    check("_renderer_templates_for" in body,
+          "relog clears the cached renderer, because it replaced the document")
+
+    # --- the SS pass asks before it plays --------------------------------
+    import ss as ss_mod
+    rsrc = inspect.getsource(ss_mod.run_one)
+    rbody = "\n".join(ln.split("#")[0] for ln in rsrc.splitlines())
+    check("check_renderer" in rbody,
+          "an SS mission checks the renderer before it plays - one attempt, "
+          "and it does not come back")
+
+
+
 def main():
-    for fn in (test_normalisation_covers_clips_and_the_no_click_zone,
+    for fn in (test_the_renderer_is_confirmed_from_the_pixels,
+               test_normalisation_covers_clips_and_the_no_click_zone,
                test_a_normalised_frame_puts_every_coordinate_in_one_space,
                test_a_relog_keeps_the_operators_window_size,
                test_the_attempts_counter_reads_a_zero,
