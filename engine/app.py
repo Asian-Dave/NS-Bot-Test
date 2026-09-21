@@ -331,10 +331,25 @@ def attach(port, log, tpls=None, install_dock=True):
     cap = Capture(c)
     actor = Actor(c, cap, log, dry_run=False)
     dk = dock_mod.Dock(c, log)
+    # Bake the flush-left default into the injected bootstrap, so a reload -
+    # including one inside a task, where `ensure_focus` will not run for
+    # minutes - comes back with the game already where the layout expects it.
+    dk.flush_left_default = FLUSH_LEFT
     if install_dock:
         dk.install(verify=False)
         rect = dk.dock_rect()
         if rect:
+            # SHIFT IT LIKE THE RUNNER DOES. `dock_rect` is real captured px
+            # and every click compared against it comes from a NORMALISED
+            # frame, so an unshifted zone guards the wrong strip. The runner
+            # re-reads this every cycle and will correct it either way, but
+            # getting it right here closes the window before the first cycle.
+            try:
+                dx, dy = cap.norm_shift()
+                if dx or dy:
+                    rect = (rect[0] + dx, rect[1] + dy, rect[2], rect[3])
+            except Exception:
+                pass
             actor.no_click_zones.append(rect)
     return c, cap, actor, dk
 
@@ -528,6 +543,40 @@ class Runner:
             return
         if not rect:
             return
+        # AND SAY SO IF THE PANEL IS OVER THE GAME.
+        #
+        # `install` asserts `overlaps: false` once, at attach - but the game
+        # MOVES afterwards, and a narrow viewport is only safe while it stays
+        # flush-left. Measured: an in-task relog came back with flush-left
+        # off, the game re-centred to 190..1150 under a panel starting at 960,
+        # and the bot sat re-clicking a control the panel was covering, with
+        # nothing in the log naming the cause. A guard that is checked once is
+        # not a guard against something that changes.
+        try:
+            gx, _gy, gscale = self.cap.game_metrics()
+            if self.cap.game_metrics_ok():
+                right = self.cap.REFERENCE_ORIGIN[0] + gx + \
+                    self.cap.REFERENCE_CANVAS_W * gscale
+                # IT MUST PERSIST. Applying a window size reloads, and for a
+                # second or two mid-reload the game is centred and the panel
+                # does overlap it - then flush-left lands and it does not.
+                # Reporting that transient is a false alarm, and this file's
+                # own rule is that a status light which cries wolf is worse
+                # than none: it teaches the operator to ignore the real one.
+                if right > rect[0] + 1:
+                    self._overlap_n = getattr(self, "_overlap_n", 0) + 1
+                    if self._overlap_n == self.OVERLAP_PATIENCE:
+                        self.log.error(
+                            "the panel is drawn OVER the game (game ends "
+                            "%.0f, panel starts %d) and has been for %d "
+                            "cycles. Clicks there will be refused or land on "
+                            "the panel - widen the window, or check that "
+                            "flush-left applied.",
+                            right, rect[0], self._overlap_n)
+                else:
+                    self._overlap_n = 0
+        except Exception:
+            pass
         # INTO THE SAME SPACE AS THE CLICKS IT GUARDS. `dock_rect` reads the
         # live DOM, so it is in REAL captured px, while `Actor.blocked_by`
         # compares points taken from a NORMALISED frame. Leaving the zone
@@ -542,8 +591,22 @@ class Runner:
         except Exception:
             pass
         if getattr(self, "_zone", None) != rect:
-            if getattr(self, "_zone", None) in self.actor.no_click_zones:
-                self.actor.no_click_zones.remove(self._zone)
+            # DROP EVERY DOCK-SHAPED ZONE, not just the one we remember.
+            #
+            # `attach` appends the dock rect before this method has ever run,
+            # and it does so in REAL captured px - while this method appends
+            # the NORMALISED one. Removing only `self._zone` (None on the
+            # first pass) left both in the list, so a legitimate click in
+            # reference space fell inside the stale real-space copy and was
+            # refused. Measured: `REFUSING click (2406,1061) resume:play - it
+            # lands on the control dock (1920, 0, 760, 1800)`, repeatedly,
+            # with the correct zone at 2680 sitting in the list beside it.
+            #
+            # The panel is the only thing that is dock-shaped, so matching on
+            # its size is precise, and it leaves other guards alone.
+            self.actor.no_click_zones[:] = [
+                z for z in self.actor.no_click_zones
+                if not (len(z) == 4 and z[2] == rect[2] and z[3] == rect[3])]
             if rect not in self.actor.no_click_zones:
                 self.actor.no_click_zones.append(rect)
             if getattr(self, "_zone", None) is not None:
@@ -833,6 +896,11 @@ class Runner:
         elif c == "relog":
             self.log.info("operator: RELOG")
             self.relog()
+
+    # How many consecutive cycles the panel must be over the game before it
+    # is worth saying so. A viewport change reloads, and mid-reload the game
+    # is briefly centred and does overlap - see `_refresh_no_click_zone`.
+    OVERLAP_PATIENCE = 4
 
     HEARTBEAT_EVERY = 3.0        # seconds; see the note below
 
@@ -1153,6 +1221,15 @@ class Runner:
             if self.dock.focus(True) in ("focused", "already"):
                 self.focus_on = True
                 self.focus_aligned = False
+                # RE-ASSERT FLUSH-LEFT HERE TOO. The bootstrap defaults it, so
+                # this is belt and braces - but this is the path a relog takes
+                # from INSIDE a task, and it is the one where getting it wrong
+                # put the panel over the game at the 1340 viewport.
+                try:
+                    self.dock.flush_left(FLUSH_LEFT)
+                    self.dock.align()
+                except Exception:
+                    pass
                 self.log.info("focus mode restored after the reload")
         except Exception:
             pass

@@ -451,6 +451,15 @@ _BOOTSTRAP = r"""
   //   -> #panels-wrapper -> main.main-content -> div.site-wrapper
   //   -> #content-container (full width)
   // so the thing to move is the outermost box NARROWER than the page.
+  // DEFAULTED HERE, so a reload comes back already correct. The browser
+  // re-runs this bootstrap on every new document and Python is not told, so
+  // a flag Python has to re-assert is wrong for however long it takes the
+  // main loop to come round - which during a task is minutes, and during an
+  // in-task relog is exactly when it matters.
+  if (window.__nsbotFlushLeft === undefined) {
+    window.__nsbotFlushLeft = __FLUSHLEFT__;
+  }
+
   window.__nsbotFlushHost = () => {
     const g = gameEl();
     if (!g) return null;
@@ -879,6 +888,20 @@ class Dock:
     def __init__(self, cdp, log=None, width=WIDTH):
         self.cdp, self.log, self.width = cdp, log, width
         self._script_id = None
+        # BAKED INTO THE BOOTSTRAP, not asserted from Python afterwards.
+        #
+        # The bootstrap is re-run by the BROWSER on every new document
+        # (`Page.addScriptToEvaluateOnNewDocument`), and Python is not told.
+        # A flag defaulted in the script therefore comes back correct on a
+        # reload without a round trip - which is the only way it can be right
+        # during a relog that happens INSIDE a task, where `ensure_focus` (the
+        # thing that re-asserts it between cycles) does not run for minutes.
+        #
+        # Measured the hard way: an in-task relog came back with flush-left
+        # off, so at the 1340 viewport the game re-centred to 190..1150 under
+        # a panel starting at 960 - a 190 px OVERLAP - and the bot sat
+        # re-clicking a control the panel was covering.
+        self.flush_left_default = False
 
     # -- install -----------------------------------------------------------
     def _source(self):
@@ -886,6 +909,8 @@ class Dock:
         return (_BOOTSTRAP
                 .replace("__ID__", PANEL_ID)
                 .replace("__BINDING__", BINDING)
+                .replace("__FLUSHLEFT__",
+                         "true" if self.flush_left_default else "false")
                 .replace("__CSS__", json.dumps(css)))
 
     def install(self, verify=True):
