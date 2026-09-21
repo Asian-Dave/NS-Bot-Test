@@ -726,6 +726,19 @@ def run_all(cap, actor, log, tpls=None, play_combat=None, relog=None,
     failure-only memory, a tripwire on a broken termination check) and a second
     copy would be a second place to get them wrong.
     """
+    # CHECK THE BACKEND HERE, WHERE THE EVIDENCE EXISTS.
+    #
+    # The obvious place is as each mission starts, and that was tried: it
+    # abstains every time, because an SS puzzle board carries none of the
+    # anchors that can tell the backends apart - they are lobby,
+    # character-select and result-panel crops. The pass begins in the
+    # VILLAGE, which carries two of them, so asking once here actually gets
+    # an answer, and it is still before any attempt is spent.
+    #
+    # `run_one` keeps its own call as a cheap second look: on the frames
+    # where it can see something it confirms, and on the rest it says
+    # nothing rather than guessing.
+    check_renderer(cap, log)
     return tp.run_all(
         cap, actor, log, relog=relog, max_missions=max_missions,
         to_list=to_ss_list,

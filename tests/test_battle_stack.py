@@ -8148,6 +8148,15 @@ def test_the_renderer_is_confirmed_from_the_pixels():
           "an SS mission checks the renderer before it plays - one attempt, "
           "and it does not come back")
 
+    # AND THE PASS ASKS IT WHERE THE ANSWER EXISTS. Asked on a puzzle board
+    # it abstains every time - those screens carry none of the anchors that
+    # separate the backends - so the useful call is at the start of the
+    # sweep, in the village, before any attempt is spent.
+    asrc = inspect.getsource(ss_mod.run_all)
+    abody = "\n".join(ln.split("#")[0] for ln in asrc.splitlines())
+    check("check_renderer" in abody,
+          "the SS pass checks from the village, where the anchors are")
+
 
 
 def main():
