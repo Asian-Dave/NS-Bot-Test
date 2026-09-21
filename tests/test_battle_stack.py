@@ -7785,15 +7785,45 @@ def test_the_attempts_counter_reads_a_zero():
     check(bool(ex), f"the counter exemplar set is not empty ({sorted(ex)})")
     check("0" in ex, "and it contains a 0, harvested from a real exhausted row")
 
-    # --- leave-one-out: a new exemplar must not corrupt its neighbours ---
+    # --- leave-one-out, WITH the single-exemplar case stated ------------
+    #
+    # A digit with only ONE sample cannot pass this: remove it and there is
+    # nothing of its own left, so the best match is necessarily another
+    # digit. That is not a failure, it is the refusal working - what must be
+    # true is that the nearest wrong digit stays ABOVE the gate, so the
+    # glyph is refused rather than misread. A wrong counter corrupts the
+    # model silently; an unread one only stops.
+    GATE = 0.13
     flat = [(d, e) for d, es in ex.items() for e in es]
-    wrong = []
+    wrong, lonely = [], []
     for i, (d, q) in enumerate(flat):
         scored = sorted((float(np.abs(q - e).mean()), d2)
                         for j, (d2, e) in enumerate(flat) if j != i)
-        if scored and scored[0][1] != d:
-            wrong.append((d, scored[0][1]))
-    check(not wrong, f"every exemplar still classifies as itself ({wrong})")
+        if not scored:
+            continue
+        if scored[0][1] == d:
+            continue
+        (len(ex[d]) > 1 and wrong or lonely).append((d, scored[0][1],
+                                                     round(scored[0][0], 3)))
+    check(not wrong,
+          f"every digit with two or more exemplars classifies as itself "
+          f"({wrong})")
+    for d, other, dist in lonely:
+        check(dist > GATE,
+              f"the only exemplar of {d} is REFUSED rather than read as "
+              f"{other} ({dist} vs gate {GATE})")
+
+    # --- a digit the BAR cuts in two is still one digit -----------------
+    #
+    # The counter is drawn across a dark vertical bar, and a `2` has no ink
+    # where the bar crosses it: measured live, 51x16 and 37x31, neither
+    # digit-shaped, so the row read `xNone` while 0/1/3 read fine. Their
+    # union is 51x49, the size of every other digit here.
+    csrc = inspect.getsource(eu.count_at)
+    body = "\n".join(ln.split("#")[0] for ln in csrc.splitlines())
+    check("groups" in body,
+          "count_at groups components before matching, so a bisected glyph "
+          "is not two half-digits")
 
     # --- the exhausted fixture must read 0 on its exhausted rows ---------
     ex_path = os.path.join(ROOT, "ref/auto/eudemon/exhausted_counts.png")

@@ -198,12 +198,47 @@ def count_at(frame, y):
     ex = exemplars()
     if not ex:
         return None
-    digits = []
+    # A DIGIT BISECTED BY THE BAR IS STILL ONE DIGIT.
+    #
+    # The counter is drawn ACROSS a dark vertical bar, and where a glyph has
+    # no ink at that height the bar cuts it in two. Measured on a live `2`:
+    # x 9..60 y 58..74 and x 23..60 y 76..107 - two components, 51x16 and
+    # 37x31, neither of which is digit-shaped, so the row read `xNone` while
+    # `0`, `1` and `3` (whose strokes bridge the gap) read fine. Their union
+    # is 51x49, which is exactly the size of every other digit here.
+    #
+    # So components are GROUPED BY X OVERLAP first and matched second. That
+    # is a property of the glyph rather than of this one digit, which is why
+    # it is done generally instead of by widening a threshold until the `2`
+    # happens to survive.
+    raw = []
     for i in range(1, n):
         x, yy, bw, bh, a = st[i]
-        if a < 300 or not (COUNT_H[0] <= bh <= COUNT_H[1]) or bw > 90:
+        if a < 120 or bh > COUNT_H[1] or bw > 90:
             continue
-        digits.append((int(x), (lab[yy:yy + bh, x:x + bw] == i).astype(np.uint8) * 255))
+        raw.append([int(x), int(yy), int(bw), int(bh), i])
+    raw.sort()
+    groups = []
+    for part in raw:
+        x, yy, bw, bh, i = part
+        for gp in groups:
+            gx, gy, gx1, gy1, ids = gp
+            overlap = min(x + bw, gx1) - max(x, gx)
+            if overlap > 0.4 * min(bw, gx1 - gx):
+                gp[0], gp[1] = min(gx, x), min(gy, yy)
+                gp[2], gp[3] = max(gx1, x + bw), max(gy1, yy + bh)
+                ids.append(i)
+                break
+        else:
+            groups.append([x, yy, x + bw, yy + bh, [i]])
+
+    digits = []
+    for gx, gy, gx1, gy1, ids in groups:
+        bh = gy1 - gy
+        if not (COUNT_H[0] <= bh <= COUNT_H[1]):
+            continue
+        piece = np.isin(lab[gy:gy1, gx:gx1], ids).astype(np.uint8) * 255
+        digits.append((gx, piece))
     if not digits:
         return None
     digits.sort()
