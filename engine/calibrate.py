@@ -45,35 +45,46 @@ def best_at(frame, tpl, s):
     _, mx, _, loc = cv2.minMaxLoc(res)
     return float(mx), (loc[0] + t.shape[1]//2, loc[1] + t.shape[0]//2)
 
-rows = []
-for name, ref in sorted(SRC.items()):
-    tp, rp = pathlib.Path('tpl')/f'{name}.png', pathlib.Path('ref/raw')/ref
-    tpl, frame = gray(tp, True), gray(rp)
-    if tpl is None or frame is None:
-        rows.append((name, None, None, None, None, 'MISSING FILE')); continue
-    # coarse then fine scan for the peak
-    coarse = [(s/1000.0) for s in range(300, 701, 10)]
-    peak_s, peak_c = max(((s, best_at(frame, tpl, s)[0]) for s in coarse),
-                         key=lambda kv: (kv[1] is not None, kv[1] or -1))
-    fine = [max(0.05, peak_s + d/1000.0) for d in range(-12, 13, 2)]
-    peak_s, peak_c = max(((s, best_at(frame, tpl, s)[0]) for s in fine),
-                         key=lambda kv: (kv[1] is not None, kv[1] or -1))
-    _, at = best_at(frame, tpl, peak_s)
-    # sensitivity: how much confidence is lost 8% off the peak scale
-    off = [best_at(frame, tpl, peak_s*k)[0] for k in (0.92, 1.08)]
-    off = [o for o in off if o is not None]
-    drop = (peak_c - max(off)) if off else float('nan')
-    rows.append((name, peak_c, peak_s, at, drop, ''))
+def main():
+    """Re-derive the template thresholds. Prints a table; changes nothing."""
+    rows = []
+    for name, ref in sorted(SRC.items()):
+        tp, rp = pathlib.Path('tpl')/f'{name}.png', pathlib.Path('ref/raw')/ref
+        tpl, frame = gray(tp, True), gray(rp)
+        if tpl is None or frame is None:
+            rows.append((name, None, None, None, None, 'MISSING FILE')); continue
+        # coarse then fine scan for the peak
+        coarse = [(s/1000.0) for s in range(300, 701, 10)]
+        peak_s, peak_c = max(((s, best_at(frame, tpl, s)[0]) for s in coarse),
+                             key=lambda kv: (kv[1] is not None, kv[1] or -1))
+        fine = [max(0.05, peak_s + d/1000.0) for d in range(-12, 13, 2)]
+        peak_s, peak_c = max(((s, best_at(frame, tpl, s)[0]) for s in fine),
+                             key=lambda kv: (kv[1] is not None, kv[1] or -1))
+        _, at = best_at(frame, tpl, peak_s)
+        # sensitivity: how much confidence is lost 8% off the peak scale
+        off = [best_at(frame, tpl, peak_s*k)[0] for k in (0.92, 1.08)]
+        off = [o for o in off if o is not None]
+        drop = (peak_c - max(off)) if off else float('nan')
+        rows.append((name, peak_c, peak_s, at, drop, ''))
 
-print(f"{'template':24s} {'peak conf':>9s} {'@scale':>7s} {'drop@±8%':>9s}  location")
-print('-'*76)
-for n, c, s, at, d, err in rows:
-    if err: print(f"{n:24s} {'--':>9s} {'--':>7s} {'--':>9s}  {err}"); continue
-    print(f"{n:24s} {c:9.4f} {s:7.3f} {d:9.4f}  {at}")
-
-good = [r for r in rows if r[1] is not None]
-if good:
-    cs = [r[1] for r in good]; ss = [r[2] for r in good]
+    print(f"{'template':24s} {'peak conf':>9s} {'@scale':>7s} {'drop@±8%':>9s}  location")
     print('-'*76)
-    print(f"n={len(good)}  conf min={min(cs):.4f} median={sorted(cs)[len(cs)//2]:.4f} max={max(cs):.4f}")
-    print(f"scale peaks: min={min(ss):.3f} max={max(ss):.3f}  (predicted 0.454)")
+    for n, c, s, at, d, err in rows:
+        if err: print(f"{n:24s} {'--':>9s} {'--':>7s} {'--':>9s}  {err}"); continue
+        print(f"{n:24s} {c:9.4f} {s:7.3f} {d:9.4f}  {at}")
+
+    good = [r for r in rows if r[1] is not None]
+    if good:
+        cs = [r[1] for r in good]; ss = [r[2] for r in good]
+        print('-'*76)
+        print(f"n={len(good)}  conf min={min(cs):.4f} median={sorted(cs)[len(cs)//2]:.4f} max={max(cs):.4f}")
+        print(f"scale peaks: min={min(ss):.3f} max={max(ss):.3f}  (predicted 0.454)")
+
+
+# RUN ONLY WHEN RUN. This module used to do all of the above AT IMPORT, with no
+# `__main__` guard - so `import calibrate` performed a full multi-scale sweep
+# over sixteen templates and printed a table to stdout. Nothing imports it
+# today, which is the only reason that never surfaced, but it made the module
+# unusable as a library and would have been a genuinely confusing trap.
+if __name__ == "__main__":
+    main()

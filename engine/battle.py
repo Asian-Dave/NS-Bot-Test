@@ -56,6 +56,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # Outcomes. Deliberately explicit strings — they end up in logs and counters.
+# The bar swap animates; measured usable again well inside this.
+SENJ_SETTLE = 1.6
+# The orb measured 83x86, and S8's centre is 133 px away, so 60 covers the
+# control comfortably while staying clear of the nearest real slot.
+SENJ_GUARD_R = 60
+
 VICTORY = "victory"
 DEFEAT = "defeat"
 ABORTED = "aborted"       # we chose to Run (watchdog)
@@ -267,6 +273,13 @@ class BattleRunner:
             # that is not in the wait list reads as a stall.
             if "mission_success" in self.conditions:
                 waits.append(self.conditions["mission_success"])
+            # AND A EUDEMON BOSS PAYS OUT ON ITS OWN PANEL - a tall portrait
+            # closed by a RED X, matching none of the three above. Without it
+            # this gate waited its full timeout on a WON fight and reported a
+            # stall, with the reward sitting on screen for 2m37s. Third
+            # instance of the same shape; see `_build_conditions`.
+            if "eudemon_reward" in self.conditions:
+                waits.append(self.conditions["eudemon_reward"])
             waits.append(self.conditions["command_bar"])
 
             fired = self.gate.wait_for_any(waits, self.turn_timeout,
@@ -287,6 +300,24 @@ class BattleRunner:
             if isinstance(fired, Stopped):
                 return STOPPED, {"rounds": rounds, "acted": acted}
             if not fired:
+                # A DECLINED REVIVE IS A DEFEAT, not a stall.
+                #
+                # You are only offered a revive when you have DIED, so once
+                # the gate has declined one the fight is over and the game is
+                # on its way back to the village. Reporting STALLED there is
+                # wrong twice: it blames the runner for a screen that behaved
+                # exactly as it should, and it hides the actual outcome from
+                # whatever counts wins and losses.
+                #
+                # Measured live: died, declined correctly at 12:31:15, then
+                # "no turn and no result in 90s" and `battle 1 -> stalled` on
+                # a fight that was simply LOST.
+                if getattr(self.gate, "declined_at", 0.0):
+                    self.log.info("battle: lost - a revive was offered and "
+                                  "declined (tokens are never spent), so the "
+                                  "fight is over after %d round(s)", rounds)
+                    return DEFEAT, {"rounds": rounds, "acted": acted,
+                                    "ended": "revive_declined"}
                 # Timed out. A static frame while awaiting input is NORMAL per
                 # CLAUDE.md, so a timeout here means the command bar never
                 # appeared at all — genuinely stuck, not merely quiet.
@@ -294,6 +325,14 @@ class BattleRunner:
                                  self.turn_timeout)
                 return STALLED, {"rounds": rounds, "acted": acted}
 
+            if fired.name == "eudemon_reward":
+                # The reward panel IS the win. Leave it alone - dismissing it
+                # is the Eudemon lap's job, and it is the measurement that
+                # banks the boss.
+                self.log.info("battle: the Eudemon reward panel is up after "
+                              "%d round(s) - the boss is down", rounds)
+                return VICTORY, {"rounds": rounds, "acted": acted,
+                                 "ended": "eudemon_reward"}
             if fired.name == "result_panel":
                 self.log.info("battle: result panel after %d rounds", rounds)
                 return VICTORY, {"rounds": rounds, "acted": acted,
@@ -326,6 +365,46 @@ class BattleRunner:
             if geo is None:
                 self.log.warning("battle: command bar gated but geometry failed")
                 return STALLED, {"rounds": rounds, "acted": acted}
+
+            # FORBID THE SENJUTSU TOGGLE FOR EVERYTHING ELSE THIS TURN.
+            # Re-armed per turn because it is anchor-derived and the anchor
+            # can move; a guard that defends where a control USED to be is
+            # worse than none, which this project has already paid for once.
+            try:
+                self.actor.guard_point(*geo.senjutsu(), SENJ_GUARD_R,
+                                       "the senjutsu toggle")
+            except Exception:
+                pass
+
+            # THE SKILL BAR MUST BE THE ONE THE ROTATION WAS WRITTEN FOR.
+            # An accidental press of the senjutsu toggle swaps S1..S8 for a
+            # different set - the slots still click, so nothing looks wrong
+            # while the bot plays jutsu nobody chose. Put it back BEFORE
+            # acting, and only on a positive reading: `absent` (no senjutsu
+            # button on this character) and None must do nothing, because the
+            # "fix" is itself a press of that toggle.
+            if combat.skill_bar_state(bgr, geo) == combat.SENJUTSU_BAR:
+                self.log.warning("battle: the SENJUTSU bar is showing - the "
+                                 "rotation refers to the normal jutsu, so "
+                                 "switching back")
+                self.actor.allow_point("the senjutsu toggle")
+                try:
+                    self.actor.click_pixel(*geo.senjutsu(),
+                                           why="restore the normal skill bar")
+                finally:
+                    self.actor.guard_point(*geo.senjutsu(), SENJ_GUARD_R,
+                                           "the senjutsu toggle")
+                time.sleep(SENJ_SETTLE)
+                bgr = self.capture.frame(gray=False)
+                gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                back = combat.skill_bar_state(bgr, geo)
+                if back == combat.SENJUTSU_BAR:
+                    # Say so rather than pressing again: a toggle that did not
+                    # toggle means this is not the control we think it is.
+                    self.log.warning("battle: it is STILL showing senjutsu - "
+                                     "not pressing again")
+                else:
+                    self.log.info("battle: normal skill bar restored (%s)", back)
 
             verdict = self._observe_progress(bgr, geo)
             if verdict in ("stalled", "regenerating"):

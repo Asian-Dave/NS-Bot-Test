@@ -195,7 +195,7 @@ there" - and stay true whether or not the files are present.
 | 2 | can an HP bar be mapped to a ring slot? | **Moot.** The ring is not a target selector, so there is nothing to map. |
 | 3 | what does `#000002` detect in a slot rect? | **Superseded.** Cooldown is read off the icon: a cooling tile is drawn in true greyscale, measured saturation 0.0 inside the tile against 164.0 for a ready one, and the game prints the remaining count on it. Simpler than either their probe or our old `SlotBaseline`. |
 | 4 | `PixelLoop2` vs `PixelLoop` tolerance | **Open, and low value.** `gate.pixel()` has never needed a non-zero tolerance; if one is ever wanted, calibrate it against our own frames rather than inferring their intent. |
-| 5 | `FindPixelColorRange` / `FindAllInRange` callers | **Answered.** No callers outside `PixelSearch.cs`, one thin wrapper - so they do no bar reading at all and `combat.bar_fill_ratio` is not redundant. |
+| 5 | `FindPixelColorRange` / `FindAllInRange` callers | **Answered.** No callers outside `PixelSearch.cs`, one thin wrapper - so they do no bar reading at all and our own bar reading (`perceive.find_enemy_bars`) is not redundant. |
 | 6 | their mission list and grade handling | **Superseded.** Ours is measured directly: grade by colour (A hue ~103, B ~51, C ~128, locked renders grey), pagination confirmed by row CONTENT changing, and the level ceiling remembered per grade. |
 
 Kept below for the record, since the reasoning is what has value now.
@@ -236,7 +236,7 @@ Kept below for the record, since the reasoning is what has value now.
    callers outside `PixelSearch.cs` and `FindPixelColorRange` as having one thin
    wrapper — but confirm that properly, because if any caller measures a bar
    rather than locating a button, it is a cheaper route to what
-   `combat.bar_fill_ratio` does.
+   `perceive.find_enemy_bars` does.
 6. **Their mission list and grade handling** — `FormMission.cs` plus
    `Global.MissionList`. Cross-check against CLAUDE.md's hand-measured facts
    (Grade A = 7 pages, Grade C = 11, 3 rows per page, locked rows greyed with a

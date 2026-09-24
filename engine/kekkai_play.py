@@ -105,11 +105,10 @@ def find_rune_buttons(frame_bgr, y0=820, y1=1220, x0=760, x1=2680):
     They are a row of equally sized circles, which Hough finds directly - no
     template, and it adapts to wherever the panel has been drawn.
     """
-    h, w = frame_bgr.shape[:2]
-    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
-    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
-    if x1 - x0 < 8 or y1 - y0 < 8:
+    box = perceive.clamp_roi(frame_bgr, x0, y0, x1, y1)
+    if box is None:
         return None
+    x0, y0, x1, y1 = box
     g = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     circles = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1, minDist=60,
                                param1=100, param2=30, minRadius=28,
@@ -192,11 +191,10 @@ def find_confirm_point(frame_bgr, y0=200, y1=900, x0=900, x1=1800):
     A large, round, dark blob inside the puzzle scroll. Measured on a live
     frame: area 32695, bbox 207x201, centre (1261, 387).
     """
-    h, w = frame_bgr.shape[:2]
-    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
-    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
-    if x1 - x0 < 8 or y1 - y0 < 8:
+    box = perceive.clamp_roi(frame_bgr, x0, y0, x1, y1)
+    if box is None:
         return None
+    x0, y0, x1, y1 = box
     g = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     m = cv2.morphologyEx((g < 90).astype(np.uint8) * 255,
                          cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
@@ -396,17 +394,6 @@ def heading_from_spawn(frame, log=None, cap=None):
         log.info("character at x=%d (centre %d) -> spawned %s, heading %s",
                  pos[0], centre, "left" if pos[0] < centre else "right", h)
     return h
-
-
-def read_seals(frame, ex, x0=1300, x1=1900, y0=60, y1=130):
-    """The 'Seals: X / Y' HUD. Returns (done, total) or (None, None).
-
-    Knowing the total is what lets the hunt stop for the right reason instead of
-    on a step budget.
-    """
-    # Digits here are white-on-dark rather than the disc glyphs, so reuse of the
-    # history exemplars is not safe; report unknown rather than guess.
-    return (None, None)
 
 
 # The history scroll's columns are LOCATED, not assumed - see `find_rows`.
@@ -635,6 +622,9 @@ def crop_digit(frame, xy):
 # the two representations are NOT interchangeable and mixing them would be
 # silently wrong - see the measurement in `digit_mask`.
 INK_DIR = "ref/auto/tp/digits_ink"
+# Which digits the last `load_exemplars` took from a renderer
+# variant directory, for logging. Never a key in the exemplar map.
+LAST_VARIANT = None
 
 # The glyph is a minority of the disc's area. Measured on a live webgl row,
 # taking the darkest 30% inside the disc gives mask fractions of 0.150 (green
@@ -724,17 +714,46 @@ def tight_glyph(mask, pad=2):
     return mask[max(0, y0 - pad):y1 + pad + 1, max(0, x0 - pad):x1 + pad + 1]
 
 
-def read_digit(frame, xy, exemplars, gate=0.80):
+# THE GATE WAS 0.80 AND IT WAS REJECTING CORRECT READS.
+#
+# Measured leave-one-out over every exemplar held - each scored against the
+# OTHERS, so "right" means the set identified it and "wrong" means its own
+# digit had been removed and the best match is necessarily another digit:
+#
+#     correct reads (33)   0.726 .. 0.987
+#     wrong   reads (35)   0.396 .. 0.627
+#
+# They separate with a 0.10 gap, and **0.80 sits inside the correct range** -
+# it refused 7 of 33 good reads, 21%. Live that is a stalled mission each
+# time: 0.794, 0.799, 0.771, 0.726, 0.708 were all the RIGHT digit, refused.
+#
+# 0.70 accepts every correct read and rejects every wrong one on this data.
+#
+# MARGIN WAS TRIED AS THE DISCRIMINATOR AND REJECTED. A wrong answer reached
+# 1.86x over its runner-up while a right one fell to 1.23x - they overlap, so
+# margin ALONE would licence confident wrong readings. It is kept only as a
+# second condition, because a wrong read corrupts the solver silently where a
+# refusal merely stops it, and defence in depth is cheap here.
+DIGIT_GATE = 0.70
+DIGIT_MARGIN = 1.15
+
+
+def read_digit(frame, xy, exemplars, gate=DIGIT_GATE, margin=DIGIT_MARGIN):
     """Classify a digit crop against saved exemplars. Returns (value, conf).
 
-    Returns (None, best) when nothing clears `gate` — an unread counter must NOT
-    be silently treated as a zero. A wrong 0 is indistinguishable from a real one
-    and would corrupt the solver's model, which then converges on nothing.
+    Returns (None, best) when the evidence is not good enough — an unread
+    counter must NOT be silently treated as a zero. A wrong 0 is
+    indistinguishable from a real one and would corrupt the solver's model,
+    which then converges on nothing.
+
+    BOTH conditions must hold: the score clears `gate`, AND it beats the best
+    score from any OTHER digit by `margin`. See the note above for why neither
+    alone is enough.
     """
     if not exemplars:
         return None, 0.0
     patch = digit_mask(frame, xy)
-    best, bestv = 0.0, None
+    per = {}
     for val, imgs in exemplars.items():
         for img in (imgs if isinstance(imgs, list) else [imgs]):
             g = tight_glyph(img)
@@ -742,9 +761,18 @@ def read_digit(frame, xy, exemplars, gate=0.80):
                 continue
             r = cv2.matchTemplate(patch, g, cv2.TM_CCOEFF_NORMED)
             m = float(cv2.minMaxLoc(r)[1])
-            if m > best:
-                best, bestv = m, val
-    return (bestv, best) if best >= gate else (None, best)
+            if m > per.get(val, 0.0):
+                per[val] = m
+    if not per:
+        return None, 0.0
+    ranked = sorted(per.items(), key=lambda kv: -kv[1])
+    bestv, best = ranked[0]
+    rival = ranked[1][1] if len(ranked) > 1 else 0.0
+    if best < gate:
+        return None, best
+    if rival > 0 and best < rival * margin:
+        return None, best
+    return bestv, best
 
 
 def load_exemplars():
@@ -761,7 +789,46 @@ def load_exemplars():
     # bright-pixel mask and are measurably incompatible with the ink mask - see
     # `digit_mask`. They are left in place as the record of what wgpu draws,
     # and simply not loaded.
-    for p in sorted(glob.glob(os.path.join(ROOT, INK_DIR, "*.png"))):
+    # PER-RENDERER OVERRIDE, PER DIGIT - the same shape as `tpl/<renderer>/`.
+    #
+    # The operator asked for "a reader that behaves based on the render", and
+    # they were right to: every exemplar here was harvested on webgl, and
+    # switching the backend to wgpu made the reader fail in the OPPOSITE
+    # direction - green fell to 0.786 where it had been reading 0.853..0.946,
+    # while gold rose to 0.863. The glyphs are close but not the same, because
+    # wgpu draws the text stroke webgl omits.
+    #
+    # The consequence was not a visible error. The solver simply never got
+    # past guess 1, so its history stayed empty and every retry replayed the
+    # SAME deterministic opening guess - which from outside looks like the bot
+    # clicking one pattern over and over.
+    #
+    # Overriding per DIGIT rather than wholesale is what makes this usable:
+    # a backend needs only the digits that actually fail on it, and everything
+    # else falls back to the shared set. Same reasoning as the template
+    # variants, where six crops were enough and the rest held.
+    rend = None
+    try:
+        import perceive
+        rend = perceive.get_renderer()
+    except Exception:
+        pass
+    paths = sorted(glob.glob(os.path.join(ROOT, INK_DIR, "*.png")))
+    swapped = set()
+    if rend:
+        var = sorted(glob.glob(os.path.join(ROOT, INK_DIR, rend, "*.png")))
+        if var:
+            # A digit present in the variant directory REPLACES the shared
+            # ones for that digit; mixing renderings of one glyph is what this
+            # file already measured going wrong.
+            for vp in var:
+                h = os.path.basename(vp).split("_")[0].split(".")[0]
+                if h.isdigit():
+                    swapped.add(h)
+            paths = [q for q in paths
+                     if os.path.basename(q).split("_")[0].split(".")[0]
+                     not in swapped] + var
+    for p in paths:
         n = os.path.splitext(os.path.basename(p))[0]
         head = n.split("_")[0]
         if not head.isdigit():
@@ -773,6 +840,12 @@ def load_exemplars():
         # so no re-binarising. Re-thresholding a mask is how two
         # representations quietly stop being comparable.
         out.setdefault(int(head), []).append(g)
+    # NOT a key in `out`. `read_digit` iterates this dict and treats every key
+    # as a digit VALUE, so a bookkeeping entry in there would be offered as a
+    # possible reading - the silent-corruption failure this module already
+    # guards against everywhere else.
+    global LAST_VARIANT
+    LAST_VARIANT = (rend, sorted(swapped)) if swapped else None
     return out
 
 
@@ -818,6 +891,9 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2,
     if not ex:
         log.info("no digit exemplars in %s - cannot read feedback", INK_DIR)
         return None, 0
+    if LAST_VARIANT:
+        log.info("digit exemplars: %s variants for %s (the rest are shared)",
+                 LAST_VARIANT[0], ", ".join(LAST_VARIANT[1]))
     pool_all = kekkai.candidates(length)
     hist_a, hist_b = [], []          # A: green=cp,gold=wp   B: green=wp,gold=cp
     alive_a = alive_b = True
@@ -871,7 +947,15 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2,
             return None, n
 
         # Prefer a guess consistent with every surviving hypothesis.
-        both = [c for c in pa if c in set(pb)] if (alive_a and alive_b) else []
+        # HOIST THE SET. Written as `c in set(pb)` this rebuilt the whole set
+        # once PER ELEMENT of pa, which is O(len(pa) x len(pb)) - and on the
+        # first guess of a length-6 stage both pools are the full 46,656, so
+        # it measured **48.92s against 0.0019s hoisted, a 25,000x difference**.
+        # That was the "the bot is frozen" the operator saw, and it is also
+        # exactly why TP never stuttered: at length 3 the pool is 216 and the
+        # same line costs 0.00s. The cost is quadratic in the code length.
+        pb_set = set(pb) if (alive_a and alive_b) else ()
+        both = [c for c in pa if c in pb_set] if (alive_a and alive_b) else []
         pool = both or (pa if alive_a else pb)
         guess = kekkai.next_guess(length, hist_a if alive_a else hist_b) \
             if len(pool) == len(pa or pb) else pool[0]
@@ -936,7 +1020,20 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2,
         gv, gc = read_digit(frame, g_xy, ex)
         ov, oc = read_digit(frame, o_xy, ex)
         if gv is None or ov is None:
+            # SAVE INTO THE RENDERER'S OWN DIRECTORY. A crop harvested on
+            # wgpu is not an exemplar for webgl - that mismatch is the whole
+            # reason this is per-renderer - so it must not land where the
+            # shared set lives, or classifying it would poison the backend it
+            # came from. On an unknown renderer it falls back to the shared
+            # directory, which is where the original set was harvested.
             d = os.path.join(ROOT, INK_DIR)
+            try:
+                import perceive as _p
+                _r = _p.get_renderer()
+                if _r:
+                    d = os.path.join(d, _r)
+            except Exception:
+                pass
             os.makedirs(d, exist_ok=True)
             cv2.imwrite(os.path.join(d, f"UNREAD_green_{n}.png"),
                         digit_mask(frame, g_xy))
@@ -975,8 +1072,30 @@ def solve_live(cap, actor, log, length=3, max_guesses=10, settle=2.2,
                 on_history(list(hist_a))
             return None, n + 1
         log.info("   feedback: green=%d gold=%d", gv, ov)
-        if gv == length or ov == length:
-            log.info("   a counter reached %d -> SOLVED: %s", length,
+        # ONLY THE GREEN COUNTER CAN MEAN SOLVED.
+        #
+        # This read `gv == length or ov == length`, and the gold half is the
+        # exact opposite of a win: gold counts runes that are CORRECT BUT IN
+        # THE WRONG PLACE, so gold == length means every rune is present and
+        # NONE is in position. The game's own rules panel states that mapping.
+        #
+        # It made length-6 stages unwinnable, and often. With permutation
+        # codes the opening guess is a derangement of the secret about 37% of
+        # the time (1/e), which reads gold=6 immediately - so the solver
+        # declared SOLVED, `ss.play` found the puzzle still open, re-entered,
+        # replayed the same opener and burned another of the ten rows. That is
+        # the loop the operator saw:
+        #
+        #     resuming a puzzle that already has 1 guess(es) of history
+        #     guess 1: Green,Red,Blue,Black,Yellow,White  (pool A=46656)
+        #     feedback: green=0 gold=6
+        #     ... and again, and again
+        #
+        # The PANEL CLOSING is the real solve signal and is handled above;
+        # this is only a shortcut for the frame where the counter is readable
+        # but the close has not landed yet.
+        if gv == length:
+            log.info("   green reached %d -> SOLVED: %s", length,
                      ",".join(guess))
             return guess, n + 1
         hist_a.append((guess, gv, ov))

@@ -74,6 +74,15 @@ VIEWPORT = (1720, 720, 2)          # the ONE pinned geometry every template
 # S1..S8 are the skill slots (4 left bank, 4 right).
 SKILL_SLOTS = ["AT", "CH", "DO", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
 SKILLS_PATH = "run/skills.json"
+# The hunts carry their own rotation; see `battle_cfg`.
+HUNT_SKILLS_PATH = "run/hunt_skills.json"
+# Eudemon bosses to skip, as row FINGERPRINTS (see eudemon.rows).
+# Fingerprints rather than names or indices, because the list
+# re-pages and re-orders; a fingerprint survives that.
+EUDEMON_BLACKLIST_PATH = "run/eudemon_blacklist.json"
+# What the hunt has SEEN (key + rank), and which keys to skip.
+EUDEMON_ROSTER_PATH = "run/eudemon_roster.json"
+EUDEMON_SKIP_PATH = "run/eudemon_skip.json"
 FARM_PATH = "run/farm.json"
 GRADES = ["auto", "S", "A", "B", "C"]
 
@@ -107,9 +116,59 @@ GRADES = ["auto", "S", "A", "B", "C"]
 # Flush-lefting the game would drop the floor to 1340, and that was tried and
 # REVERTED - see the note in dock.py's focus(). Do not re-add a narrower option
 # here without that working first.
-MIN_VIEWPORT_W = 1720
+# HEIGHT IS THE OTHER HALF, and it is a CORRECTNESS setting, not comfort.
+#
+# The game is 960x**839** CSS. At the historical 720 the bottom **119 CSS px
+# (238 captured)** are simply below the fold, and several things live down
+# there: the NPC/friend rail, the recruit `+` row, and - the reason this was
+# added - the SS hints panel's green button, which is the ONLY exit from the
+# Balance Control and Sage Sealed Boxes rules screens. It was measured at
+# y=1404..1410 against a frame that ends at 1440, i.e. a 30..36 px sliver, and
+# `ss.hints_button` only works there by clicking near the blob's TOP because
+# its centre is off screen. Reported from Windows as the balance minigame
+# being unreachable - a thinner sliver, or none at all, and the mission is
+# abandoned on a screen whose only control cannot be pressed.
+#
+# 1720x900 keeps the WIDTH so nothing moves sideways. That distinction is the
+# whole point, and it is measured: width RE-CENTRES the game (x went
+# 380 -> 240 -> 480 -> 160 across 1720/1440/1920/1280), which shifts every
+# absolute constant, while height only reveals more of a top-aligned game. So
+# at the same width every x stays valid, every y stays valid, and the clipped
+# band becomes visible - no template, no geometry and no threshold changes.
+#
+# This is NOT the prohibited resize. `ruffle-player` is untouched; this is
+# `Emulation.setDeviceMetricsOverride`, which the top of CLAUDE.md names as
+# the correct mechanism precisely because it does not desync click -> stage
+# mapping. The recruit rail's bounded player-grow stays what it is - that one
+# is needed because the `+` row is NOT DRAWN at any viewport ("the clip is not
+# the viewport", measured at 800/860/900), which is a different fault from
+# content that is drawn and merely below the fold.
+#
+# Scrolling stays LOCKED either way: `__nsbotScrollLock` rides with focus
+# mode and is independent of the viewport.
+# FLUSH LEFT: pull the game to x=0 and drop the dead wallpaper strip.
+#
+# With the game CENTRED the floor is 1720, because the page centres it in the
+# full viewport while ignoring the panel:  (W+960)/2 <= W-380  ->  W >= 1720.
+# Flush-left the arithmetic is simply  960 <= W-380  ->  W >= 1340, so 380 px
+# of wasted width disappears.
+#
+# This moves the canvas 760 captured px, which used to be unthinkable: 47
+# hardcoded coordinates across 13 modules were measured with it elsewhere and
+# only three modules correct for drift. `Capture.normalise` is what makes it
+# safe - the frame is translated back to the reference layout, so every
+# constant still lands and the inverse is applied once at the click door. Do
+# not set this True with `Capture.normalise` False.
+FLUSH_LEFT = True
+MIN_VIEWPORT_W = 1340 if FLUSH_LEFT else 1720
 VIEWPORTS = [
     {"key": "1720x720@2", "label": "1720x720", "w": 1720, "h": 720, "dpr": 2},
+    {"key": "1720x900@2", "label": "1720x900 (whole game)",
+     "w": 1720, "h": 900, "dpr": 2},
+] + ([
+    {"key": "1340x900@2", "label": "1340x900 (no dead strip)",
+     "w": 1340, "h": 900, "dpr": 2},
+] if FLUSH_LEFT else []) + [
     {"key": "1920x900@2", "label": "1920x900", "w": 1920, "h": 900, "dpr": 2},
     {"key": "2200x980@2", "label": "2200x980", "w": 2200, "h": 980, "dpr": 2},
     {"key": "2560x1080@2", "label": "2560x1080", "w": 2560, "h": 1080, "dpr": 2},
@@ -229,6 +288,33 @@ class Disconnected(Exception):
     """The CDP socket died — usually a navigation that tore down the target."""
 
 
+def chosen_viewport():
+    """(w, h, dpr) the OPERATOR picked, or the reference if they picked none.
+
+    THERE MUST BE ONE ANSWER TO THIS, and for a while there were two. `attach`
+    read the stored choice; `relog` re-pinned the hardcoded `VIEWPORT`. Since
+    applying a window size RELOADS - and `relog` is also the cure for an
+    unreadable screen, a post-defeat recovery and a wake from sleep - the
+    operator's choice was overwritten within a second of being made, and again
+    every time anything relogged. Measured: the panel stored `1720x900@2`, the
+    handler pinned 900, `relog` immediately pinned 720 back, and the captured
+    frame stayed 3440x1440.
+
+    That directly contradicts `PROGRESS_FILES`' own note a few lines below,
+    which lists the window size among the preferences that must SURVIVE - and
+    it matters beyond tidiness: at 720 the bottom 119 CSS px of the 839-tall
+    game are below the fold, which is where the SS hints panel's green button
+    lives. That button is the only exit from the Balance Control and Sage
+    Sealed Boxes rules screens.
+
+    Same shape as the reward panel and the character finder: a rule taught to
+    one caller and not the other. One place to ask, so they cannot diverge.
+    """
+    vp = next((v for v in VIEWPORTS
+               if v["key"] == _read_json(VIEWPORT_PATH, {}).get("key")), None)
+    return (vp["w"], vp["h"], vp["dpr"]) if vp else VIEWPORT
+
+
 def attach(port, log, tpls=None, install_dock=True):
     """Build a fresh CDP connection and everything that hangs off it.
 
@@ -241,17 +327,23 @@ def attach(port, log, tpls=None, install_dock=True):
     c.call("Page.enable")
     # Honour the operator's chosen window, so a restart does not silently snap
     # back to the reference size after they picked another.
-    _vp = next((v for v in VIEWPORTS
-                if v["key"] == _read_json(VIEWPORT_PATH, {}).get("key")), None)
-    browser.pin_viewport(c, _vp["w"], _vp["h"], _vp["dpr"]) if _vp else \
-        browser.pin_viewport(c, *VIEWPORT)
+    browser.pin_viewport(c, *chosen_viewport())
     cap = Capture(c)
     actor = Actor(c, cap, log, dry_run=False)
     dk = dock_mod.Dock(c, log)
+    # Bake the flush-left default into the injected bootstrap, so a reload -
+    # including one inside a task, where `ensure_focus` will not run for
+    # minutes - comes back with the game already where the layout expects it.
+    dk.flush_left_default = FLUSH_LEFT
     if install_dock:
         dk.install(verify=False)
         rect = dk.dock_rect()
         if rect:
+            # RAW, deliberately. `Actor.blocked_by` converts the CLICK into
+            # this space at comparison time rather than storing a shifted
+            # zone - a stored one is a cached belief, and caching it from a
+            # mid-reload measurement is what once left the bot refusing its
+            # own Play button. See the note there.
             actor.no_click_zones.append(rect)
     return c, cap, actor, dk
 
@@ -300,6 +392,13 @@ class Runner:
         # Editable from the panel, and persisted OUTSIDE the tracked config so
         # experimenting with slots never dirties a versioned file.
         self.skills = _read_skills()
+        # A SECOND ROTATION, FOR THE HUNTS. Hunting House and Eudemon bosses
+        # are a different fight from a story mission - the operator asked for
+        # them to carry their own skill order, which is also how the reference
+        # bot is arranged (`HHSkill` and `EudemonSkill` sit beside the rest).
+        # Empty means "use the main order", so the feature costs nothing until
+        # it is used.
+        self.hunt_skills = _read_skills(HUNT_SKILLS_PATH)
         f = _read_json(FARM_PATH, {})
         self.grade = f.get("grade")          # None == auto
         self.pin_page = f.get("page")        # None == highest unlocked
@@ -438,9 +537,63 @@ class Runner:
             return
         if not rect:
             return
+        # AND SAY SO IF THE PANEL IS OVER THE GAME.
+        #
+        # `install` asserts `overlaps: false` once, at attach - but the game
+        # MOVES afterwards, and a narrow viewport is only safe while it stays
+        # flush-left. Measured: an in-task relog came back with flush-left
+        # off, the game re-centred to 190..1150 under a panel starting at 960,
+        # and the bot sat re-clicking a control the panel was covering, with
+        # nothing in the log naming the cause. A guard that is checked once is
+        # not a guard against something that changes.
+        try:
+            gx, _gy, gscale = self.cap.game_metrics()
+            if self.cap.game_metrics_ok():
+                right = self.cap.REFERENCE_ORIGIN[0] + gx + \
+                    self.cap.REFERENCE_CANVAS_W * gscale
+                # IT MUST PERSIST. Applying a window size reloads, and for a
+                # second or two mid-reload the game is centred and the panel
+                # does overlap it - then flush-left lands and it does not.
+                # Reporting that transient is a false alarm, and this file's
+                # own rule is that a status light which cries wolf is worse
+                # than none: it teaches the operator to ignore the real one.
+                if right > rect[0] + 1:
+                    self._overlap_n = getattr(self, "_overlap_n", 0) + 1
+                    if self._overlap_n == self.OVERLAP_PATIENCE:
+                        self.log.error(
+                            "the panel is drawn OVER the game (game ends "
+                            "%.0f, panel starts %d) and has been for %d "
+                            "cycles. Clicks there will be refused or land on "
+                            "the panel - widen the window, or check that "
+                            "flush-left applied.",
+                            right, rect[0], self._overlap_n)
+                else:
+                    self._overlap_n = 0
+        except Exception:
+            pass
+        # THE ZONE IS STORED RAW, in the page's own coordinates.
+        # `Actor.blocked_by` converts the click instead, at comparison time -
+        # see the note there. Storing a shifted copy made the zone a cached
+        # belief, and one taken mid-reload (shift (380, -602) rather than
+        # (760, 0)) stood until the next cycle, which during a task never
+        # came: the bot refused its own Play button in a tight loop.
         if getattr(self, "_zone", None) != rect:
-            if getattr(self, "_zone", None) in self.actor.no_click_zones:
-                self.actor.no_click_zones.remove(self._zone)
+            # DROP EVERY DOCK-SHAPED ZONE, not just the one we remember.
+            #
+            # `attach` appends the dock rect before this method has ever run,
+            # and it does so in REAL captured px - while this method appends
+            # the NORMALISED one. Removing only `self._zone` (None on the
+            # first pass) left both in the list, so a legitimate click in
+            # reference space fell inside the stale real-space copy and was
+            # refused. Measured: `REFUSING click (2406,1061) resume:play - it
+            # lands on the control dock (1920, 0, 760, 1800)`, repeatedly,
+            # with the correct zone at 2680 sitting in the list beside it.
+            #
+            # The panel is the only thing that is dock-shaped, so matching on
+            # its size is precise, and it leaves other guards alone.
+            self.actor.no_click_zones[:] = [
+                z for z in self.actor.no_click_zones
+                if not (len(z) == 4 and z[2] == rect[2] and z[3] == rect[3])]
             if rect not in self.actor.no_click_zones:
                 self.actor.no_click_zones.append(rect)
             if getattr(self, "_zone", None) is not None:
@@ -456,6 +609,8 @@ class Runner:
                 "note": self.note, "tasks": TASKS, "log": self.log.lines[-10:],
                 "focus": self.focus_on,
                 "skills": self.skills, "skill_slots": SKILL_SLOTS,
+                "hunt_skills": self.hunt_skills,
+                "eudemon": self.eudemon_roster(),
                 "grades": GRADES, "grade": self.grade,
                 "viewports": VIEWPORTS, "viewport": self.viewport,
                 "renderers": RENDERERS,
@@ -536,6 +691,43 @@ class Runner:
             self.skills = []
             _write_skills(self.skills)
             self.log.info("operator: skill order cleared (Attack only)")
+        elif c == "hskill":
+            k = cmd.get("arg")
+            if k in SKILL_SLOTS:
+                self.hunt_skills.append(k)
+                _write_skills(self.hunt_skills, HUNT_SKILLS_PATH)
+                self.log.info("operator: HUNT skill order -> %s",
+                              " ".join(self.hunt_skills))
+        elif c == "eu_skip":
+            key = str(cmd.get("arg") or "")
+            roster = self.eudemon_roster()
+            entry = next((e for e in roster if e["key"] == key), None)
+            if entry is None:
+                return
+            # EVERY READ RANK MAY BE SKIPPED, SS INCLUDED. The refusal that
+            # used to sit here protected against a STALE roster silently
+            # costing an event attempt; the scan button rebuilds the list on
+            # demand, so that premise is gone and the choice is the
+            # operator's. `eudemon.blacklistable` remains the single place the
+            # rule lives, and it still refuses an UNREAD rank.
+            import eudemon as _eu
+            if not _eu.blacklistable(entry.get("rank")):
+                self.log.info("operator: %s has no readable rank, so it is "
+                              "not offered for skipping", key)
+                return
+            skip = {str(k) for k in _read_json(EUDEMON_SKIP_PATH, [])}
+            if key in skip:
+                skip.discard(key)
+            else:
+                skip.add(key)
+            _write_json(EUDEMON_SKIP_PATH, sorted(skip))
+            self.log.info("operator: Eudemon skip list -> %s",
+                          ", ".join(sorted(skip)) or "(nothing)")
+        elif c == "hskill_clear":
+            self.hunt_skills = []
+            _write_skills(self.hunt_skills, HUNT_SKILLS_PATH)
+            self.log.info("operator: hunt skill order cleared (the main "
+                          "order will be used)")
         elif c == "grade":
             g = cmd.get("arg")
             self.grade = None if g == "auto" else (g if g in GRADES else self.grade)
@@ -581,7 +773,10 @@ class Runner:
                 pass
             self._hard_exit()
         elif c == "task":
-            if any(t["key"] == cmd.get("arg") for t in TASKS):
+            # BY_KEY, not TASKS: a hidden task has no button in the task row
+            # but is still a real task, and validating against the panel list
+            # would make it unreachable.
+            if cmd.get("arg") in tasks.BY_KEY:
                 was, self.task = self.task, cmd["arg"]
                 # SWITCHING TASK MUST INTERRUPT THE ONE IN FLIGHT.
                 #
@@ -604,6 +799,29 @@ class Runner:
                                   self.task, was)
                 else:
                     self.log.info("operator: task -> %s", self.task)
+        elif c == "run_task":
+            # ARM AND GO, in one press. Selecting a task only SETS it - Run is
+            # a separate button - which is right for a long farm the operator
+            # is choosing deliberately, and wrong for "show me what bosses
+            # exist": that is a question, and a question should be answered by
+            # pressing the thing that asks it.
+            #
+            # **It refuses to barge in.** If something is already running, the
+            # task is armed and nothing is interrupted - a scan is not worth
+            # aborting a mission for, and silently killing one to answer a
+            # question would be the worst reading of this button.
+            key = str(cmd.get("arg") or "")
+            if key not in tasks.BY_KEY:
+                return
+            self.task = key
+            if self.mode == "running":
+                self.log.info("operator: %s is queued - something is already "
+                              "running, so it was not interrupted", key)
+                return
+            self.mode = "running"
+            self.unknown = 0
+            _write_control("run")
+            self.log.info("operator: RUN (%s) - started on click", key)
         elif c == "renderer":
             rd = next((r for r in RENDERERS if r["key"] == cmd.get("arg")), None)
             if rd is None:
@@ -665,6 +883,11 @@ class Runner:
         elif c == "relog":
             self.log.info("operator: RELOG")
             self.relog()
+
+    # How many consecutive cycles the panel must be over the game before it
+    # is worth saying so. A viewport change reloads, and mid-reload the game
+    # is briefly centred and does overlap - see `_refresh_no_click_zone`.
+    OVERLAP_PATIENCE = 4
 
     HEARTBEAT_EVERY = 3.0        # seconds; see the note below
 
@@ -785,12 +1008,34 @@ class Runner:
         except Exception:
             pass
 
+        # WHERE THE CHILD'S OUTPUT GOES MUST NEVER DECIDE WHETHER IT STARTS.
+        #
+        # Reported from Windows: pressing Stop killed the bot and printed
+        # `could not relaunch: [Errno 13] Permission denied: run/app.log`,
+        # leaving the panel with no receiver - precisely the dead-panel state
+        # Stop was rewritten to prevent. The launcher redirects with cmd's
+        # `>> run\app.log`, and cmd opens that file WITHOUT sharing writes, so
+        # a second open for append is refused. On POSIX the same open
+        # succeeds, which is why it was never seen here.
+        #
+        # The relaunch is the point; the log destination is a convenience. So
+        # it degrades instead of failing: the shared log, else a private one
+        # named for the child, else no redirection at all.
+        def _child_output():
+            attempts = [("run/app.log", "the shared log"),
+                        (f"run/app-{os.getpid()}.log", "a private log")]
+            for rel, what in attempts:
+                try:
+                    # APPEND, so a restart never erases the record of
+                    # whatever the operator pressed Stop about.
+                    return open(os.path.join(ROOT, rel), "a"), what
+                except OSError as ex:
+                    print(f"  (cannot write {rel}: {ex}) ", flush=True)
+            return subprocess.DEVNULL, "no log (the console is gone)"
+
         started = False
         try:
-            log_path = os.path.join(ROOT, "run/app.log")
-            # APPEND, so the restart does not erase the record of whatever the
-            # operator pressed Stop about.
-            fh = open(log_path, "a")
+            fh, where = _child_output()
             kwargs = {"stdout": fh, "stderr": subprocess.STDOUT,
                       "stdin": subprocess.DEVNULL, "cwd": ROOT}
             if hasattr(os, "setsid"):
@@ -803,8 +1048,8 @@ class Runner:
             print(f"  could not relaunch: {e}", flush=True)
 
         if started:
-            print("  stopped and cleared - relaunching attached "
-                  "(the panel comes back on its own)", flush=True)
+            print(f"  stopped and cleared - relaunching attached, writing to "
+                  f"{where} (the panel comes back on its own)", flush=True)
         else:
             print("  stopped by the operator - relaunch failed, so run: "
                   ".venv/bin/python engine/app.py --attach", flush=True)
@@ -837,7 +1082,22 @@ class Runner:
         """
         self.cdp.call("Page.reload")
         time.sleep(4.0)
-        browser.pin_viewport(self.cdp, *VIEWPORT)
+        # THE OPERATOR'S SIZE, NOT THE REFERENCE. Pinning `VIEWPORT` here threw
+        # away a window size the moment it was chosen - see `chosen_viewport`.
+        browser.pin_viewport(self.cdp, *chosen_viewport())
+        # AND RE-ASK WHICH BACKEND, because this replaced the document.
+        #
+        # `ensure_renderer_templates` caches its answer and says it "does NOT
+        # re-ask once known: the renderer cannot change while the document
+        # stays put". True - but a relog does not leave it put, and this path
+        # never cleared the cache. Measured live: the bot had `webgl`
+        # variants loaded while `loadedConfig`, `localStorage.renderMode` AND
+        # the pixels all said `wgpu-webgl`, because the value was read once at
+        # 07:06 and the document had been replaced many times since. The
+        # failure is silent - the wrong crops merely score lower, so the bot
+        # limps instead of stopping. Same standing rule as focus mode and
+        # flush-left: a cached belief about page state dies with a navigation.
+        self._renderer_templates_for = None
         # The reload re-injected the panel with no state and dropped focus.
         # Restore both here rather than leaving it to the next cycle, which a
         # running task may not reach for minutes.
@@ -961,6 +1221,15 @@ class Runner:
             if self.dock.focus(True) in ("focused", "already"):
                 self.focus_on = True
                 self.focus_aligned = False
+                # RE-ASSERT FLUSH-LEFT HERE TOO. The bootstrap defaults it, so
+                # this is belt and braces - but this is the path a relog takes
+                # from INSIDE a task, and it is the one where getting it wrong
+                # put the panel over the game at the 1340 viewport.
+                try:
+                    self.dock.flush_left(FLUSH_LEFT)
+                    self.dock.align()
+                except Exception:
+                    pass
                 self.log.info("focus mode restored after the reload")
         except Exception:
             pass
@@ -1227,18 +1496,115 @@ class Runner:
         _write_json(FARM_PATH, {"grade": self.grade, "page": self.pin_page,
                                 "row": self.pin_row})
 
-    def battle_cfg(self):
+    def eudemon_roster_fps(self):
+        """The stored roster with fingerprints as numpy arrays, for matching."""
+        import numpy as _np
+        out = []
+        for e in _read_json(EUDEMON_ROSTER_PATH, []) or []:
+            try:
+                fp = _np.array(e["fp"], dtype=_np.uint8)
+            except Exception:
+                continue
+            if fp.ndim == 2 and fp.size:
+                # name and `listed` MUST travel with the fingerprint. A
+                # first version dropped them here, which silently undid the
+                # retirement fix: the survey reloaded every boss as freshly
+                # listed and nameless on the next scan.
+                out.append({"key": str(e["key"]), "rank": e.get("rank") or "?",
+                            "name": e.get("name"),
+                            "listed": bool(e.get("listed", True)),
+                            "fp": fp})
+        return out
+
+    def eudemon_skip_keys(self):
+        return {str(k) for k in _read_json(EUDEMON_SKIP_PATH, []) or []}
+
+    def save_eudemon_roster(self, roster):
+        """Persist what the hunt has seen, so the panel can offer it later."""
+        try:
+            prev = {str(e.get("key")): e.get("name")
+                    for e in (_read_json(EUDEMON_ROSTER_PATH, []) or [])
+                    if isinstance(e, dict)}
+            _write_json(EUDEMON_ROSTER_PATH,
+                        [{"key": e["key"], "rank": e["rank"],
+                          # A LABEL, NEVER AN IDENTITY. Identity stays the
+                          # fingerprint; the name only makes the panel
+                          # readable, so a re-harvest must not drop one that
+                          # was already recorded.
+                          "name": e.get("name") or prev.get(str(e["key"])),
+                          # False = seen before, not on the list right now.
+                          # Kept so it returns as ITSELF when the event does.
+                          "listed": bool(e.get("listed", True)),
+                          "fp": e["fp"].tolist()} for e in roster])
+        except Exception as ex:
+            self.log.warning("could not save the Eudemon roster: %s", ex)
+
+    def eudemon_roster(self):
+        """[{key, rank, skipped}] - what the panel offers to blacklist.
+
+        The roster is harvested by the hunt as it pages the list and cached in
+        `run/eudemon_roster.json`, because the panel must be able to show the
+        bosses BEFORE a hunt is running - an operator picks what to skip and
+        then presses Run, not the other way round.
+        """
+        seen = _read_json(EUDEMON_ROSTER_PATH, [])
+        skip = {str(k) for k in _read_json(EUDEMON_SKIP_PATH, [])}
+        out = []
+        for e in seen if isinstance(seen, list) else []:
+            if not isinstance(e, dict) or "key" not in e:
+                continue
+            # Only what the garden is offering NOW. A retired boss stays in
+            # the file so its identity survives the event, but showing it
+            # would invite skipping something that is not there.
+            if not bool(e.get("listed", True)):
+                continue
+            out.append({"key": str(e["key"]), "rank": e.get("rank") or "?",
+                        "name": e.get("name") or "",
+                        "skipped": str(e["key"]) in skip})
+        return out
+
+    def eudemon_blacklist(self):
+        """Row fingerprints the Eudemon hunt should skip.
+
+        Stored as plain lists of ints so the file stays readable and editable
+        by hand - the operator is the one who decides what goes in it.
+        SS rows are exempt from skipping regardless of what this returns;
+        `eudemon.blacklistable` decides which ranks qualify, not this
+        accessor - it now admits every rank whose badge READ.
+        """
+        import numpy as _np
+        raw = _read_json(EUDEMON_BLACKLIST_PATH, [])
+        out = []
+        for fp in raw if isinstance(raw, list) else []:
+            try:
+                a = _np.array(fp, dtype=_np.uint8)
+            except Exception:
+                continue
+            if a.ndim == 2 and a.size:
+                out.append(a)
+        return out
+
+    def battle_cfg(self, profile=None):
         """The config a mission should run with, including the panel's skills.
 
         The rotation is applied HERE rather than written into the config file, so
         what the operator picked in the panel is what the very next battle uses -
         that is the whole point of it being editable live. An empty order means
         Attack only, which is the documented safe default.
+
+        `profile="hunt"` prefers the HUNT order (Hunting House, Eudemon), and
+        FALLS BACK to the main one when it is empty rather than dropping to
+        Attack-only. A boss fight with no rotation would be the worst possible
+        default, and an operator who has not filled the second list in has not
+        asked for one.
         """
         cfg = dict(self.cfg)
-        if self.skills:
+        order = self.skills
+        if profile == "hunt" and self.hunt_skills:
+            order = self.hunt_skills
+        if order:
             b = dict(cfg.get("battle", {}))
-            b["rotation"] = list(self.skills)
+            b["rotation"] = list(order)
             cfg["battle"] = b
         m = dict(cfg.get("mission", {}))
         m["grade"] = self.grade
@@ -1246,24 +1612,34 @@ class Runner:
         cfg["mission"] = m
         return cfg
 
-    def _run_mission(self):
+    def _run_mission(self, profile=None):
         """Play a mission that is already under way."""
         import mission as mission_mod
         from gate import Gate
-        cfg = self.battle_cfg()
-        if self.skills:
-            self.log.info("using the panel's skill order: %s",
-                          " ".join(self.skills))
+        cfg = self.battle_cfg(profile)
+        order = cfg.get("battle", {}).get("rotation") or []
+        if order:
+            self.log.info("using the %s skill order: %s",
+                          "HUNT" if (profile == "hunt" and self.hunt_skills)
+                          else "panel's", " ".join(order))
         r = mission_mod.MissionRunner(
-            Gate(self.cap, self.log, self.controls), self.actor, self.cap,
+            Gate(self.cap, self.log, self.controls, actor=self.actor),
+            self.actor, self.cap,
             self.tpls, cfg, self.log, self.controls)
         r.grade = self.cfg.get("mission", {}).get("grade") or "A"
         try:
             out, stats = r.run()
             self.note = f"mission: {out} {stats}"
             self.log.info("%s", self.note)
+            # RETURN IT. This used to return None, so a caller could not tell
+            # a banked mission from a lost one - and `ss.run_one` then ran its
+            # own close-out over a mission the runner had ALREADY closed out,
+            # waited 45s for a panel that was gone, and recorded a WIN as a
+            # failure. One SS attempt per occurrence, and they do not come back.
+            return out, stats
         except Exception as e:
             self._setback(f"mission runner: {type(e).__name__}: {e}")
+            return None, None
 
     def browser_alive(self, timeout=2.0):
         """Is the BROWSER still there? (not: is our page still there)
@@ -1428,10 +1804,26 @@ class Runner:
             # This cannot cause the jumping that re-APPLYING focus used to,
             # because `align` is a no-op when the game is already in place - it
             # returns "aligned" and touches nothing.
+            # ASSERT FLUSH-LEFT BEFORE ALIGNING. It is a page-side flag, and a
+            # reload re-injects the bootstrap with it back at its default - the
+            # standing rule that any cached belief about page state dies with a
+            # navigation. Setting it is idempotent and `align` does the work,
+            # so re-asserting each cycle costs one evaluate.
+            # ASSERT IT EITHER WAY, never "skip when off". Removing the code
+            # that SETS a margin does not clear a margin already applied - the
+            # trap the first attempt at this left in the DOM, and one I walked
+            # straight back into: with the flag off the call was skipped, so a
+            # stale inline -380px survived a restart and the game stayed
+            # shifted (and clipped) with nothing left to explain it.
+            try:
+                self.dock.flush_left(FLUSH_LEFT)
+            except Exception:
+                pass
             try:
                 r = self.dock.align()
-                if r == "realigned":
-                    self.log.info("focus: the game had drifted; re-aligned")
+                if isinstance(r, str) and r.startswith("realigned"):
+                    self.log.info("focus: the game had drifted; re-aligned (%s)",
+                                  r.split(":")[-1])
                 self.focus_aligned = True
             except Exception:
                 pass
@@ -1671,12 +2063,12 @@ def _write_json(rel, value):
         pass
 
 
-def _read_skills():
-    return [k for k in _read_json(SKILLS_PATH, []) if k in SKILL_SLOTS]
+def _read_skills(path=None):
+    return [k for k in _read_json(path or SKILLS_PATH, []) if k in SKILL_SLOTS]
 
 
-def _write_skills(order):
-    _write_json(SKILLS_PATH, order)
+def _write_skills(order, path=None):
+    _write_json(path or SKILLS_PATH, order)
 
 
 def _alive(pid):
@@ -1797,12 +2189,27 @@ def _lock_holder(path, marker="app.py"):
     # The marker is only the fallback for a legacy lock that recorded no
     # command, and it is deliberately not applied when identity already matched:
     # a legitimate launch may not have "app.py" in its command line at all.
+    # UNREADABLE IS NOT DISPROVED, and on Windows it is common.
+    #
+    # `_proc_cmd` shells out - PowerShell there, `ps` on POSIX - and it returns
+    # "" whenever that fails: an execution policy blocking PowerShell, `wmic`
+    # absent on a recent Windows, a locked-down box. The first version read an
+    # empty answer as "not the holder we recorded" and DROPPED THE LOCK, so on
+    # exactly those machines the one guard against two bots clicking one game
+    # was inert - and this file already records eight instances stacking up.
+    #
+    # So an unreadable command line keeps the lock, which is the same
+    # safe-direction choice `_alive` makes for the same reason: a false
+    # "still running" costs a refused launch the operator can clear by killing
+    # a pid, while a false "stale" costs a duplicate nobody notices.
+    if not cmd:
+        return pid
     if saved:
-        if cmd and cmd == saved:
+        if cmd == saved:
             return pid
         _drop_lock(path)
         return None
-    if cmd and marker not in cmd:
+    if marker not in cmd:
         _drop_lock(path)
         return None
     return pid
@@ -1985,7 +2392,8 @@ def main():
         Log().info("browser: %s (%s)", browser.browser_name(exe), exe)
         browser.launch(url, profile, port=a.port, app_mode=True,
                        browser=exe,
-                       window=(VIEWPORT[0] + 8, VIEWPORT[1] + 90))
+                       window=(chosen_viewport()[0] + 8,
+                               chosen_viewport()[1] + 90))
 
     log = Log()
     _cap_cv_threads(log)
