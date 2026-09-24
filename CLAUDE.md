@@ -1767,6 +1767,99 @@ re-applied from scratch.
 To retry: re-measure the rect BETWEEN the two corrections, and converge each
 axis separately with its own tolerance check.
 
+### THE BLANK STRIP UNDER THE GAME WAS NEVER A CLIP — the site stops at 780
+
+Reported as "the bottom half is failing to render". It was not a render fault
+and not a clip; the site's layout is authored for a **780 px** box, so the SWF
+draws to about there and everything below it is blank page. Measured on the
+captured frame at viewport 1340x900:
+
+    y   39..1670 captured (19.5..835.5 CSS)   content
+    y 1671..1799 captured (835.5..900 CSS)    WHITE - 64.5 CSS of nothing
+
+**Two cheaper explanations were tested first and BOTH were wrong**, which is
+why they are recorded: `overflow:visible` on `.site-wrapper` (and on every
+other ancestor) changed the frame not at all - matching this file's older note
+that it produces "no reflow, no help" - and the clip chain is irrelevant
+because nothing was being clipped in the first place.
+
+What the sweep showed is that **the game's drawn content ends exactly AT the
+wrapper height**, so the rule is simply "make the wrapper the viewport":
+
+    wrapper  player   blank at bottom   content ends
+      (off)    839       64.5 CSS          835.5 CSS
+       837     900       63.0 CSS          837.0 CSS
+       860     925       40.0 CSS          860.0 CSS
+       880     946       20.0 CSS          880.0 CSS
+       900     968        0.0 CSS          900.0 CSS
+
+`__nsbotPinCSS` therefore carries a `min-height: innerHeight` alongside the
+existing `top:0` pin, on the six layout ancestors. It is built in ONE place
+because it is asserted from two, and its TEXT is rewritten on every align pass
+rather than only when the element is missing - applying a window size changes
+`innerHeight`, and a create-only branch would leave the game sized for the
+PREVIOUS viewport.
+
+**A GENUINE BONUS: the friend rail's `+` row now renders.** This file records
+that reaching those buttons needs the player enlarged, done as a bounded
+exception with a restore in a `finally`. At a full-height wrapper they are
+simply on screen, along with `Visit` and the Invite Reward panel. The recruit
+path's temporary resize is therefore probably now unnecessary - unverified, but
+worth checking before anyone maintains that code again.
+
+### AND THE FIRST ATTEMPT AT IT RESIZED THE PLAYER — the prohibited operation
+
+Raising those heights without looking at the player took `ruffle-player` from
+**960x839 to 960x902**, which is this file's oldest prohibition: resizing it
+desyncs click -> stage mapping inside the SWF. The player is percentage-sized
+off those ancestors (`#game-container` is 107.5% of the wrapper), so growing
+them grows it.
+
+It was caught by MEASURING THE PLAYER after the change rather than by reasoning
+about the CSS, and reverted before anything clicked. The lesson is the cheap
+one: when a change grows a box, check what else is sized off that box.
+
+The player still grows once the rule is in place (839 -> 968) - what matters is
+that the STAGE is not rescaled. Verified across four anchors spanning
+y 577..1177:
+
+    anchor                baseline(839)    full-height(968)
+    lobby_rail_fortune    1.000 @ y824     1.000 @ y953
+    mission_room_entry    1.000 @ y577     1.000 @ y706
+    nav_jutsu             0.965 @ y1160    0.965 @ y1289
+    lobby_logo            1.000 @ y1177    1.000 @ y1306
+
+Identical confidences, all still scale 1.0, every centre moved by the SAME
++129 captured px in y with x unchanged. A pure translation, not a scale - so
+not one template needed recutting.
+
+### A TALLER PLAYER MOVES THE CONTENT WITHOUT MOVING THE ELEMENT
+
+The art is centred in the player, so the +129 above is exactly half the growth
+- and `game_metrics` read only the ELEMENT rect, which stays at y=0. The drift
+was therefore invisible to the one mechanism built to correct for drift.
+
+`Capture.REFERENCE_PLAYER_H` (839) closes it: the offset is the half-difference
+from the player height the templates were cut at,
+
+    oy = (player_h - 839) / 2      # captured px, via dpr
+
+which is **ZERO at the historical layout**, so nothing that worked before
+changes. Note `apply_search_band` uses only `ox` and the scale, so the band is
+untouched by this.
+
+**Round HALF-UP, not banker's.** The half-difference lands on exactly .5
+whenever the growth is odd (player 967.5 -> 128.5 captured), and `round` breaks
+that tie to even - measuring 128 against an observed 129. One pixel is harmless;
+an offset that disagrees with the measurement by a predictable amount is how a
+mystery starts.
+
+Verified live end to end: `resume: lobby (lobby_rail_fortune conf=1.000) in
+442ms`, and across a full TP pass the hand-seal Start button was hit first time
+every round at `css≈(490,265)` where it had been `(492,199)` - reference
+coordinates unchanged, live target shifted, which is the correction doing its
+job on the CLICK path as well as the read path.
+
 ### THERE IS NO TABLE OF WINDOW SIZES — one stage, two transform axes
 
 The client's own AIR manifest (`ref/swf_assets/AIR_application.xml`) settles
@@ -2609,6 +2702,23 @@ GREY. Both halves were wrong, and together they produced "it never finishes
 them all": a count is not the thing that decides whether a list is done, and
 the pass could stop with startable missions still on screen.
 
+**CORRECTION, MEASURED 2026-09-24 — ON THIS SERVER THEY DO DROP OUT.** A clean
+five-mission pass watched the list shrink every time one banked:
+
+    3 row(s) at y=[462, 638, 818]   ->  2 at [462, 638]  ->  1 at [462]  ->  0
+
+so the paragraph above is wrong about the mechanism, at least as the server
+behaves now. It does NOT invalidate `start_row`'s "did anything change?" test,
+which is a POSITIVE reading of "this row is finished" and stays correct either
+way - a row that has dropped out is simply never offered. Nor does it change
+the termination rule: the pass still ends when `pick_any` finds nothing
+startable, which is what actually happened (`0 row(s)` -> "the day's list is
+finished").
+
+Worth knowing because it changes what a SHRINKING list means. Under the old
+belief a row vanishing would have been a reflow or a missed detection; it is
+neither, and nothing should treat it as one.
+
 There is no mission cap now. The pass keeps taking startable rows until every
 row is either played or measured to be finished. `max_missions` survives only
 as an explicit opt-in bound for a cautious caller; the default is unbounded, and
@@ -2639,6 +2749,31 @@ Termination is a measurement, so the count guard that remains
 (`SWEEP_TRIPWIRE = 40`) is a **tripwire, not a policy** — if it ever fires the
 termination check is broken, and it says so at error level rather than looking
 like a tidy stop.
+
+### STILL OPEN: a FAILED mission gets zero retries, so the pass can end early
+
+The operator's expectation is that the pass "keeps going until nothing is
+left", and one path contradicts it. A mission that does not complete is
+fingerprinted into `failed` and skipped by every later sweep:
+
+    if run_one_fn():
+        banked += 1
+    else:
+        failed.append(fp)
+        log.info("mission did not complete; it stays in the list and will "
+                 "not be retried this pass")
+
+so the pass can finish reporting "N set aside after failing" with a mission
+still listed and still startable. The skip list is not wrong - a failed TP
+mission is NOT consumed, so without it the same mission is retried for ever -
+but the retry budget it implements is **zero**, where what is wanted is
+bounded-but-non-zero.
+
+`SWEEP_TRIPWIRE` already prevents a runaway, so a per-fingerprint allowance
+(two attempts, say, before setting it aside) would satisfy both. NOT changed
+yet: the failure did not reproduce on the pass that found it - 5 started,
+5 banked, 0 set aside - so there is no live example to calibrate against, and
+guessing the right budget without one is how a tripwire turns into a policy.
 
 ## "PRESSING RUN FREEZES FOR A BIT" — the sweep was first in line
 

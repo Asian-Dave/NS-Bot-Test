@@ -90,6 +90,19 @@ the page happens to be scrolled — which has caused "could not find the Special
 tab" on a healthy Mission Room. Hiding the game's siblings lets it reflow to
 the top so `scrollY` is 0 and stays 0.
 
+**The game fills the window.** The site's own layout stops at 780 CSS px, so
+without help the game draws to about there and the rest of the window is blank
+page — measured at 64.5 CSS px of nothing at the bottom of a 900 px viewport.
+Focus mode pins the layout ancestors to the viewport height instead, which also
+brings the friend rail's `Recruit` / `Visit` buttons on screen. Only heights are
+touched: the player's width is never changed, so the SWF's own scaling — and
+therefore click → stage mapping — is untouched.
+
+**Picking a window size resizes the OS window too.** The device-metrics override
+pins the *page*, not the window, so a smaller viewport used to sit in the corner
+of whatever window Chrome restored from the profile. The frame thickness is
+measured once and the window is resized to hug the pinned viewport.
+
 ## How it works
 
 ```
