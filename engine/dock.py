@@ -125,6 +125,45 @@ _BOOTSTRAP = r"""
 
   const ID = "__ID__", CSS = __CSS__;
 
+  // THE PIN STYLESHEET, built in ONE place because it is asserted from two
+  // (the focus pass and `__nsbotAlign`), and a rule that exists in only one of
+  // them is the half-applied correction this project keeps paying for.
+  //
+  // It carries two declarations:
+  //
+  //   top:0        pins the site's own `#game-container{top:-58.5px}`, which
+  //                the site recomputes on every reflow.
+  //   min-height   makes the game FILL THE WINDOW instead of stopping short.
+  //
+  // Why min-height is needed at all: the site's layout is authored for a 780px
+  // box, so the SWF draws to 780-ish and everything below it is blank page.
+  // Measured at viewport 1340x900, sweeping the wrapper height:
+  //
+  //     wrapper  player   blank at bottom
+  //       (off)    839      64.5 CSS
+  //        837     900      63.0 CSS
+  //        860     925      40.0 CSS
+  //        880     946      20.0 CSS
+  //        900     968       0.0 CSS
+  //
+  // The game's drawn content ends exactly AT the wrapper height, so the rule
+  // is simply "make the wrapper the viewport". Heights only - the player's
+  // WIDTH is never touched, so the SWF's own scaling is unaffected and click ->
+  // stage mapping is unchanged (verified: all anchors still match at scale 1.0
+  // and their baseline confidences).
+  //
+  // The art is centred in the player, so a taller player also moves the
+  // content down by half the growth; `Capture.game_metrics` measures that and
+  // corrects for it, which is why this may be changed without recutting a
+  // single template.
+  window.__nsbotPinCSS = () => {
+    const h = Math.max(780, Math.round(window.innerHeight || 0));
+    return "#game-container{top:0 !important;}" +
+           "html,body.logged-in,#content-container,.site-wrapper," +
+           "main.main-content,#panels-wrapper" +
+           "{height:auto !important;min-height:" + h + "px !important;}";
+  };
+
   const send = (cmd, arg) => {
     try { window.__BINDING__(JSON.stringify({cmd, arg, t: Date.now()})); }
     catch (e) { /* binding not attached yet; the click is simply dropped */ }
@@ -224,7 +263,7 @@ _BOOTSTRAP = r"""
         pin.id = "__nsbot_pin";
         document.documentElement.appendChild(pin);
       }
-      pin.textContent = "#game-container{top:0 !important;}";
+      pin.textContent = window.__nsbotPinCSS();
       const r0 = g.getBoundingClientRect();
       if (Math.abs(r0.y) > 1) {
         if (!g.hasAttribute("data-nsbot-mt")) {
@@ -375,12 +414,20 @@ _BOOTSTRAP = r"""
     }
     // Re-assert the pin: a reload drops the injected <style>, and without it the
     // site's own top:-58.5px takes over again.
-    if (!document.getElementById("__nsbot_pin")) {
-      const st = document.createElement("style");
+    //
+    // The TEXT is rewritten every pass, not just when the element is missing.
+    // It carries a min-height derived from `innerHeight`, and applying a window
+    // size changes that - so a create-only branch would leave the game sized
+    // for the PREVIOUS viewport, which is the stale-cached-belief failure this
+    // file already has a rule about.
+    let st = document.getElementById("__nsbot_pin");
+    if (!st) {
+      st = document.createElement("style");
       st.id = "__nsbot_pin";
-      st.textContent = "#game-container{top:0 !important;}";
       document.documentElement.appendChild(st);
     }
+    const want = window.__nsbotPinCSS();
+    if (st.textContent !== want) st.textContent = want;
     // FLUSH LEFT, AND EACH AXIS CONVERGES ON ITS OWN MEASUREMENT.
     //
     // This was tried once and reverted, and the recorded cause was not the

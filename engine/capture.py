@@ -9,6 +9,7 @@ and CSS click coordinates are 1:1. On a Retina host it is 2, and captured pixels
 are twice the click coordinates. `self.dpr` records which world we are in so
 callers never have to guess.
 """
+import math
 import time
 
 import cv2
@@ -109,6 +110,7 @@ class Capture:
     # reflow - so a displaced game degrades into slightly-off clicks rather than
     # a cascade of subsystems each blaming itself.
     REFERENCE_ORIGIN = (760, 0)          # captured px, where constants were cut
+    REFERENCE_PLAYER_H = 839             # CSS px, the player height they were cut at
     REFERENCE_CANVAS_W = 1920            # the game is 960 CSS wide at dpr 2
 
     def game_metrics(self, ttl=1.0):
@@ -135,7 +137,7 @@ class Capture:
                 "(()=>{const f=document.querySelector('iframe[src*=emulator]')"
                 "||document.querySelector('iframe[src*=play]');"
                 "if(!f)return '';const r=f.getBoundingClientRect();"
-                "return JSON.stringify({x:r.x,y:r.y,w:r.width});})()")
+                "return JSON.stringify({x:r.x,y:r.y,w:r.width,h:r.height});})()")
             if not raw:
                 # NO GAME ELEMENT. Distinguished from "measured, and it is
                 # exactly at the reference" because those return the same
@@ -148,7 +150,33 @@ class Capture:
             import json as _json
             r = _json.loads(raw)
             ox = int(round(r["x"] * self.dpr)) - self.REFERENCE_ORIGIN[0]
-            oy = int(round(r["y"] * self.dpr)) - self.REFERENCE_ORIGIN[1]
+            # THE ART IS CENTRED IN THE PLAYER, so making the player
+            # TALLER moves the CONTENT without moving the element - and
+            # the element rect is all this used to read, so the drift went
+            # unseen. `#game-container` is 107.5% of the site wrapper with
+            # the art centred in it, so growing the wrapper by D moves the
+            # art down by 0.5 * 1.075 * D.
+            #
+            # Measured on a live village frame, four anchors spanning
+            # y 577..1177, wrapper 780 -> 900:
+            #
+            #     player 839 -> 968, every centre +129 captured px in y,
+            #     x unchanged, all still scale 1.0 and at their baseline
+            #     confidences (1.000 / 1.000 / 0.965 / 1.000)
+            #
+            # and (968 - 839) / 2 = 64.5 CSS = 129 captured px exactly. So
+            # the correction is the half-difference from the player height
+            # the templates were cut at, which is ZERO at that layout and
+            # therefore costs the historical geometry nothing.
+            ph = r.get("h") or self.REFERENCE_PLAYER_H
+            cy = r["y"] + (ph - self.REFERENCE_PLAYER_H) / 2.0
+            # HALF-UP, not banker's. The half-difference lands exactly on
+            # .5 whenever the growth is odd (player 967.5 -> 128.5 captured),
+            # and `round` breaks that tie to EVEN - which measured 128 against
+            # an observed content shift of 129. One pixel is harmless here, but
+            # an offset that disagrees with the measurement by a predictable
+            # amount is exactly the kind of thing that reads as a mystery later.
+            oy = int(math.floor(cy * self.dpr + 0.5)) - self.REFERENCE_ORIGIN[1]
             w = r["w"] * self.dpr
             scale = (w / self.REFERENCE_CANVAS_W) if w > 0 else 1.0
             self._off = (ox, oy, scale)
