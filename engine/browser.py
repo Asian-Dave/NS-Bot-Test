@@ -470,7 +470,81 @@ def pin_viewport(cdp, width=1728, height=851, scale=2):
     Overriding device metrics makes the canvas geometry - and therefore template
     scale - reproducible on Windows and macOS alike.
     """
+    _measure_chrome(cdp)
     cdp.call("Emulation.setDeviceMetricsOverride", width=width, height=height,
              deviceScaleFactor=scale, mobile=False)
+    fit_window(cdp, width, height)
     return cdp.evaluate(
         "JSON.stringify({w: innerWidth, h: innerHeight, dpr: devicePixelRatio})")
+
+
+# THE OVERRIDE PINS THE PAGE, NOT THE WINDOW. Chrome restores the window's
+# last size from the profile, so after picking a smaller viewport the emulated
+# page sat in the top-left of a window still sized for the old one, leaving an
+# empty band on the right that the operator had to drag away by hand every
+# launch. So the OS window is resized to hug the pinned viewport.
+#
+# The frame thickness (title bar, borders) differs per platform and browser,
+# so it is MEASURED once, before any override exists - on a fresh CDP session
+# none does, since the override is scoped to the session that set it. With
+# an override active `innerWidth` reports the emulated size and the delta
+# would be nonsense, hence measure-once. The fallback is what `launch` has
+# always assumed for an app window.
+_CHROME = None
+_CHROME_FALLBACK = (8, 90)
+
+
+def _window(cdp):
+    r = cdp.call("Browser.getWindowForTarget")
+    return r["windowId"], r["bounds"]
+
+
+def _measure_chrome(cdp):
+    global _CHROME
+    if _CHROME is not None:
+        return
+    try:
+        _, b = _window(cdp)
+        if b.get("windowState") in ("fullscreen", "minimized"):
+            return                       # no frame to measure
+        inner = json.loads(cdp.evaluate(
+            "JSON.stringify([innerWidth, innerHeight])"))
+        dw, dh = b["width"] - inner[0], b["height"] - inner[1]
+        if 0 <= dw <= 200 and 0 <= dh <= 300:
+            _CHROME = (dw, dh)
+    except Exception:
+        pass
+
+
+def fit_window(cdp, width, height):
+    """Resize the OS window so its content area is exactly `width`x`height`.
+
+    Moves nothing and never touches `ruffle-player` - only the outer window,
+    which is independent of the pinned device metrics. Failure is harmless (the
+    old behaviour: a window the operator sizes by hand), so it never raises.
+    """
+    dw, dh = _CHROME or _CHROME_FALLBACK
+    try:
+        wid, b = _window(cdp)
+        if b.get("windowState") == "fullscreen":
+            return False                 # the operator chose that; leave it
+        if b.get("windowState", "normal") != "normal":
+            # UN-MAXIMISING ANIMATES on macOS, and a resize issued during the
+            # animation is reported as applied and then silently undone - the
+            # bounds read back right while the content stayed full-screen.
+            # Measured: with a 1 s pause first, content lands at exactly the
+            # pinned size.
+            cdp.call("Browser.setWindowBounds", windowId=wid,
+                     bounds={"windowState": "normal"})
+            time.sleep(1.0)
+        want = {"width": int(width + dw), "height": int(height + dh)}
+        for _ in range(2):
+            cdp.call("Browser.setWindowBounds", windowId=wid, bounds=want)
+            time.sleep(0.3)
+            _, b = _window(cdp)
+            if (b.get("width"), b.get("height")) == (want["width"],
+                                                     want["height"]):
+                return True
+        return False
+    except Exception:
+        return False

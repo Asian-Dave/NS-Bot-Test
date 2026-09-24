@@ -2392,7 +2392,8 @@ def main():
         Log().info("browser: %s (%s)", browser.browser_name(exe), exe)
         browser.launch(url, profile, port=a.port, app_mode=True,
                        browser=exe,
-                       window=(VIEWPORT[0] + 8, VIEWPORT[1] + 90))
+                       window=(chosen_viewport()[0] + 8,
+                               chosen_viewport()[1] + 90))
 
     log = Log()
     _cap_cv_threads(log)
