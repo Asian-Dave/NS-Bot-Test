@@ -546,7 +546,8 @@ def farm(cap, actor, log, cfg, controls=None, repeat=0):
         # path: the bot navigated perfectly, pressed the green check, and threw
         # ModuleNotFoundError every single time.
         runner = mission_mod.MissionRunner(
-            Gate(cap, log, controls), actor, cap, tpls, cfg, log, controls)
+            Gate(cap, log, controls, actor=actor), actor, cap, tpls, cfg,
+            log, controls)
         runner.grade = g          # the panel already told us; do not re-require it
         try:
             out, stats = runner.run()

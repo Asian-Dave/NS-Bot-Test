@@ -162,6 +162,71 @@ def variant_path(name, default_path, renderer=None):
     return p if os.path.exists(p) else default_path
 
 
+def active_renderer():
+    """The backend whose variants are currently preferred, or None."""
+    return _RENDERER
+
+
+def renderer_from_pixels(gray, min_conf=0.70, min_margin=0.04):
+    """Which backend actually DREW this frame. (verdict, votes) or (None, []).
+
+    ASK THE PICTURE, NOT THE CONFIG. `set_renderer` is fed from
+    `loadedConfig.preferredRenderer`, which is what Ruffle was configured
+    with - and that has been observed disagreeing with what is on screen,
+    because the value is read ONCE and the document is replaced by every
+    relog and window-size change. The consequence is silent: the wrong
+    variant set loads and anchors merely get weaker, so the bot limps rather
+    than failing, and nothing in the log says why.
+
+    The pixels cannot drift like that. This project already measured the
+    difference the backends make - wgpu draws text WITH its stroke, webgl and
+    canvas draw a thinner unstroked face - which is exactly why `tpl/webgl/`
+    exists. So scoring a name's DEFAULT crop against its VARIANT says which
+    one rendered the frame, using assets already on disk.
+
+    Calibrated against frames whose backend is known, and it separates
+    cleanly every time:
+
+        known webgl lobby    lobby_rail_fortune  wgpu 0.895 / webgl 1.000
+        known webgl charsel  char_slot_level     wgpu 0.677 / webgl 1.000
+        known wgpu  charsel  char_slot_level     wgpu 0.965 / webgl 0.716
+        wgpu reference lb0   lobby_rail_fortune  wgpu 1.000 / webgl 0.895
+
+    Only anchors that are actually ON the frame vote (`min_conf`), and a pair
+    too close to call is skipped (`min_margin`) rather than guessed - on a
+    screen carrying none of them the honest answer is None.
+    """
+    votes = []
+    try:
+        vdir = os.path.join(ROOT, VARIANT_DIR, "webgl")
+        if not os.path.isdir(vdir):
+            return None, []
+        for fn in sorted(os.listdir(vdir)):
+            if not fn.endswith(".png") or fn.startswith("_"):
+                continue
+            name = fn[:-4]
+            dflt = os.path.join(ROOT, VARIANT_DIR, f"{name}.png")
+            if not os.path.exists(dflt):
+                continue
+            try:
+                a = find(gray, Template(name, dflt, threshold=0.88))[1]
+                b = find(gray, Template(name, os.path.join(vdir, fn),
+                                        threshold=0.88))[1]
+            except Exception:
+                continue
+            if max(a, b) < min_conf or abs(a - b) < min_margin:
+                continue
+            votes.append((name, round(a, 3), round(b, 3),
+                          "wgpu" if a > b else "webgl"))
+    except Exception:
+        return None, []
+    if not votes:
+        return None, []
+    wgpu = sum(1 for v in votes if v[3] == "wgpu")
+    return ("wgpu" if wgpu * 2 > len(votes)
+            else "webgl" if wgpu * 2 < len(votes) else None), votes
+
+
 def template(name, threshold=0.88, scales=None):
     """The Template for `name`, honouring the active renderer. None if absent.
 
@@ -422,6 +487,26 @@ def find(frame_gray, tpl: Template, coarse=True):
                  center, scale, size), conf
 
 
+
+def clamp_roi(frame, x0, y0, x1, y1, min_side=8):
+    """Clip a region to the frame. Returns (x0, y0, x1, y1) or None.
+
+    **Every colour-blob detector here needs this**, and the reason is recorded
+    in CLAUDE.md: unclamped, a 1920-wide frame was handed a region starting at
+    x=1950 and OpenCV threw on the empty slice. The same four lines had been
+    written out in four places, which is how one of them ends up fixed and the
+    others do not.
+
+    `None` means there is no usable region - fewer than `min_side` pixels on an
+    axis - so a caller can return "nothing here" instead of slicing empty.
+    """
+    h, w = frame.shape[:2]
+    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
+    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
+    if x1 - x0 < min_side or y1 - y0 < min_side:
+        return None
+    return x0, y0, x1, y1
+
 def find_character(frame_bgr, x0=760, x1=2680, y0=400, y1=950,
                    sat=150, min_area=600, max_area=12000, min_h=95,
                    max_aspect=0.95):
@@ -456,11 +541,10 @@ def find_character(frame_bgr, x0=760, x1=2680, y0=400, y1=950,
     This is shared by mission traversal and the Kekkai runner deliberately -
     they had two different finders and only one of them was fixed.
     """
-    h, w = frame_bgr.shape[:2]
-    x0, x1 = max(0, min(x0, w)), max(0, min(x1, w))
-    y0, y1 = max(0, min(y0, h)), max(0, min(y1, h))
-    if x1 - x0 < 8 or y1 - y0 < 8:
+    box = clamp_roi(frame_bgr, x0, y0, x1, y1)
+    if box is None:
         return None
+    x0, y0, x1, y1 = box
     hsv = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
     m = (((hsv[:, :, 1] > sat) & (hsv[:, :, 2] > 60)).astype(np.uint8) * 255)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
@@ -497,31 +581,6 @@ def mask_stats(frame_bgr, lo, hi):
             "centroid": (int(xs.mean()), int(ys.mean())),
             "bbox": (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))}
 
-
-def bar_fill_ratio(frame_bgr, x, y, w, lo, hi):
-    """How full is a horizontal bar, 0..1.
-
-    Reads a 1px scanline and finds how far the fill colour extends. This is the
-    right way to read HP/CP: the values are rasterised text that would need OCR,
-    but the bar itself is a pure geometric measurement.
-    """
-    row = frame_bgr[y:y + 1, x:x + w]
-    m = cv2.inRange(row, np.array(lo, np.uint8), np.array(hi, np.uint8))[0]
-    filled = np.nonzero(m)[0]
-    return 0.0 if len(filled) == 0 else float(filled.max() + 1) / w
-
-
-def is_desaturated(frame_bgr, x, y, w, h, sat_threshold=40):
-    """True if a region looks greyed out — the usual 'on cooldown' tell.
-
-    A ready skill icon is saturated colour; a cooling one is rendered grey. Mean
-    HSV saturation separates them far more reliably than matching two templates.
-    """
-    patch = frame_bgr[y:y + h, x:x + w]
-    if patch.size == 0:
-        return None
-    sat = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)[:, :, 1]
-    return float(sat.mean()) < sat_threshold, float(sat.mean())
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -577,3 +636,127 @@ def load_templates(cfg, log):
         log.info("loaded %d templates%s", len(out),
                  f" (no {_RENDERER} variants)" if _RENDERER else "")
     return out
+
+# --- A TWO-BUTTON DIALOG IS A CHOICE, NOT AN ACKNOWLEDGEMENT --------------
+#
+# **This exists because the ladder would have spent tokens.** Losing a Eudemon
+# boss raises "Do you want to revive by using 50 token? (Revert 30% HP)" with a
+# green check and a red X. The `confirm_dialog` rung acknowledges a lone green
+# check generically, and it matched that check at **0.979** with the check
+# itself as its click target - so the next ladder pass would have spent 50 of
+# the premium currency this project must never spend.
+#
+# The distinction the ladder was missing is structural and needs no new
+# template:
+#
+#     one green check          an ACKNOWLEDGEMENT  -> pressing it is safe
+#     a green check AND a red X   a CHOICE         -> pressing green ACCEPTS
+#
+# Measured on the live prompt (`ref/auto/battle/revive_prompt.png`):
+#
+#     green check  centre (1622, 847)  80x81
+#     red X        centre (1897, 850)  82x83
+#
+# Same size, same row, 275 px apart. Everything the ladder already handles -
+# the seal-broken dialog, Level Up, a Victory panel - carries a check ALONE.
+#
+# **Declining is the safe direction, and the order is never assumed.** The
+# caller is handed both points and should press `decline`; this function does
+# not require green to be on the left, because a variant with them swapped
+# would otherwise go undetected and fall through to the rung that clicks
+# green.
+CHOICE_GREEN = ((38, 80, 80), (85, 255, 255))
+CHOICE_RED_LO = ((0, 120, 100), (10, 255, 255))
+CHOICE_RED_HI = ((170, 120, 100), (180, 255, 255))
+CHOICE_SIZE = (40, 140)
+CHOICE_MIN_AREA = 800
+CHOICE_SQUARE = 30          # a disc, not a bar
+CHOICE_SAME_ROW = 18        # measured 847 vs 850, i.e. 3
+CHOICE_APART = (180, 420)   # measured 275
+# **A DIALOG HAS A FLAT PANEL BETWEEN ITS TWO BUTTONS.** Without this the
+# detector fires on ordinary COMBAT frames - a green skill icon and the red
+# turn-order marker are two coloured discs on the same row - and the gate then
+# clicked the turn marker mid-battle twice in one fight. Measured on the strip
+# between the controls:
+#
+#     the real revive dialog      colour std   2.8
+#     three combat/unknown frames colour std  61.5 .. 65.4
+#
+# so 20 sits an order of magnitude clear of both. This is the positive reading
+# of "this is a modal", where size and spacing alone are only a shape.
+CHOICE_PANEL_STD = 20.0
+CHOICE_PANEL_INSET = 60     # skip the discs themselves
+CHOICE_PANEL_PAD = 40
+# Inside the game canvas only. A first version matched art at x=223,
+# which is desktop wallpaper - the game starts at 760.
+CHOICE_BAND_X = (760, 2680)
+
+
+def _choice_discs(frame_bgr, lo, hi, extra=None):
+    import numpy as _np
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    m = cv2.inRange(hsv, _np.array(lo, _np.uint8), _np.array(hi, _np.uint8))
+    if extra is not None:
+        m = m | cv2.inRange(hsv, _np.array(extra[0], _np.uint8),
+                            _np.array(extra[1], _np.uint8))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, _np.ones((7, 7), _np.uint8))
+    n, _lab, st, ce = cv2.connectedComponentsWithStats(m)
+    out = []
+    for i in range(1, n):
+        w, h = int(st[i, cv2.CC_STAT_WIDTH]), int(st[i, cv2.CC_STAT_HEIGHT])
+        if int(st[i, cv2.CC_STAT_AREA]) < CHOICE_MIN_AREA:
+            continue
+        if not (CHOICE_SIZE[0] <= w <= CHOICE_SIZE[1]):
+            continue
+        if not (CHOICE_SIZE[0] <= h <= CHOICE_SIZE[1]):
+            continue
+        if abs(w - h) > CHOICE_SQUARE:
+            continue
+        cx = int(ce[i][0])
+        if not (CHOICE_BAND_X[0] <= cx <= CHOICE_BAND_X[1]):
+            continue
+        out.append((cx, int(ce[i][1]), w, h))
+    return out
+
+
+def choice_dialog(frame_bgr):
+    """{"accept": (x,y), "decline": (x,y)} for a two-button dialog, or None.
+
+    ALWAYS press `decline`. See the note above: the one prompt this was built
+    for spends 50 tokens if accepted.
+    """
+    greens = _choice_discs(frame_bgr, *CHOICE_GREEN)
+    reds = _choice_discs(frame_bgr, *CHOICE_RED_LO, extra=CHOICE_RED_HI)
+    best = None
+    for gx, gy, gw, gh in greens:
+        for rx, ry, rw, rh in reds:
+            if abs(gy - ry) > CHOICE_SAME_ROW:
+                continue
+            dx = abs(gx - rx)
+            if not (CHOICE_APART[0] <= dx <= CHOICE_APART[1]):
+                continue
+            # the two controls of one dialog are drawn the same size
+            if abs(gw - rw) > 25 or abs(gh - rh) > 25:
+                continue
+            if not _flat_between(frame_bgr, gx, gy, rx, ry):
+                continue
+            if best is None or dx < best[0]:
+                best = (dx, (gx, gy), (rx, ry))
+    if best is None:
+        return None
+    return {"accept": best[1], "decline": best[2]}
+
+
+def _flat_between(frame, gx, gy, rx, ry):
+    """Is the strip between the two controls a flat dialog panel?"""
+    import numpy as _np
+    h, w = frame.shape[:2]
+    x0 = max(0, min(gx, rx) + CHOICE_PANEL_INSET)
+    x1 = min(w, max(gx, rx) - CHOICE_PANEL_INSET)
+    y0 = max(0, min(gy, ry) - CHOICE_PANEL_PAD)
+    y1 = min(h, max(gy, ry) + CHOICE_PANEL_PAD)
+    if x1 - x0 < 20 or y1 - y0 < 20:
+        return False
+    band = frame[y0:y1, x0:x1]
+    return float(band.reshape(-1, 3).std(axis=0).mean()) <= CHOICE_PANEL_STD
+

@@ -9,6 +9,7 @@ and CSS click coordinates are 1:1. On a Retina host it is 2, and captured pixels
 are twice the click coordinates. `self.dpr` records which world we are in so
 callers never have to guess.
 """
+import math
 import time
 
 import cv2
@@ -74,6 +75,21 @@ class Capture:
         img = cv2.imdecode(buf, cv2.IMREAD_COLOR)          # BGR
         if img is None:
             raise RuntimeError("failed to decode screenshot PNG")
+        # NORMALISE FULL FRAMES ONLY. A clipped or region frame has its own
+        # pixel origin and its caller already offsets it back by hand; moving
+        # it here would shift it twice. See the note beside `norm_shift`.
+        if clip is None and region is None:
+            try:
+                dx, dy = self.measure_shift()
+                img = self._translate(img, dx, dy)
+                # RECORD WHAT WAS APPLIED. Everything that converts a
+                # coordinate back - clicks, clips, the no-click zone - reads
+                # this rather than re-measuring, so the round trip closes
+                # even while the layout is in flux. See `norm_shift`.
+                self._applied_shift = (dx, dy)
+            except Exception:
+                pass                       # an unmeasurable game must not
+                                           # break capture; leave it be
         if region:
             x, y, w, h = region
             img = img[y:y + h, x:x + w]
@@ -94,6 +110,7 @@ class Capture:
     # reflow - so a displaced game degrades into slightly-off clicks rather than
     # a cascade of subsystems each blaming itself.
     REFERENCE_ORIGIN = (760, 0)          # captured px, where constants were cut
+    REFERENCE_PLAYER_H = 839             # CSS px, the player height they were cut at
     REFERENCE_CANVAS_W = 1920            # the game is 960 CSS wide at dpr 2
 
     def game_metrics(self, ttl=1.0):
@@ -120,7 +137,7 @@ class Capture:
                 "(()=>{const f=document.querySelector('iframe[src*=emulator]')"
                 "||document.querySelector('iframe[src*=play]');"
                 "if(!f)return '';const r=f.getBoundingClientRect();"
-                "return JSON.stringify({x:r.x,y:r.y,w:r.width});})()")
+                "return JSON.stringify({x:r.x,y:r.y,w:r.width,h:r.height});})()")
             if not raw:
                 # NO GAME ELEMENT. Distinguished from "measured, and it is
                 # exactly at the reference" because those return the same
@@ -133,7 +150,33 @@ class Capture:
             import json as _json
             r = _json.loads(raw)
             ox = int(round(r["x"] * self.dpr)) - self.REFERENCE_ORIGIN[0]
-            oy = int(round(r["y"] * self.dpr)) - self.REFERENCE_ORIGIN[1]
+            # THE ART IS CENTRED IN THE PLAYER, so making the player
+            # TALLER moves the CONTENT without moving the element - and
+            # the element rect is all this used to read, so the drift went
+            # unseen. `#game-container` is 107.5% of the site wrapper with
+            # the art centred in it, so growing the wrapper by D moves the
+            # art down by 0.5 * 1.075 * D.
+            #
+            # Measured on a live village frame, four anchors spanning
+            # y 577..1177, wrapper 780 -> 900:
+            #
+            #     player 839 -> 968, every centre +129 captured px in y,
+            #     x unchanged, all still scale 1.0 and at their baseline
+            #     confidences (1.000 / 1.000 / 0.965 / 1.000)
+            #
+            # and (968 - 839) / 2 = 64.5 CSS = 129 captured px exactly. So
+            # the correction is the half-difference from the player height
+            # the templates were cut at, which is ZERO at that layout and
+            # therefore costs the historical geometry nothing.
+            ph = r.get("h") or self.REFERENCE_PLAYER_H
+            cy = r["y"] + (ph - self.REFERENCE_PLAYER_H) / 2.0
+            # HALF-UP, not banker's. The half-difference lands exactly on
+            # .5 whenever the growth is odd (player 967.5 -> 128.5 captured),
+            # and `round` breaks that tie to EVEN - which measured 128 against
+            # an observed content shift of 129. One pixel is harmless here, but
+            # an offset that disagrees with the measurement by a predictable
+            # amount is exactly the kind of thing that reads as a mystery later.
+            oy = int(math.floor(cy * self.dpr + 0.5)) - self.REFERENCE_ORIGIN[1]
             w = r["w"] * self.dpr
             scale = (w / self.REFERENCE_CANVAS_W) if w > 0 else 1.0
             self._off = (ox, oy, scale)
@@ -172,7 +215,12 @@ class Capture:
             if not self.game_metrics_ok() or w <= 0:
                 perceive.clear_search_band()
                 return None
-            x0 = self.REFERENCE_ORIGIN[0] + ox
+            # NORMALISED FRAMES PUT THE GAME AT THE REFERENCE by construction,
+            # so the band is the reference strip and `ox` must NOT be added -
+            # doing so would aim the search at where the game was BEFORE the
+            # frame was translated, i.e. at nothing, and lose every anchor at
+            # once. That is the failure this band already has a rule about.
+            x0 = self.REFERENCE_ORIGIN[0] + (0 if self.normalise else ox)
             band = (max(0, int(round(x0))), int(round(x0 + w)))
             perceive.set_search_band(*band)
             return band
@@ -184,13 +232,112 @@ class Capture:
         """How much bigger/smaller the game is than the reference layout."""
         return self.game_metrics(ttl)[2]
 
+    # ---- normalising the frame ------------------------------------------
+    #
+    # ONE COORDINATE SPACE, OR NONE - and this is the "or none" finally paid
+    # off. Every absolute constant in this project was measured with the game
+    # at `REFERENCE_ORIGIN`, and `fix` exists to correct for it having moved.
+    # But `fix` only helps the callers that REMEMBER to call it: measured,
+    # there are 47 hardcoded coordinates across 13 modules and exactly three
+    # of them (cards, kekkai_play, mission) correct at all. `click_pixel`
+    # deliberately does not correct either, because a template-derived point
+    # is already in live coordinates and would be corrected TWICE - which is
+    # the half-applied correction that once left the memory board reporting
+    # "19 faces known, 11 pairs refused".
+    #
+    # So instead of asking 47 call sites to agree, move the PICTURE. Every
+    # full frame is translated so the game lands exactly where the constants
+    # expect it, and the inverse is applied once, at the single point where a
+    # coordinate leaves for the browser (`to_click_coords`). After that every
+    # constant, template match, detector and test is in one space by
+    # construction, and there is nothing left to forget.
+    #
+    # It SUBSUMES the drift correction rather than competing with it: once
+    # frames are normalised the game is always at the reference, so
+    # `game_offset` is (0, 0) and `fix` is the identity - which also means the
+    # scroll/reflow drift this class was built for is absorbed for EVERY
+    # module, not just the three that opted in.
+    #
+    # Set `normalise = False` to get the historical behaviour back in one
+    # step, which is the point of it being a flag.
+    normalise = True
+
+    def norm_shift(self, ttl=1.0):
+        """(dx, dy) a captured frame must move so the game sits at reference.
+
+        THE INVERSE MUST MATCH THE FORWARD TRANSFORM, NOT A LATER READING.
+        This returns the shift `frame` ACTUALLY APPLIED, because a coordinate
+        being converted back was derived from a frame that was translated by
+        that amount - re-measuring can disagree with it, and then the round
+        trip does not close.
+
+        Measured, and it wedged a run: during a relog the game is briefly
+        unmeasurable, a fresh read returned (0, 0), and a reference-space
+        point was compared against a real-space no-click zone -
+
+            REFUSING click (2555,248) close Eudemon Garden - it lands on the
+            control dock (1920, 0, 760, 1800)
+
+        - though 2555 - 760 = 1795 is well clear of it. Pinning the applied
+        value makes that impossible by construction rather than by hoping the
+        two measurements agree.
+
+        Before any frame has been taken there is nothing to match, so it
+        measures; and a missing measurement still yields (0, 0) rather than a
+        guess, the rule `game_offset` already follows.
+        """
+        if not self.normalise:
+            return (0, 0)
+        applied = getattr(self, "_applied_shift", None)
+        if applied is not None:
+            return applied
+        return self.measure_shift(ttl)
+
+    def measure_shift(self, ttl=1.0):
+        """The shift the CURRENT layout calls for. Used by `frame`."""
+        if not self.normalise:
+            return (0, 0)
+        ox, oy, _sc = self.game_metrics(ttl)
+        if not self.game_metrics_ok():
+            # Nothing measurable. Keep whatever the last frame used rather
+            # than snapping to zero: the coordinates in flight came from that
+            # frame, and disagreeing with them is worse than being slightly
+            # stale. With no history at all, (0, 0) is the honest answer.
+            return getattr(self, "_applied_shift", None) or (0, 0)
+        return (-int(ox), -int(oy))
+
+    @staticmethod
+    def _translate(img, dx, dy):
+        """Shift an image by (dx, dy), growing the canvas rather than cropping.
+
+        Growing matters: cropping to the original size would push the dock off
+        the right edge, and the no-click zone is derived from where the dock
+        IS. Only positive shifts grow; a negative one crops, which is correct
+        because that content is off-screen anyway.
+        """
+        if not dx and not dy:
+            return img
+        h, w = img.shape[:2]
+        top, left = max(0, dy), max(0, dx)
+        out = cv2.copyMakeBorder(img, top, 0, left, 0,
+                                 cv2.BORDER_CONSTANT, value=(0, 0, 0))
+        if dx < 0 or dy < 0:
+            out = out[max(0, -dy):, max(0, -dx):]
+        return out
+
     def game_offset(self, ttl=1.0):
         """How far the game has moved from the reference layout, captured px.
 
         Cached for `ttl` seconds: it is one CDP round trip and callers may ask
         per click. Returns (0, 0) if the game cannot be located, because a
         missing measurement must never move a click.
+
+        ZERO WHILE NORMALISING, because the frame has already been moved so
+        the game IS at the reference - and a caller that corrected again would
+        double-correct, which is the exact bug this class documents.
         """
+        if self.normalise:
+            return (0, 0)
         return self.game_metrics(ttl)[:2]
 
     def fix(self, x, y):
@@ -199,6 +346,10 @@ class Capture:
         Scale about the game's own ORIGIN, then translate - scaling about the
         frame origin instead would smear the offset by the scale factor.
         """
+        if self.normalise:
+            # The frame was moved instead, so a reference coordinate already
+            # IS the live one. Correcting here would apply the shift twice.
+            return (int(x), int(y))
         ox, oy, sc = self.game_metrics()
         rx, ry = self.REFERENCE_ORIGIN
         return (int(round((x - rx) * sc)) + rx + ox,
@@ -237,7 +388,24 @@ class Capture:
             sx, sy = float(s.get("x", 0)), float(s.get("y", 0))
         except Exception:
             sx = sy = 0.0
-        clip = (x / self.dpr + sx, y / self.dpr + sy,
+        # UN-NORMALISE THE BOX, KEEP THE ORIGIN NORMALISED.
+        #
+        # The caller hands a box in REFERENCE space (that is where all its
+        # constants live) but the clip is a real page rectangle, so it needs
+        # the same inverse `to_click_coords` applies. The returned ORIGIN does
+        # not: it exists so a point found inside the clip maps back with
+        # `full = clipped + origin`, and `full` is consumed as a reference
+        # coordinate.
+        #
+        # Missing this is what broke the hand-seal board: `panel_frame` clips
+        # around the "Skill :" HUD, the clip was taken 760 px from where the
+        # HUD actually is, `anchor_offset` found nothing, and the round was
+        # abandoned with "cannot locate the panel" - while the classifier,
+        # which uses a FULL frame, had just matched that same HUD at 0.998.
+        # Two capture paths, one taught the new coordinate space and the
+        # other not.
+        dx, dy = self.norm_shift()
+        clip = ((x - dx) / self.dpr + sx, (y - dy) / self.dpr + sy,
                 w / self.dpr, h / self.dpr)
         return clip, (x, y)
 
@@ -287,5 +455,13 @@ class Capture:
             return None
 
     def to_click_coords(self, px, py):
-        """Captured-pixel point -> CSS coordinates for Input.dispatchMouseEvent."""
-        return px / self.dpr, py / self.dpr
+        """Captured-pixel point -> CSS coordinates for Input.dispatchMouseEvent.
+
+        THE ONE PLACE THE NORMALISATION IS UNDONE. Everything upstream works
+        in the reference space the frame was translated into; the browser
+        wants real page coordinates, and this is the single door a coordinate
+        leaves by, which is exactly why the inverse belongs here and nowhere
+        else. See the note beside `norm_shift`.
+        """
+        dx, dy = self.norm_shift()
+        return (px - dx) / self.dpr, (py - dy) / self.dpr

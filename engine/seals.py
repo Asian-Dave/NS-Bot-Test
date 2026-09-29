@@ -591,65 +591,6 @@ def rank_candidates_from(art, tile_frame, log=None, off=(0, 0)):
     return out
 
 
-def rank_candidates(reveal_frame, tile_frame, log=None):
-    """Snapshot variant, kept for offline analysis of a single frame."""
-    ss = find_slots(reveal_frame)
-    return rank_candidates_from([slot_crop(reveal_frame, i, ss)
-                                 for i in range(len(ss))], tile_frame, log)
-
-
-def read_answer(reveal_frame, tile_frame, log=None, force=False):
-    """Which two tiles are the answer? Returns [i, j] or None if unsure.
-
-    `reveal_frame` is from the look phase (slots showing the seals);
-    `tile_frame` is any frame where the tiles are drawn in colour. They are
-    deliberately allowed to be different frames, because the game never shows
-    both at once.
-    """
-    tiles = [_shape(blue_mask(tile_crop(tile_frame, i))) for i in range(N_TILES)]
-    tiles_ink = [_shape(ink_mask(tile_crop(tile_frame, i))) for i in range(N_TILES)]
-    if sum(t is not None for t in tiles) < N_TILES:
-        if log:
-            log.info("only %d/%d tiles readable - not guessing",
-                     sum(t is not None for t in tiles), N_TILES)
-        return None
-
-    picks = []
-    for s in range(len(SLOTS)):
-        sb = _shape(blue_mask(slot_crop(reveal_frame, s)))
-        if sb is None:
-            if log:
-                log.info("slot %d is not showing a seal - nothing to read", s)
-            return None
-        ranked = sorted((dist(sb, t), i) for i, t in enumerate(tiles))
-        (d0, i0), (d1, i1) = ranked[0], ranked[1]
-        margin = d1 / max(1e-6, d0)
-        if margin >= BLUE_MARGIN:
-            picks.append(i0)
-            if log:
-                log.info("slot %d -> tile %d (blue d=%.3f, margin %.2fx)",
-                         s, i0, d0, margin)
-            continue
-        # Thin margin: let the ink outline choose between the top two.
-        si = _shape(ink_mask(slot_crop(reveal_frame, s)))
-        e0, e1 = dist(si, tiles_ink[i0]), dist(si, tiles_ink[i1])
-        lo, hi = (i0, e0), (i1, e1)
-        if e1 < e0:
-            lo, hi = (i1, e1), (i0, e0)
-        if hi[1] / max(1e-6, lo[1]) < INK_MARGIN and not force:
-            if log:
-                log.info("slot %d is AMBIGUOUS: blue says %d/%d at %.2fx and the "
-                         "ink tie-break is %.2fx - abstaining rather than "
-                         "spending a heart", s, i0, i1, margin,
-                         hi[1] / max(1e-6, lo[1]))
-            return None
-        picks.append(lo[0])
-        if log:
-            log.info("slot %d -> tile %d (blue %.2fx was thin; ink tie-break "
-                     "%.2fx)", s, lo[0], margin, hi[1] / max(1e-6, lo[1]))
-    return picks
-
-
 # The panel plus both rows, in captured px, with room for the offset to swing.
 # Clipping is worth ~3x: a full frame is ~170 ms, this is ~55 ms, and the look
 # phase has to be sampled fast enough to catch signs that appear one at a time.
@@ -740,17 +681,6 @@ def capture_sequence(cap, log=None, timeout=25.0, poll=0.04):
 def _rel(off, origin):
     """An absolute offset expressed against a clipped frame's origin."""
     return (off[0] - origin[0], off[1] - origin[1])
-
-
-def wait_for(cap, pred, timeout, poll=0.12):
-    """Poll until `pred(frame)` is true. Returns the frame, or None."""
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        f = cap.frame(gray=False)
-        if pred(f):
-            return f
-        time.sleep(poll)
-    return None
 
 
 def play_round(cap, actor, log, save_crops=False, commit=True,

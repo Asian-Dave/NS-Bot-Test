@@ -79,8 +79,9 @@ Scale sensitivity is content-dependent and matters a lot:
 
 So geometry must be pinned, and `cv2.matchTemplate` is not scale-invariant.
 
-Prefer pixel reads over OCR: HP/CP bars via `bar_fill_ratio`, cooldowns via
-`is_desaturated` (mean HSV saturation), numbers via digit templates if ever needed
+Prefer pixel reads over OCR: HP bars via `perceive.find_enemy_bars` (a bright-red
+run along the bar), cooldowns via `combat.slot_cooling`, numbers via digit templates
+if ever needed
 (Ruffle rasterises deterministically, so digit templates beat OCR).
 
 Bad template targets: **semi-transparent labels over animated art** (the village
@@ -1308,6 +1309,153 @@ solver had narrowed 216 candidates down to it correctly and then threw the win
 away. This is the SAME trap documented just below for digit reading — check for
 a closed panel FIRST — walked into again by a later edit one branch higher.
 
+### THE DIGIT READER FOLLOWS THE RENDERER TOO — per digit, like the templates
+
+Switching the backend to wgpu made the kekkai reader fail in the OPPOSITE
+direction from the webgl bug it was built for. Measured live on the same
+mission, minutes apart:
+
+    webgl   green 0.853 .. 0.946 (reads)   gold 0.673 .. 0.736 (refused)
+    wgpu    green 0.786 (refused)          gold 0.863 (reads)
+
+The glyphs are close but not the same - wgpu draws the text stroke webgl
+omits - and **every ink exemplar in the shared set was harvested on webgl**.
+
+**The symptom was not an error, it was repetition.** An unread counter stops
+the solver at guess 1, so its history stays empty, so the next attempt
+recomputes the SAME deterministic opening guess. From outside that is a bot
+clicking one pattern over and over, which is what the operator reported. They
+also proposed the fix - a reader keyed to the render - which is exactly the
+shape this project already uses for `tpl/<renderer>/`.
+
+`digits_ink/<renderer>/` overrides the shared set **per DIGIT**: a backend
+needs only the digits that actually fail on it, everything else falls back.
+Same reasoning as the template variants, where six crops were enough. The
+variant REPLACES a digit rather than adding to it, because mixing two
+renderings of one glyph is a mistake this file has already measured going
+wrong twice.
+
+Two details worth keeping:
+
+* **Harvested `UNREAD_*` crops are written into the renderer's own
+  directory.** A wgpu crop is not an exemplar for webgl, and filing it with
+  the shared set would poison the backend it came from.
+* **The "which digits were substituted" record is NOT a key in the exemplar
+  map.** `read_digit` iterates that dict and treats every key as a possible
+  digit VALUE, so bookkeeping in there would be offered as a reading - the
+  silent-corruption failure this module guards against everywhere else. It
+  lives in `LAST_VARIANT`.
+
+### A FULL GOLD COUNTER IS NOT A SOLVE — it is the opposite
+
+The solve shortcut read `if gv == length or ov == length`, and the gold half
+is exactly backwards. Gold counts runes that are correct but **in the wrong
+place** - the game's own rules panel states that mapping - so `gold == length`
+means every rune is present and NONE is in position.
+
+**It made length-6 stages unwinnable, and not rarely.** With permutation codes
+a fixed opener is a DERANGEMENT of the secret about 1/e of the time; measured
+over 400 random permutation secrets, **140**. Live it produced a loop that
+does not read as a bug at all:
+
+    resuming a puzzle that already has 1 guess(es) of history
+    guess 1: Green,Red,Blue,Black,Yellow,White  (pool A=46656 B=46656)
+    feedback: green=0 gold=6
+    ... identical, again and again
+
+**ONE bug, TWO symptoms, and the second one hid the first.** `solve_live`
+returned a guess, so `ss.play` took the SUCCESS branch: it cleared the history
+(`hist = []`) and moved on to the "next" stage - which was the same stage,
+still open. So every pass replayed the same opener against a fresh 46,656 pool
+and burned one of the ten rows. The empty pool looked like a broken resume,
+and the resume was fine; the solve verdict was wrong.
+
+The PANEL CLOSING remains the real solve signal. The counter shortcut only
+covers the frame where the counter is readable but the close has not landed
+yet, and only `green == length` can mean it.
+
+### THE EXEMPLARS MUST BE COMMITTED — `ref/auto/` is ignored by default
+
+`.gitignore` excludes `ref/auto/`, and the fixtures that matter are
+FORCE-ADDED past it. Only the original twelve digit exemplars were, so every
+crop harvested since lived on one machine and reached nobody - which makes a
+"fallback for other backends" worthless, since the exemplars ARE the fallback.
+
+Force-add a newly classified exemplar the same way, or the next machine hits
+the failure this set was built to remove. `UNREAD_*` stays untracked: it is
+unclassified by definition, and committing it would invite someone to trust it.
+
+### A FULL SS PASS ON wgpu, AND HOW THE SET WAS FILLED CHEAPLY
+
+All of a day's SS missions banked on wgpu - balance, lights and rune - with
+the list finishing empty. Every family was dispatched BY SIGHT
+(`identify` reads the board off the screen; the mission title only hints),
+which is what let one pass cover three different minigames.
+
+The rune stages are the ones that need exemplars, and the cheap way to fill
+them is NOT one digit per failed mission:
+
+* the reader saves the WHOLE PANEL beside the two crops, and the scroll shows
+  every played row at once;
+* **the log already records the feedback for every row it DID read**, so those
+  rows' labels are confirmed rather than guessed, and only the unread row has
+  to be read off the image;
+* one frame therefore yielded EIGHT labelled exemplars.
+
+Then cross-check the set for false matches - worst measured 0.621 against the
+0.80 gate - because a small per-backend set is where a confident wrong reading
+would come from, and a wrong counter corrupts the solver silently where an
+unread one only stops it.
+
+**THE TP PANEL NEEDS ITS OWN SAMPLES TOO, and not because of scale.** The SS
+and TP kekkai draw their history at different x (SS 2058, TP 1998) and the
+first TP kekkai on wgpu still refused: green 0.788, gold 0.726. Both had
+identified the RIGHT digit and merely sat under the gate, and the glyph boxes
+measured 35x37 against the SS exemplars' 29..41 x 34..38 - so the layouts
+render at the same size and this is thin coverage, not a geometry or scaling
+fault. Two crops from that panel took both to 1.000.
+
+Worth separating those two explanations before acting: a size mismatch would
+need the mask or the radius changed, where thin coverage needs one more
+sample. Measure the glyph box before assuming the harder one.
+
+Coverage now: wgpu 0..4 with two to four exemplars each; **5 and 6 still fall
+back to the shared set and will refuse**. Feedback counters are usually small,
+so that gap is survivable, and it fills itself the same free way.
+
+### THE DIGIT GATE WAS SET TOO HIGH — 0.80 refused a FIFTH of good reads
+
+Three missions stalled in a row on "could not read row N", each score
+agonisingly close to the gate: **0.794, 0.799, 0.771, 0.726, 0.708** - and
+EVERY ONE had already identified the right digit. Adding an exemplar per
+refusal is whack-a-mole; the gate itself was wrong.
+
+Measured leave-one-out over every exemplar held. "Right" means the set
+identified it; "wrong" means its own digit was REMOVED first, so the best
+match can only be another digit and must be refused:
+
+    correct reads (33)   0.726 .. 0.987
+    wrong   reads (35)   0.396 .. 0.627
+
+They separate with a **0.10 gap**, and 0.80 sits INSIDE the correct range. At
+0.70 every correct read is accepted and every unknown still refused - 33/33
+and 35/35.
+
+**MARGIN WAS TRIED AS THE DISCRIMINATOR AND REJECTED**, which is worth
+recording because it is the obvious idea and it does not work here: a WRONG
+answer reached **1.86x** over its runner-up while a RIGHT one fell to
+**1.23x**. They overlap, so a margin-only rule would licence confident wrong
+readings - and this file's standing rule is that a wrong counter corrupts the
+solver silently where a refusal merely stops it. Margin survives only as a
+SECOND condition (1.15x), defence in depth rather than the test.
+
+**The general shape, and it is the third time in this project.** A threshold
+calibrated once, against one backend or one sample, drifts into rejecting the
+thing it was meant to admit - the TP village anchor at 0.90 against a
+calibrated 0.88, the command bar gated at 0.85 when the real range was
+0.746..0.949, and now this. When refusals cluster JUST under a gate and each
+one names the correct answer, suspect the gate before the reader.
+
 ### THE TWO DISCS RENDER DIGITS DIFFERENTLY — harvest per (digit, disc)
 
 This is why the digit reader keeps blocking a mission, and it is systematic, not
@@ -1618,6 +1766,99 @@ re-applied from scratch.
 
 To retry: re-measure the rect BETWEEN the two corrections, and converge each
 axis separately with its own tolerance check.
+
+### THE BLANK STRIP UNDER THE GAME WAS NEVER A CLIP — the site stops at 780
+
+Reported as "the bottom half is failing to render". It was not a render fault
+and not a clip; the site's layout is authored for a **780 px** box, so the SWF
+draws to about there and everything below it is blank page. Measured on the
+captured frame at viewport 1340x900:
+
+    y   39..1670 captured (19.5..835.5 CSS)   content
+    y 1671..1799 captured (835.5..900 CSS)    WHITE - 64.5 CSS of nothing
+
+**Two cheaper explanations were tested first and BOTH were wrong**, which is
+why they are recorded: `overflow:visible` on `.site-wrapper` (and on every
+other ancestor) changed the frame not at all - matching this file's older note
+that it produces "no reflow, no help" - and the clip chain is irrelevant
+because nothing was being clipped in the first place.
+
+What the sweep showed is that **the game's drawn content ends exactly AT the
+wrapper height**, so the rule is simply "make the wrapper the viewport":
+
+    wrapper  player   blank at bottom   content ends
+      (off)    839       64.5 CSS          835.5 CSS
+       837     900       63.0 CSS          837.0 CSS
+       860     925       40.0 CSS          860.0 CSS
+       880     946       20.0 CSS          880.0 CSS
+       900     968        0.0 CSS          900.0 CSS
+
+`__nsbotPinCSS` therefore carries a `min-height: innerHeight` alongside the
+existing `top:0` pin, on the six layout ancestors. It is built in ONE place
+because it is asserted from two, and its TEXT is rewritten on every align pass
+rather than only when the element is missing - applying a window size changes
+`innerHeight`, and a create-only branch would leave the game sized for the
+PREVIOUS viewport.
+
+**A GENUINE BONUS: the friend rail's `+` row now renders.** This file records
+that reaching those buttons needs the player enlarged, done as a bounded
+exception with a restore in a `finally`. At a full-height wrapper they are
+simply on screen, along with `Visit` and the Invite Reward panel. The recruit
+path's temporary resize is therefore probably now unnecessary - unverified, but
+worth checking before anyone maintains that code again.
+
+### AND THE FIRST ATTEMPT AT IT RESIZED THE PLAYER — the prohibited operation
+
+Raising those heights without looking at the player took `ruffle-player` from
+**960x839 to 960x902**, which is this file's oldest prohibition: resizing it
+desyncs click -> stage mapping inside the SWF. The player is percentage-sized
+off those ancestors (`#game-container` is 107.5% of the wrapper), so growing
+them grows it.
+
+It was caught by MEASURING THE PLAYER after the change rather than by reasoning
+about the CSS, and reverted before anything clicked. The lesson is the cheap
+one: when a change grows a box, check what else is sized off that box.
+
+The player still grows once the rule is in place (839 -> 968) - what matters is
+that the STAGE is not rescaled. Verified across four anchors spanning
+y 577..1177:
+
+    anchor                baseline(839)    full-height(968)
+    lobby_rail_fortune    1.000 @ y824     1.000 @ y953
+    mission_room_entry    1.000 @ y577     1.000 @ y706
+    nav_jutsu             0.965 @ y1160    0.965 @ y1289
+    lobby_logo            1.000 @ y1177    1.000 @ y1306
+
+Identical confidences, all still scale 1.0, every centre moved by the SAME
++129 captured px in y with x unchanged. A pure translation, not a scale - so
+not one template needed recutting.
+
+### A TALLER PLAYER MOVES THE CONTENT WITHOUT MOVING THE ELEMENT
+
+The art is centred in the player, so the +129 above is exactly half the growth
+- and `game_metrics` read only the ELEMENT rect, which stays at y=0. The drift
+was therefore invisible to the one mechanism built to correct for drift.
+
+`Capture.REFERENCE_PLAYER_H` (839) closes it: the offset is the half-difference
+from the player height the templates were cut at,
+
+    oy = (player_h - 839) / 2      # captured px, via dpr
+
+which is **ZERO at the historical layout**, so nothing that worked before
+changes. Note `apply_search_band` uses only `ox` and the scale, so the band is
+untouched by this.
+
+**Round HALF-UP, not banker's.** The half-difference lands on exactly .5
+whenever the growth is odd (player 967.5 -> 128.5 captured), and `round` breaks
+that tie to even - measuring 128 against an observed 129. One pixel is harmless;
+an offset that disagrees with the measurement by a predictable amount is how a
+mystery starts.
+
+Verified live end to end: `resume: lobby (lobby_rail_fortune conf=1.000) in
+442ms`, and across a full TP pass the hand-seal Start button was hit first time
+every round at `css≈(490,265)` where it had been `(492,199)` - reference
+coordinates unchanged, live target shifted, which is the correction doing its
+job on the CLICK path as well as the read path.
 
 ### THERE IS NO TABLE OF WINDOW SIZES — one stage, two transform axes
 
@@ -2066,7 +2307,8 @@ Findings that changed our design, kept because the reasoning still applies:
   our client before use - their client is ~800x440, ours 960x720.
 * **No HP/CP reading anywhere.** `FindAllInRange` has no callers outside
   `PixelSearch.cs`; `FindPixelColorRange` has one thin wrapper
-  (`FormMain.cs:14479`). Our `bar_fill_ratio` work is not redundant.
+  (`FormMain.cs:14479`). Our own bar reading (`perceive.find_enemy_bars`) is
+  not redundant.
 * **No round/turn counter** (zero refs in `FormMain.cs`) and no flee/run path.
   Their only failsafe is a wall-clock **"Stuck Timeout"** (" stuck more than 3
   times"), which is time-based and would NOT catch a regenerating enemy - the
@@ -2342,6 +2584,43 @@ client taking clipped screenshots re-applies device metrics and resizes the
 page under the bot — that is what pressed Relog and dropped the session once
 already.
 
+### DEAD CODE, MEASURED RATHER THAN GUESSED AT
+
+A tidy-up pass, done by asking the code rather than reading it:
+
+* **Modules imported by nothing:** only `calibrate.py` qualified. Everything
+  else in that list is a standalone instrument with its own `__main__`, which
+  this file already records as deliberately kept.
+* **Functions referenced nowhere but their own definition:** 16, totalling
+  **200 lines**, removed. Checked first for references as STRINGS (getattr,
+  config, prose), because a name can be live without ever appearing as a call.
+* **`calibrate.py` ran its whole calibration sweep AT IMPORT** - no `__main__`
+  guard, so `import calibrate` performed a sixteen-template multi-scale sweep
+  and printed a table. Nothing imports it, which is the only reason that never
+  surfaced. Now guarded.
+* **The ROI clamp existed four times over** - the four lines this file already
+  warns about ("unclamped, a 1920-wide frame fed a region starting at x=1950
+  and OpenCV threw"). Now `perceive.clamp_roi`, which returns None for an
+  unusable region so a caller says "nothing here" instead of slicing empty.
+
+**Two of the removed functions were NAMED IN THE DOCS** as the way something is
+done - `bar_fill_ratio` for HP bars, `is_desaturated` for cooldowns - both
+superseded by `find_enemy_bars` and `slot_cooling` long before. Deleting code
+whose prose survives leaves the most-read file describing a mechanism that does
+not exist, so the docs were corrected in the same pass.
+
+**And a test that fired on correct code was deleted rather than patched.** A
+general "does the prose name anything real" sweep cannot tell our functions
+from stdlib calls, config keys (`battle.rotation`), parameter names or
+filenames (`cdp.py`); it took four rounds of special-casing and still failed.
+It was replaced by a narrow check on the two names actually removed. This
+file's own rule: a guard that fires on correct code gets deleted.
+
+**What the measurement also showed: there is not much bloat.** 200 dead lines
+in 20,218 is under 1%. The remaining duplication is per-module import
+boilerplate and the argparse blocks of standalone tools, both of which are
+load-bearing where they are.
+
 ## THE REFACTOR: one entry point, one declaration of a task
 
 The bot "felt like several programs" for two concrete reasons, and neither was
@@ -2423,6 +2702,23 @@ GREY. Both halves were wrong, and together they produced "it never finishes
 them all": a count is not the thing that decides whether a list is done, and
 the pass could stop with startable missions still on screen.
 
+**CORRECTION, MEASURED 2026-09-24 — ON THIS SERVER THEY DO DROP OUT.** A clean
+five-mission pass watched the list shrink every time one banked:
+
+    3 row(s) at y=[462, 638, 818]   ->  2 at [462, 638]  ->  1 at [462]  ->  0
+
+so the paragraph above is wrong about the mechanism, at least as the server
+behaves now. It does NOT invalidate `start_row`'s "did anything change?" test,
+which is a POSITIVE reading of "this row is finished" and stays correct either
+way - a row that has dropped out is simply never offered. Nor does it change
+the termination rule: the pass still ends when `pick_any` finds nothing
+startable, which is what actually happened (`0 row(s)` -> "the day's list is
+finished").
+
+Worth knowing because it changes what a SHRINKING list means. Under the old
+belief a row vanishing would have been a reflow or a missed detection; it is
+neither, and nothing should treat it as one.
+
 There is no mission cap now. The pass keeps taking startable rows until every
 row is either played or measured to be finished. `max_missions` survives only
 as an explicit opt-in bound for a cautious caller; the default is unbounded, and
@@ -2453,6 +2749,31 @@ Termination is a measurement, so the count guard that remains
 (`SWEEP_TRIPWIRE = 40`) is a **tripwire, not a policy** — if it ever fires the
 termination check is broken, and it says so at error level rather than looking
 like a tidy stop.
+
+### STILL OPEN: a FAILED mission gets zero retries, so the pass can end early
+
+The operator's expectation is that the pass "keeps going until nothing is
+left", and one path contradicts it. A mission that does not complete is
+fingerprinted into `failed` and skipped by every later sweep:
+
+    if run_one_fn():
+        banked += 1
+    else:
+        failed.append(fp)
+        log.info("mission did not complete; it stays in the list and will "
+                 "not be retried this pass")
+
+so the pass can finish reporting "N set aside after failing" with a mission
+still listed and still startable. The skip list is not wrong - a failed TP
+mission is NOT consumed, so without it the same mission is retried for ever -
+but the retry budget it implements is **zero**, where what is wanted is
+bounded-but-non-zero.
+
+`SWEEP_TRIPWIRE` already prevents a runaway, so a per-fingerprint allowance
+(two attempts, say, before setting it aside) would satisfy both. NOT changed
+yet: the failure did not reproduce on the pass that found it - 5 started,
+5 banked, 0 set aside - so there is no live example to calibrate against, and
+guessing the right budget without one is how a tripwire turns into a policy.
 
 ## "PRESSING RUN FREEZES FOR A BIT" — the sweep was first in line
 
@@ -3060,6 +3381,25 @@ relative string and was invisible. The assertion now reads the module source
 instead - the right move whenever a platform-specific value cannot exist on the
 platform running the test.
 
+### A FAILED LOG REDIRECT MUST NOT STOP THE RELAUNCH
+
+From Windows, pressing Stop:
+
+    could not relaunch: [Errno 13] Permission denied: '...\run/app.log'
+    stopped by the operator - relaunch failed
+
+which is the dead-panel state Stop exists to prevent - the panel lives in the
+PAGE, survives the process, and is left with no receiver. The launcher
+redirects with cmd's `>> run\app.log`, and **cmd opens that file without
+sharing writes**, so the child's open for append is refused. POSIX allows the
+same open, which is why it never showed up here.
+
+The bug is in the error handling, not the file: where the child's output goes
+is a convenience, whether the child STARTS is the point. `_child_output`
+degrades - the shared log, then a private `app-<pid>.log`, then `DEVNULL` -
+and never raises out of the relaunch. The test executes that chain with every
+path denied rather than reading it.
+
 ### `os.kill(pid, 0)` IS A KILL ON WINDOWS, NOT A PROBE
 
 Reported from a Windows machine: *"when I clicked stop it did not immediately
@@ -3110,6 +3450,32 @@ version of that assertion matched the docstring's own prose and failed on
 correct code — the trap this suite keeps re-learning). It also spawns a real
 child, probes it four times and asserts it is still running, which the old
 code would have killed.
+
+### AN UNREADABLE COMMAND LINE MUST KEEP THE LOCK, NOT DROP IT
+
+The pid lock verifies IDENTITY by comparing the holder's live command line
+against the one recorded at claim time, and `_proc_cmd` shells out to get it -
+PowerShell on Windows, `ps` on POSIX. It returns `""` whenever that fails: an
+execution policy blocking PowerShell, `wmic` absent on a recent Windows, a
+locked-down machine.
+
+The first version read an empty answer as "not the holder we recorded" and
+**dropped the lock**. So on exactly those machines the one guard against two
+bots clicking the same game was inert on every launch - and this file already
+records eight instances stacking up once.
+
+Unknown is now HELD, which is the same safe-direction choice `_alive` makes
+and for the same reason: a false "still running" costs a refused launch the
+operator clears by killing a pid, while a false "stale" costs a duplicate
+nobody notices. What is NOT relaxed is a command line that reads and
+DISAGREES - that still drops the lock. **Unknown is held; contradicted is
+released.**
+
+Note this is the third Windows fault of the same shape: a POSIX helper whose
+failure mode on Windows is silence rather than an error, read as a negative
+answer. `_dead` shelling out to `ps`, `_proc_cmd` returning "" for every pid,
+and now the lock dropping on that "". When a probe can fail, decide what its
+SILENCE means before trusting it.
 
 ### AND TWO WINDOWS REPORTS THAT WERE NOT BUGS AT ALL
 
@@ -3348,6 +3714,76 @@ bright one:
     filled rows   0.160 .. 0.215 (SS, including the black-rune rows), 0.168 (TP)
     empty rows    0.009 .. 0.089 (both layouts, both renderers)
 
+### The kekkai digit set grows by CLASSIFYING what it refused
+
+A live SS rune mission stopped at guess 1: *"could not read row 0 (green 0.853
+/ gold 0.708)"*. Only the GOLD digit failed - 0.708 against the 0.80 gate -
+and the refusal was correct, because a wrong counter corrupts the solver
+silently. It still cost the mission.
+
+The reader saves what defeated it as `UNREAD_<disc>_<n>.png`, and the fix is
+to look at them and rename them to their value. Both failures were the digit
+**3 on the gold disc**, correctly identified (runner-up `2` at 0.45, a 0.28
+margin) but under the gate: the set simply had no exemplar of that rendering.
+Added as `3_gold_ss2` / `3_gold_ss3`, they now score **0.877 / 0.879** against
+each other leave-one-out, comfortably clear.
+
+**Validate by leave-one-out before trusting a new exemplar.** Score every
+exemplar against all the OTHERS and check it still classifies as its own
+digit: a bad addition would make some other digit read wrong, which is far
+worse than a refusal. Every digit with two or more exemplars passes.
+
+Note the three that "fail" that check - 4, 5 and 6 - are each their digit's
+ONLY exemplar, so removing it leaves nothing to match and the best score is
+necessarily a wrong digit at 0.39..0.58, far below the gate. They would be
+REFUSED in use, not misread. That is the correct behaviour and also a standing
+gap: those three digits will stop a mission if they appear in a new rendering.
+
+### WHY SS FROZE AND TP NEVER DID — a set rebuilt per candidate
+
+53 seconds of 100% CPU before the first guess of a length-6 stage, which from
+outside is indistinguishable from a hang. **The solver was not the problem**:
+`next_guess` measures 0.10s and the per-guess image work totals 12ms.
+
+It was one line in `solve_live`, intersecting the two hypotheses' pools:
+
+    both = [c for c in pa if c in set(pb)]
+
+`set(pb)` is rebuilt once PER ELEMENT of pa, so the cost is
+O(len(pa) x len(pb)). On the first guess both pools are the FULL space:
+
+    length 6   46,656 x 46,656   48.92 s        hoisted: 0.0019 s   ~25,000x
+    length 3      216 x 216       0.00 s
+
+**That is the whole answer to "why is SS so much harsher than the TP
+kekkai".** Same code, same solver; the TP kekkai is length 3 where the pool is
+216, and SS reaches length 6 where it is 46,656. The cost is quadratic in the
+pool and the pool is exponential in the code length, so the difference is
+216^2 vs 46,656^2 - about 46,000x, which matches the measurement.
+
+General note, and it is the same shape as the OpenCV thread sweep: the
+expensive thing was not the algorithm anyone would suspect. Measure where the
+time goes before optimising the part that looks clever.
+
+### HARVEST A WHOLE SCROLL FROM ONE SAVED FRAME, not one digit per mission
+
+Each refusal costs an SS attempt, so harvesting one digit at a time is the
+expensive way to build a set. The reader already saves the WHOLE PANEL
+(`UNREAD_frame_*.png`) beside the two crops, and the scroll shows every played
+row at once - so one saved frame yields several labelled exemplars for free.
+
+Done for wgpu from a single frame: rows read `1/4` and `2/3`, giving exemplars
+for four digits in one pass, plus a `0` from the gold column. Read the DIGITS
+OFF THE PANEL rather than off the mask - a wgpu mask is fragmented (the ink
+pass takes the dark body and wgpu's white outline is excluded), and guessing
+from a broken mask is exactly how a wrong counter gets in.
+
+**Then cross-check the new set for false matches**, because a fresh
+per-backend set is small: score every exemplar against every OTHER digit's and
+require the worst to sit under the 0.80 gate. Measured 0.606 (a `1` against a
+`4`), so no wgpu reading can be confidently wrong. The suite pins this for
+every variant directory, since these directories GROW during live play.
+
 ### `solve_live` CAN RESUME, because rows are the scarce resource
 
 It used to start a fresh model on every call, so a restart replayed the same
@@ -3365,7 +3801,25 @@ Measured working: stage 1 resumed from two answers and solved in four more;
 stage 2 resumed three times across digit harvests and still finished inside its
 ten rows.
 
-### The digit exemplars are complete, 0 to 6
+### The digit exemplars are complete, 0 to 6 — ON ONE BACKEND ONLY
+
+**CORRECTION to the heading above, which overstated it.** The 0..6 set is
+`digits_ink/`, and it is a MIX: scored today it reads green well and gold
+marginally on webgl (0.853..0.946 / 0.673..0.736) and the other way round on
+wgpu (0.786 / 0.863). So it was harvested across sessions on more than one
+backend and is fully calibrated for neither.
+
+The older `digits/` directory - described elsewhere in this file as "the
+record of what wgpu draws" - holds only **0, 1, 2, 3**, not 0..6. Neither set
+covers a backend completely.
+
+Which backend the winning SS run actually used is NOT recorded and cannot be
+recovered from the files. **There is no note anywhere in this file claiming SS
+requires wgpu or is impossible on webgl**, and it is worth saying plainly
+because that belief came up later as a reason to switch backends.
+
+The per-renderer split below makes the question moot: each backend carries the
+digits it needs and falls back for the rest.
 
 Harvested during the clear, both discs. The set was the whole reason the solver
 kept stopping, and every stop was correct behaviour - an unread counter is
@@ -3378,6 +3832,41 @@ computed afterwards came from a false premise.
 Note the last stall of the winning run was the digit **6** - the win condition
 itself. The game acted on it and cleared the stage while the solver could not
 read it, so the mission succeeded without the bot knowing why.
+
+### VERIFIED END TO END ON wgpu — five families, one pass, nothing to fix
+
+The first SS pass that needed no intervention: **5 started, 5 banked**, list
+finishing empty, with every family dispatched BY SIGHT (two combats, a rune,
+a balance and a lights - `identify` reads the board, the title only hints).
+
+Each fix above was confirmed live rather than only in the suite:
+
+* **the double close-out** - `the mission runner banked it and returned to the
+  lobby - not closing out a second time`, twice. That path previously waited
+  45 s for an already-dismissed panel and filed a WIN as a failure.
+* **the derangement false-solve** - stage 2 hit `green=0 gold=6`, the exact
+  feedback that used to declare victory and loop, and it continued and solved
+  on the next guess.
+* **the per-renderer digit set** - `digit exemplars: wgpu-webgl variants for
+  0, 1, 2, 3, 4`, with zero refusals across two rune missions and eleven
+  counters.
+* **greyed-slot detection** - working, because that gate IS calibrated for
+  wgpu and is not for webgl. A concrete reason to prefer wgpu that has nothing
+  to do with the digit question.
+
+**One behaviour that looks like a fault and is not.** On a combat mission the
+watchdog reported `watchdog=stalled` and deliberately did NOT flee:
+
+    battle: watchdog=stalled - NOT fleeing, because Run fails the mission.
+            Fighting on; max_rounds=60 still bounds this.
+
+It won six seconds later. Fleeing an SS mission forfeits it, so the restraint
+is correct and the bound is what keeps it safe.
+
+**Still untested:** wgpu digits **5 and 6** never appeared. They remain
+single-exemplar fallbacks from the webgl set and will REFUSE rather than
+misread, so a future rune stage can still stall there - a known gap, and one
+that fills itself from a saved panel.
 
 ## TP NOW BANKS — and the last blocker was a hand-picked threshold
 
@@ -3696,6 +4185,36 @@ full frame answered it in one look.
   the template is not broken in general. The panel is transient and escaped
   capture twice, so `tp.py` now SAVES IT when the check is not located.
 * **the kekkai digit exemplars**, above.
+
+### AN ENEMY ON A SLIVER IS INVISIBLE TO THE BAR FINDER
+
+Measured on a live Eudemon SS boss (`ref/auto/battle/party_boss_sliver.png`):
+`Izo` was plainly on screen at roughly 4% HP and `find_enemy_bars` returned
+NOTHING. Its bright-red run is **13 px** against the function's
+`min_run = 40`, so any enemy below about 13% HP drops out of the scan
+entirely.
+
+    battle: no enemy HP bar located this turn      x4 in a row, near the kill
+
+It fails SAFELY - the caller already refuses to feed the watchdog a fake
+reading, so a missing measurement can never trigger an abort - but the
+consequence is that `DamageWatchdog` goes blind exactly when a fight is nearly
+won, and a fight where every enemy is on a sliver shows no progress at all
+while being one hit from over. It also means flat HP readings near a kill are
+NOT evidence of a stall; they are the bar shrinking below the detection floor.
+
+**Do not simply lower `min_run`.** 40 is what keeps noise out of a scan that
+this file already records returning the player HUD as enemy bars. A fix wants
+the bar's TRACK (the dark empty channel is full length at any HP) to locate
+the bar, and the red run only to measure its fill - a different shape of
+detector, not a threshold nudge.
+
+Also worth recording from that frame, because it retires a worry rather than
+adding one: **teammates do not contaminate the scan.** The runner calls
+`find_enemy_bars` with `x0 = 55%` of the frame width, and the party stands on
+the LEFT with the player while enemies are on the right - three party-full
+frames each gave exactly one bar. The `enemies=4` reading seen once in the
+same fight was a transient, not the party.
 
 ## AN ACCIDENTAL SCROLL MUST NOT MOVE THE GAME — lock it in the PAGE
 
@@ -4091,6 +4610,591 @@ installs a fresh rAF chain per call without cancelling the previous one and
 they all increment the same counter: three calls read 119.6 / 239.3 / 359.8.
 The A/B harness only escapes it because each backend is preceded by a reload.
 
+## THE LADDER WOULD HAVE SPENT TOKENS — a choice is not an acknowledgement
+
+The most serious defect found so far, and it was live.
+
+Losing a Eudemon boss raises **"Do you want to revive by using 50 token?
+(Revert 30% HP)"** with a GREEN CHECK and a RED X. The `confirm_dialog` rung
+acknowledges a lone green check generically - and it matched that check at
+**0.979**, with the check itself as its click target. The next ladder pass
+would have spent 50 of the premium currency this file's safety rules say must
+never be spent. Nothing was spent only because a relog happened to clear the
+dialog first.
+
+**The distinction the ladder was missing is structural, and needs no new
+template:**
+
+    one green check              an ACKNOWLEDGEMENT  -> pressing it is safe
+    a green check AND a red X    a CHOICE            -> pressing green ACCEPTS
+
+Measured on the live prompt (`ref/auto/battle/revive_prompt.png`):
+
+    green check  centre (1622, 847)  80x81
+    red X        centre (1897, 850)  82x83
+
+Same size, same row, 275 px apart. Everything the ladder already handles - the
+seal-broken dialog, Level Up, a Victory panel, a mission detail panel -
+carries a check ALONE.
+
+`perceive.choice_dialog` finds the pair and `Resumer.advance` presses the RED
+one. Three decisions worth keeping:
+
+* **The veto is consulted ONLY where a green check has already matched.** As a
+  free-standing detector it fired on 4 of 125 reference frames; scoped to the
+  one rung that clicks a check, that exposure disappears. A safety check that
+  fires on unrelated screens would licence clicking red things at random.
+* **The order is never assumed.** The function does not require green to be on
+  the left, because a variant with them swapped would otherwise go undetected
+  and fall straight through to the rung that clicks green.
+* **Declining is the safe direction.** A wrongly declined dialog costs one
+  retry; a wrongly accepted one costs tokens, and this project cannot buy them
+  back.
+
+**The general rule, and it generalises past this one prompt:** before pressing
+a control because it is the affirmative one, check whether the screen is
+OFFERING A CHOICE. The ladder's whole design is "the only control on this
+screen is the check, so pressing it is safe" - and that premise silently
+stopped being true the first time the game asked a question.
+
+### AND THEN IT FIRED DURING AN ORDINARY BATTLE — the scoping was the fix
+
+The decline above shipped, and the guard clicked the TURN-ORDER MARKER in the
+middle of a farm fight, twice in one battle:
+
+    gate: a dialog is blocking this wait and offers a CHOICE
+          (green (2112, 949) / red (2346, 962)) - declining
+    CLICK px=(2346,962) decline a blocking two-button dialog
+
+Neither is a dialog button. The "green" is a skill-slot icon, the "red" is the
+turn marker - two coloured discs on one row, which is all the shape test asked
+for.
+
+**The regression was moving the guard without carrying its scoping.** In the
+ladder it was consulted ONLY where a green check had already matched, and the
+note above says exactly why - free-standing it fired on 4 of 125 frames, and
+"a safety check that fires on unrelated screens would licence clicking red
+things at random". It then had to move into `Gate.wait_for_any`, because a
+RUNNING TASK never reaches the ladder and so nobody answered the real prompt -
+but a gate has no green check to scope against, and the scoping was simply
+dropped.
+
+**The replacement scoping is a positive reading of "this is a modal": the
+PANEL.** A dialog is flat between its two buttons; a battlefield is not.
+
+    the real revive dialog         colour std   2.8
+    three combat/unknown frames    colour std  61.5 .. 65.4
+
+A gate at 20 is an order of magnitude clear of both, and takes the reference
+set from 4 false fires to **0 of 138** with the real prompt still detected.
+
+**The general lesson, and it is not about dialogs:** when a check moves to a
+new caller, its GUARDS have to move with it. The thing that made it safe was
+never the shape test - it was the context it was asked in. Shape alone is a
+coincidence waiting to happen, and the log line will sound confident when it
+does.
+
+## THE SENJUTSU ORB REWIRES THE SKILL BAR — never press it
+
+A yellow-orange orb with a MAGATAMA inside, one slot-and-a-bit right of S8,
+drawn only while it is our turn. Measured at scale 1.0: **(2347, 970)**, 83x86,
+with S8 at (2214, 964) - so +133 x from S8, and `geometry.SENJUTSU` derives it
+from the command-bar anchor like everything else.
+
+**Pressing it swaps the WHOLE skill bar to the senjutsu set.** It costs
+nothing, deals no damage and plays no animation, which is exactly what makes
+it a trap rather than a mistake you notice: S1..S8 still exist and still
+click, so the bot plays jutsu the operator never chose and every learned
+cooldown is about the wrong skill. It is a toggle - pressing it again restored
+the original bar byte-identically (skill-row diff 0.00).
+
+**The cause seen live was ours.** The token-decline guard misfired on combat
+frames and clicked (2346, 962) - this orb. Two defences now, deliberately
+different in kind:
+
+    the GUARD      `Actor.guard_point`, pure GEOMETRY, so it holds on every
+                   backend. Re-armed each turn, because the anchor moves and
+                   a guard defending where a control USED to be is worse than
+                   none. `allow_point` lets the one legitimate caller press it.
+    the RECOVERY   colour, so it is calibrated PER BACKEND and abstains
+                   elsewhere - see below.
+
+Refusing beats recovering: a recovery has to press the same button back, and
+can only run once something has already gone wrong.
+
+### THREE STATES — absence is ambiguous, so read each one positively
+
+The first version read "no magatama" as "senjutsu is on", and called two
+ordinary archive combat frames swapped. On those the character had **no
+senjutsu button at all**, and acting on it would have pressed the toggle and
+turned senjutsu ON - the exact harm the guard exists to prevent. Measured in a
+140x140 window on the anchor-derived point:
+
+    amber magatama   the normal bar       amber 0.132   red 0.09-0.13
+    red hand sign    the SENJUTSU bar     amber 0.018   red 0.177
+    neither          no senjutsu button   amber 0.02    red 0.02-0.04
+
+Amber is the decisive channel (7x); red alone separates on from normal by only
+1.4x, because the magatama carries a red swirl of its own. So amber decides
+first, and red only tells the two amber-less cases apart.
+
+**Calibrated on webgl ONLY**, and keyed by backend for the same reason
+`COOLING_GATES` is: this reads COLOUR, and colour is what the backends render
+differently - this file already records a gold button rendering purple on one
+of them. Every other backend answers UNKNOWN and nothing is pressed. The
+no-click guard is unaffected, being geometry. To extend it, open the toggle on
+wgpu and measure the same two fractions.
+
+### EDGE IS NOT THE VARIABLE — `renderMode` IS, and it is PER PROFILE
+
+Asked whether Windows running EDGE could conflict. Edge is a Chromium fork,
+speaks CDP, and this file already records it verified live through
+`browser.launch()` - capture, input, injection and device metrics all fine.
+
+The thing that actually differs per machine is `renderMode`, which the SITE
+stores in **localStorage** - so it is per browser profile and per origin, and
+does not travel between the Mac's Chrome and the Windows Edge. Unless it was
+set there, Windows is on the `wgpu-webgl` default, not webgl. Consequences,
+and they are the opposite way round from what "it is Edge" would suggest:
+
+    wgpu   the DEFAULT templates are correct, and `slot_cooling` IS
+           calibrated there (0.25), so cooldown detection works better
+    webgl  needs `tpl/webgl/`, and the senjutsu recovery is calibrated
+
+So before blaming the browser, read the log line that names the backend.
+
+### A DECLINED REVIVE IS A DEFEAT — and it cost 93 seconds to say so
+
+The token guard fired on a REAL prompt for the first time and worked exactly
+as designed:
+
+    12:31:15  gate: a dialog is blocking this wait and offers a CHOICE
+              (green (1622,847) / red (1897,850)) - declining
+    12:31:15  CLICK (1897,850) decline a blocking two-button dialog
+
+Those are the measured coordinates of the revive prompt, and no tokens were
+spent. Then:
+
+    12:32:26  gate[battle turn 4] TIMEOUT after 93.0s (74 polls)
+    12:32:26  battle: no turn and no result in 90s
+    12:32:26  mission: battle 1 -> stalled
+
+**You are only offered a revive when you have DIED.** So once one has been
+declined the fight is over and the game is already on its way back to the
+village - every one of those 74 polls asked a question that had been answered.
+Reporting STALLED is wrong twice: it blames the runner for a screen that
+behaved correctly, and it hides a LOSS from whatever counts wins and losses.
+
+`Gate.declined_at` records the decline; the wait then ends a grace window
+later (12 s) rather than at the full timeout, and the battle runner returns
+DEFEAT. **The grace matters**: the transition is not instant and a defeat
+panel or cutscene may still be what fires, so only the DEADLINE shortens -
+the conditions keep their priority.
+
+Same shape as the Eudemon reward panel: a wait list that does not contain the
+state which actually follows. When adding a new way for a fight to END, ask
+what the gate is still waiting for.
+
+### A EUDEMON WIN SAT ON ITS REWARD SCREEN FOR 2m37s — the third ending
+
+Reported as "the bot is stuck at the reward screen". It was not stuck; it was
+waiting for something that could never arrive:
+
+    13:14:26  mission: unknown -> command_bar (step 2)
+    13:17:03  mission: battle 1 -> stalled {'rounds': 4, 'acted': 4}
+    13:17:03  eudemon: close the reward panel (X, never Share)
+
+A Eudemon boss pays out on a TALL PORTRAIT panel closed by a RED X - this file
+already records that - so `result_panel`, `mission_success` and
+`cutscene_continue` all miss it. The turn gate therefore ran its full timeout
+on a WON fight, filed it as a stall, and only then did `close_out` see the
+panel and bank the boss. The reward was on screen the whole time, which is
+precisely what it looks like from outside.
+
+**This is the THIRD instance of one shape**, after the cutscene ending and the
+Mission Success ending, both recorded above with the same symptom. The rule
+worth carrying: **when adding a new way for a fight to END, ask what the gate
+is still waiting for.** A wait list that does not contain the state which
+actually follows reads as a stall every time.
+
+`_eudemon_reward` is a POSITIVE reading - `eudemon.reward_panel` returns None
+whenever the garden LIST is on screen - so it cannot fire on the boss list, and
+a story mission never draws this panel at all. Measured: detected at
+(2132, 242) on the payout fixture, 0 false fires across the reference set, and
+None on all three garden pages. The runner returns VICTORY and leaves the panel
+alone, because dismissing it is the lap's job and that dismissal is the
+measurement that banks the boss.
+
+**And a process note, because it cost a red suite.** The test for the previous
+cleanup was run, then CLAUDE.md was edited to describe that cleanup - naming
+the two removed functions - and the commit went out without re-running. The
+suite had been failing since. Two lessons: re-run after touching anything the
+tests assert about, and a rule that forbids NAMING a removed thing forbids
+recording its removal. The check now allows an occurrence whose surroundings
+say it is gone.
+
+## EUDEMON GARDEN — the boss ladder, and a second rotation for the hunts
+
+Village -> `Hunting House` label -> submenu -> `Eudemon Garden`. A paged list
+of bosses, each row carrying a name, `Level:N`, a RANK badge and an attempts
+counter `x N`; the bottom of the panel has `Material Market` and `Battle`.
+
+**The Hunting House sub-app is no longer stuck.** `docs/UI_MAP.md` recorded S8
+as NOT OBSERVED, stalled at "Loading... 3%" - it loads fine now, and so does
+the garden.
+
+Fourteen bosses over three pages on this account:
+
+    SS  Izo · Kyunoki's Right Hand & … · Mudo & Kyo · Kojima      Level:1
+    C   Kamaitachi 10 · Hell Horse 20
+    B   Kabutomushi Musha · Kinkaku & Ginkaku
+    A   Thunder Eagle 40 · Mammoth King 50
+    S   Oceans Queen 55 · Ghost Soldier 60 · Battle Angel 70 · Infernal Chimera
+
+Exactly TEN are non-SS, which is almost certainly why the reference bot's
+`EudemonBossSequence` is `Boss1..Boss10` - their ten are the permanent roster
+and SS sits on top. Their list is positional with no names and their build is
+a different private server, so nothing transfers: **there is no boss data to
+port.** The CMMhero source was deleted, only their `config.json` survives, and
+the SWF extraction is 129 PNGs plus a manifest - no strings, no
+ActionScript. The roster is read off the screen.
+
+### RANK IS A COLOUR
+
+Measured medians over each badge's saturated pixels:
+
+    rank   hue    S     V     px
+    SS     120   255   196   ~4000
+    B      101   176   143   ~3100
+    A        5   213   233   ~2600
+    S       24   153   246   ~2350
+    C       39   146   143   ~2100
+
+SS and B are the closest in hue (120 vs 101) and are separated by SATURATION
+as well - SS is fully saturated where B is 176 - so neither test decides
+alone. That matters here specifically: confusing them would either exempt a
+farmable boss from the blacklist or let a time-limited one be skipped. All 14
+rows read correctly.
+
+**CORRECTION - EVERY READ RANK IS BLACKLISTABLE NOW, SS INCLUDED.** The rule
+used to be "non-SS only", and it was right for the code that existed then: the
+roster was harvested only as a side-effect of hunting, so a STALE entry could
+quietly cost an event attempt nobody chose to give up.
+
+The scan button removed that premise. The roster is rebuilt from the live list
+on demand, a boss that leaves is RETIRED rather than deleted so it returns as
+itself, and identity travels by fingerprint - so an entry cannot drift onto a
+different boss. With the list current by construction the refusal protected
+nothing and only took a decision away from the operator, who can see the event
+bosses in the panel and knows which are worth an attempt.
+
+`blacklistable()` is still the single place the rule lives, and it still
+refuses an UNREAD rank (`None`): skipping something unidentified is a
+different risk and stayed forbidden.
+
+### THE LAP: RECRUIT, FIGHT, RETURN — and recruit BEFORE choosing a target
+
+The operator's shape for a Eudemon lap: fill the party, enter the garden,
+start a boss, win or lose, be back in the village, repeat.
+
+**Recruiting belongs INSIDE the loop.** The recruit panel says so itself -
+"Teammates will leave your group after each mission or boss" - so a party
+filled once at the start is gone by the second fight.
+
+**And it must happen BEFORE the target is chosen.** A first version recruited
+after picking a target, then walked back into the garden and re-found that row
+on PAGE 1 only. A target from page 2 or 3 would have kept a stale `y` and the
+next click would have landed on a different boss. Recruiting first makes the
+ordering irrelevant.
+
+A failed recruit is NOT fatal. A party is help, not a precondition, and a boss
+can be attempted solo - so it is logged and the hunt goes on.
+
+### THE PANEL'S BLACKLIST — keys matched by fingerprint, never by hash
+
+The dock lists every boss the hunt has seen (`SS-1`, `A-2`, ...) and the
+operator clicks the ones to skip. Two decisions worth keeping:
+
+* **Identity is matched with `same_row`, not by hashing the fingerprint.** A
+  hash changes whenever any pixel does, which is the opposite of what a stable
+  identity needs; `same_row` already compares with tolerance and is what the
+  rest of the module uses. Verified: re-harvesting the same three pages adds
+  nothing to a roster of 14.
+* **Every boss is clickable, event bosses included** - see the correction
+  above. The command defers to `blacklistable` rather than testing the rank
+  itself, so there is still exactly one place the rule lives.
+
+The roster is persisted, because the panel has to offer the bosses BEFORE a
+hunt runs - an operator picks what to skip and then presses Run, not the other
+way round.
+
+
+### THE SCAN BUTTON, AND WHY IT SITS WITH THE LIST
+
+**The boss list changes with events**, so which bosses exist is not a fact to
+learn once. `EudemonScan` pages the whole garden and refreshes the roster
+without fighting anything - scanning is cheap and reversible, fighting is
+neither, and an operator who wants to see what is available should not have to
+start a fight to find out.
+
+Three decisions worth keeping:
+
+* **It lives ABOVE the boss grid, not in the task row.** The scan is what
+  FILLS the list beneath it; the two are one control surface, and an operator
+  looking at a stale list should not have to know the fix lives elsewhere in
+  the panel. It was in the task row first and that was a duplicate of the same
+  command, with the copy sitting where its effect is invisible. `Task.hidden`
+  keeps it runnable while absent from the row - so a command must be validated
+  against `BY_KEY`, never against the panel's visible list, or the button that
+  exists to run it cannot.
+* **It runs on click** (`run_task`), because it answers a question rather than
+  starting a shift. It will NOT interrupt: if something is already running the
+  task is queued and says so, since aborting a mission to answer a question is
+  the worst reading of that button.
+* **A rescan REPLACES rather than adds**, because `harvest_roster` only ever
+  adds and the panel would keep offering bosses an event has taken away.
+
+**A retired boss is kept, not deleted, and a test caught why.** Dropping the
+entry looks equivalent and is not: the FINGERPRINT goes with it, so when the
+event returns there is nothing to match and the boss comes back a stranger -
+new key, no name, and the operator's blacklist entry silently detached. The
+first version did exactly that and passed, because `_next_key` reissued the
+same numbers by coincidence. Entries now carry `listed: False`; the panel
+shows only listed ones, and identity survives an absence.
+
+### `x0` MEANS NO TRIES LEFT — but only when it actually READ
+
+A row reading `x0` is skipped outright. `count_at` returns None where it could
+not read, and **None is not zero** - the count digit merges with the panel
+border at the threshold that isolates it, so unreadable is the common case.
+The authority therefore stays `start()`: press Battle and ask whether the
+screen moved. That costs one wasted click per exhausted boss per sweep and
+needs no digit at all.
+
+### A EUDEMON WIN IS A DIFFERENT PANEL FROM A MISSION SUCCESS
+
+The first live boss was WON and the bot reported `stalled`. Measured on the
+frame it stalled on (`ref/auto/eudemon/reward_panel.png` - `Izo`, XP 45,650 /
+Gold 45,650 plus a materials drop):
+
+    mission_success   0.266     <- the farm/TP banner does not match at all
+    result_panel      0.524
+    mission_start     0.668     <- the green check is not on this panel
+    close_popup_x     0.951     <- the X that dismisses it, at (2132, 242)
+
+A Eudemon boss pays out on a TALL PORTRAIT panel closed by a RED X, where the
+farm and TP pay out on a wide banner closed by a GREEN CHECK. So `tp.close_out`
+can never bank one - it waits out its 45 s looking for a check that is not
+there, the turn gate times out at 90 s, and the runner calls a won fight
+`stalled` while the reward sits on screen.
+
+**The `Share` button on that panel must never be pressed** - it publishes to a
+social feed, the same standing rule as the TP "Share with Teammates" dialog.
+The X is located BY TEMPLATE and additionally constrained to the panel's
+top-right corner, and the suite measures the Manhattan distance from the click
+to the green Share control (1517 px) so a loose match cannot drift onto it.
+
+**The garden's own close X is the same glyph in the same corner**, and
+`close_popup_x` matched all three list pages. A reward panel is never the
+list, so `reward_panel` returns None whenever `plates()` sees one - a positive
+reading of the list rather than another threshold.
+
+General shape, for the third time in this file: **a reward screen is not one
+asset.** The green check alone is drawn at three sizes; now there is a
+payout panel that does not use it at all. Check what the screen actually
+carries before reusing a close-out.
+
+### A RANK COLOUR IS NOT AN ANCHOR — locate the LIST first
+
+The first version of `eudemon.rows` assumed the five row positions and read a
+rank badge at each. It matched **60 of 113 non-garden reference frames** -
+combat, the lobby, the village - so the hunt never called `to_garden`, paged an
+imaginary list and reported "every boss is blacklisted or finished" from the
+village.
+
+Saturated art is everywhere; a hue window over a small box says nothing about
+which SCREEN this is. The white NAME PLATES are structural and say it exactly:
+measured 343x67 at x=1033, evenly pitched (153, 158, 158, 157). `plates()`
+finds those and `rows()` reads ranks only where a plate actually is - 0 of 113
+false positives, all 14 rows still read.
+
+Two details that had to be measured rather than guessed:
+
+* **the plate WIDTH varies with the boss name** (325..425, because a long name
+  merges the plate with the art beside it), so height and x carry the test and
+  the width window is generous;
+* **a gap may be a MULTIPLE of the pitch** when one plate fails to segment, so
+  multiples are accepted rather than widening the pitch window - which would
+  let arbitrary pale bars through.
+
+This is the same lesson as `looks_like_mission_scene` and the SS `stage_dialog`
+firing on the lobby: a detector needs a POSITIVE reading of the screen it
+belongs to, not merely the absence of a reason to doubt.
+
+### THE COUNTER IS ADVISORY — Battle is the authority
+
+`x N` reads `x1` for SS and `x3` for the rest today, and whether those are
+daily maxima or today's remainder is UNKNOWN until a full cycle is watched.
+Nothing depends on knowing, because exhaustion is decided the way
+`tp.start_row` decides it: press Battle and ask whether the screen moved. A
+boss with no attempts left cannot start a fight, so a still screen is a
+POSITIVE reading of "finished" rather than an inference from a digit.
+
+That is deliberate insurance: the count digit merges with the panel border at
+the threshold that isolates it (measured 54x130 for a "1" whose true height is
+~90), so the reader can legitimately return None, and None must never be
+mistaken for zero.
+
+### `tp.row_fingerprint` IS WRONG FOR THIS LIST
+
+It samples x 1700..2500, which on a TP list is the row's own right-hand side
+but HERE is the shared boss PREVIEW PANE - repainted on selection and
+identical across the five rows of a page. Using it would hand back the same
+fingerprint for every row, so ONE blacklist entry would silently skip the
+whole page. `eudemon.row_fingerprint` samples the name plate (x 1033..1376)
+instead; verified 14 rows, zero collisions.
+
+General shape, and this file already records it for the character finder: a
+helper that is right for one screen is not automatically right for another
+that merely looks similar. Check what the coordinates actually land on.
+
+### A SECOND SKILL ROTATION, FOR THE HUNTS
+
+Bosses are a different fight from a story mission, so the panel keeps a hunt
+skill order beside the main one and `battle_cfg(profile="hunt")` prefers it.
+This is the arrangement the reference bot uses too - `HHSkill` and
+`EudemonSkill` sit beside `LevelingSkill`, `CWSkill` and the rest.
+
+**An empty hunt order falls back to the MAIN order, never to Attack-only.** A
+boss fight with no rotation is the worst possible default, and an operator who
+has not filled the second list in has not asked for one. The two lists live in
+different files so neither can overwrite the other, and the panel's two slot
+rows are built by one filler taking the command as an argument, so a slot
+added to one cannot leak into the other by copy-paste drift.
+
+### THE PANEL COULD ONLY OFFER PAGE 1 — the search stopped the harvesting
+
+The blacklist UI was complete and the roster was nearly empty, so the feature
+looked built and was unusable: the operator could not skip a single C, B, A or
+S boss, which is the whole point of it.
+
+`hunt` harvested the roster INSIDE its target search, and that search stops at
+the first startable boss:
+
+    for page in (1, 2, 3):
+        found = goto_page(...)
+        harvest_roster(...)      # only for pages actually visited
+        ...
+        if target: break         # page 1 always has a startable SS boss
+
+Page 1 always carries the SS rows, so it broke out there on every lap and
+pages 2 and 3 were never visited. Measured on the live roster file: **5
+entries — SS-1..SS-4 and C-1** — out of fourteen bosses.
+
+`survey_roster` pages the whole list once per hunt, separately from target
+selection. Executed over the three committed garden pages it harvests all
+fourteen, and all fourteen are offerable in the panel (the SS lock was later
+removed - see the correction under RANK IS A COLOUR):
+
+    SS-1 Izo · SS-2 Kyunoki's Right Hand · SS-3 Mudo & Kyo · SS-4 Kojima
+    C-1 Kamaitachi · C-2 Hell Horse
+    B-1 Kabutomushi Musha · B-2 Kinkaku & Ginkaku
+    A-1 Thunder Eagle · A-2 Mammoth King
+    S-1 Oceans Queen · S-2 Ghost Soldier · S-3 Battle Angel
+    S-4 Infernal Chimera
+
+**Once per hunt, not once per lap.** The roster is persisted and matched by
+fingerprint, so a boss stays known once seen; two extra page turns on every
+lap would buy nothing. An empty page ends the survey early - the list is
+contiguous, so an empty one is the end and not a transient miss.
+
+**And the test EXECUTES the survey.** A source-level assertion would pass
+against a survey that cannot run - this suite has shipped that bug twice
+(`arrow`, `play`). Its ordering check also strips COMMENTS as well as
+docstrings, because the fix is now explained in a comment beside the call, and
+a naive grep would match the prose rather than the call and pass with the call
+deleted. That is the docstring trap wearing a different hat; the docstring
+half alone has caught this suite four times.
+
+## RECRUITING A PARTY — and the one place a resize is justified
+
+Two party slots (`Team 0/2`), filled from the recruit rail. The operator wants
+them filled because some Hunting House and Eudemon bosses are hard to solo.
+
+**NPCs COST TOKENS AND ARE EXCLUDED, three ways.** This bot never spends
+tokens, and the rail mixes NPC cards in among the friends even on the friends
+tab, so a card is PROVEN a friend rather than assumed from which tab is open:
+
+    card colour     friends S 33..47, NPCs S 104..117
+    card structure  a friend card is exactly "Lv" + one or two digits; the
+                    NPC cards break the motif (one has no digits, one carries
+                    a 37 px blob of card art among them)
+    BUTTON COLOUR   a GREEN + recruits a friend for free, a BLUE + is the
+                    token-priced NPC
+
+**The button colour is the one that earns its place.** On a paged rail two
+NPC cards read DESATURATED and passed the colour test; the blue-button check
+caught them, and `eligible` returned four names out of six. Neither test is
+load-bearing alone, which is exactly why there are three.
+
+**STRONGEST FIRST.** The rule is "at or below the player's level", and the
+first version satisfied it by sorting ascending and taking the WEAKEST two.
+The point of a party is help, so it takes the highest that qualify.
+
+### THE + ROW IS BELOW WHAT RUFFLE DRAWS, and only a resize reveals it
+
+The buttons sit at the foot of each card, past the bottom of the rendered
+game. Everything cheaper was measured and none of it works:
+
+    taller browser viewport   free (game rect and every anchor verified
+                              identical at 800/860/900) but no help - the
+                              clip is not the viewport
+    overflow:visible on the   no reflow, no help
+    clipping .site-wrapper
+    shifting the game up      really moves it (iframe y 0 -> -59, and the
+                              Admin Message band does disappear) but the
+                              buttons stay absent at -59, -90, -120, -150
+    clicking the 8 px sliver  the click lands and changes nothing
+
+Only enlarging the player draws them - measured `player 960x839 -> 960x909`.
+That is this file's oldest prohibition, so it is done as a BOUNDED exception:
+grow the page wrappers, click, restore in a `finally`.
+
+**The restore is verified, not assumed.** After a full cycle a control at a
+known position was clicked and the rail responded both ways (mean |diff|
+14.64), so click -> stage mapping survives. Worth noting the prohibition's
+own premise has drifted: it was written after forcing 960x839 on a 960x720
+stage, and the player is 960x839 today with clicking working perfectly - so
+"taller than the stage" cannot by itself be the fault.
+
+### TWO TRAPS WHILE FINDING THIS
+
+**A green PAGING ARROW is not a `+`.** A loose sliver filter (35-80 px wide)
+matched the rail's arrow at 51x76, clicked it, and PAGED THE RAIL - which
+silently changed which friends were on screen and is why a Lv 42 player got
+recruited during a test. The `+` discs are 84x69; the arrows are excluded by
+requiring width >= 60.
+
+**The friends' shield emblems are blue.** A first blue-button filter matched
+them at 46x31 and vetoed real friends as "NPC columns". The `+` row is
+separated by being at the very bottom and much wider.
+
+### THE RAIL IS LOCATED, NEVER ASSUMED
+
+The `Lv` badge row moves when the player is enlarged (measured y~1370 normal,
+y~1440 grown), so a fixed offset from the button row found nothing at the
+grown size and read as "no friends here" rather than as a geometry fault.
+`find_rail_band` takes the densest run of amber glyphs instead. Cards are
+grouped by GAP (16-22 px within a card, 133 between), not by the measured
+192 px pitch, and the label/digit split is relative to each card's own tallest
+glyph so it survives any scaling.
+
+One digit set serves the card badges and the player's own larger plate: the
+player's "8" at 34 px matched a card-harvested "8" at 25 px with d=0.109 and a
+2.8x margin. An unread digit is REFUSED - a misread level could recruit
+someone above the player, which is the one thing the rule forbids. `1` is
+still unharvested and will refuse until seen.
+
 ## SS: THE OTHER TWO FAMILIES — Balance Control and Lights Out, both cleared
 
 Both were sitting behind one obstacle that had nothing to do with either
@@ -4339,6 +5443,34 @@ The same edit removed the rune branch's veto on `close_out`, for the reason
 already recorded there: a driver's opinion about its own stage is not the
 measurement that establishes a banked mission.
 
+### A WON SS MISSION WAS RECORDED AS A FAILURE — close_out ran twice
+
+Measured live, 47 seconds apart:
+
+    07:48:35  mission: SUCCESS after 1 battles, closed out to the lobby
+    07:48:35  mission: success {... 'closed_out': True}
+    07:49:22  close-out timed out after 45s
+    07:49:22  mission did not complete; it stays in the list
+
+`ss.run_one`'s combat branch called `play_combat()` and **threw the result
+away** - `Runner._run_mission` returned None, so there was nothing to throw
+away - then ran `tp.close_out` unconditionally. That waits for a Mission
+Success panel which the mission runner had already dismissed, so it could only
+time out. One SS attempt per occurrence, and they do not come back.
+
+**This does NOT contradict the rule that `close_out` must always be asked.**
+That rule is about the PUZZLE drivers, and it holds: a driver's verdict about
+its own stage is an OPINION, so it must not veto the measurement. A mission
+runner's `closed_out` is not an opinion - it IS that measurement, already
+taken: green check acknowledged, panel confirmed cleared, lobby confirmed
+back. Asking again cannot confirm anything, because the evidence has been
+consumed by the first ask.
+
+So the test is "did anyone already take this measurement", not "do I trust
+this component". `_run_mission` returns `(out, stats)` now; every other
+outcome - success without close-out, stalled, or a caller that returns nothing
+- still goes through `close_out` exactly as before.
+
 ### CORRECTION — COMPLETED SS MISSIONS DROP OUT OF THE DAY'S LIST
 
 TP's do not: this file records that they stay listed and go GREY, and the whole
@@ -4354,6 +5486,23 @@ for having nothing left to do. That is the negative-definition trap again:
 carries its own anchors and all three read **1.000** on the empty panel against
 0.18..0.35 for anything row-shaped, so the panel's presence is now a positive
 reading.
+
+### A DIRECTORY THE BOT WRITES TO WILL EVENTUALLY HOLD THE THING YOU DENY
+
+Third instance, and this one arrived as a test failure on correct code. The
+`stage_dialog` sweep asserted that NO reference frame reads as a dialog - and
+the bot saves screens it cannot name into `ref/auto/unknown/`, so a live SS
+run eventually deposited a genuine **Mission Fail** dialog there. The detector
+was right; the assertion was stale.
+
+The frame was worth keeping rather than deleting: it is now
+`ref/auto/ss/mission_fail_dialog.png` and serves as the POSITIVE case the
+sweep never had. It also records the derangement bug in the act - ten rows all
+reading `0 / 6`.
+
+The sweep now names its exceptions. Previous instances: the cooldown frames
+and the SS hints frames, both the same lesson - **a glob over a directory the
+bot writes to cannot carry a fixed expectation.**
 
 ### A FIXTURE DIRECTORY THE BOT WRITES TO CANNOT CARRY A HARDCODED EXPECTATION
 

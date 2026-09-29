@@ -467,11 +467,6 @@ def pick_mission(actor, cap, log, which="kekkai", max_pages=3):
     return False
 
 
-def pick_kekkai(actor, cap, log, max_pages=3):
-    """Back-compat shim for the Kekkai mission specifically."""
-    return pick_mission(actor, cap, log, "kekkai", max_pages)
-
-
 def advance_cutscenes(actor, cap, log, limit=12):
     """Click through 'click anywhere to continue' until it stops appearing."""
     cs = _tpl("cutscene_continue", 0.80, [round(0.9 + i * 0.05, 2) for i in range(9)])

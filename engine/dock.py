@@ -125,6 +125,45 @@ _BOOTSTRAP = r"""
 
   const ID = "__ID__", CSS = __CSS__;
 
+  // THE PIN STYLESHEET, built in ONE place because it is asserted from two
+  // (the focus pass and `__nsbotAlign`), and a rule that exists in only one of
+  // them is the half-applied correction this project keeps paying for.
+  //
+  // It carries two declarations:
+  //
+  //   top:0        pins the site's own `#game-container{top:-58.5px}`, which
+  //                the site recomputes on every reflow.
+  //   min-height   makes the game FILL THE WINDOW instead of stopping short.
+  //
+  // Why min-height is needed at all: the site's layout is authored for a 780px
+  // box, so the SWF draws to 780-ish and everything below it is blank page.
+  // Measured at viewport 1340x900, sweeping the wrapper height:
+  //
+  //     wrapper  player   blank at bottom
+  //       (off)    839      64.5 CSS
+  //        837     900      63.0 CSS
+  //        860     925      40.0 CSS
+  //        880     946      20.0 CSS
+  //        900     968       0.0 CSS
+  //
+  // The game's drawn content ends exactly AT the wrapper height, so the rule
+  // is simply "make the wrapper the viewport". Heights only - the player's
+  // WIDTH is never touched, so the SWF's own scaling is unaffected and click ->
+  // stage mapping is unchanged (verified: all anchors still match at scale 1.0
+  // and their baseline confidences).
+  //
+  // The art is centred in the player, so a taller player also moves the
+  // content down by half the growth; `Capture.game_metrics` measures that and
+  // corrects for it, which is why this may be changed without recutting a
+  // single template.
+  window.__nsbotPinCSS = () => {
+    const h = Math.max(780, Math.round(window.innerHeight || 0));
+    return "#game-container{top:0 !important;}" +
+           "html,body.logged-in,#content-container,.site-wrapper," +
+           "main.main-content,#panels-wrapper" +
+           "{height:auto !important;min-height:" + h + "px !important;}";
+  };
+
   const send = (cmd, arg) => {
     try { window.__BINDING__(JSON.stringify({cmd, arg, t: Date.now()})); }
     catch (e) { /* binding not attached yet; the click is simply dropped */ }
@@ -224,7 +263,7 @@ _BOOTSTRAP = r"""
         pin.id = "__nsbot_pin";
         document.documentElement.appendChild(pin);
       }
-      pin.textContent = "#game-container{top:0 !important;}";
+      pin.textContent = window.__nsbotPinCSS();
       const r0 = g.getBoundingClientRect();
       if (Math.abs(r0.y) > 1) {
         if (!g.hasAttribute("data-nsbot-mt")) {
@@ -375,20 +414,133 @@ _BOOTSTRAP = r"""
     }
     // Re-assert the pin: a reload drops the injected <style>, and without it the
     // site's own top:-58.5px takes over again.
-    if (!document.getElementById("__nsbot_pin")) {
-      const st = document.createElement("style");
+    //
+    // The TEXT is rewritten every pass, not just when the element is missing.
+    // It carries a min-height derived from `innerHeight`, and applying a window
+    // size changes that - so a create-only branch would leave the game sized
+    // for the PREVIOUS viewport, which is the stale-cached-belief failure this
+    // file already has a rule about.
+    let st = document.getElementById("__nsbot_pin");
+    if (!st) {
+      st = document.createElement("style");
       st.id = "__nsbot_pin";
-      st.textContent = "#game-container{top:0 !important;}";
       document.documentElement.appendChild(st);
     }
-    const r = g.getBoundingClientRect();
-    if (Math.abs(r.y) <= 1) return "aligned";
-    if (!g.hasAttribute("data-nsbot-mt")) {
-      g.setAttribute("data-nsbot-mt", g.style.marginTop || "");
+    const want = window.__nsbotPinCSS();
+    if (st.textContent !== want) st.textContent = want;
+    // FLUSH LEFT, AND EACH AXIS CONVERGES ON ITS OWN MEASUREMENT.
+    //
+    // This was tried once and reverted, and the recorded cause was not the
+    // idea but the arithmetic: both corrections were computed from ONE rect,
+    // and setting marginLeft REFLOWS the page, so the `r.y` used a line later
+    // was already stale. Each pass over-corrected, the margins compounded -
+    // marginTop reached 177px - and the game was pushed down and clipped.
+    //
+    // So X is applied first, the rect is RE-MEASURED, and only then is Y
+    // considered. Measured on the live page today, the reflow does not in
+    // fact move Y at all (x 380 -> 0, y 0 -> 0), because
+    // `#game-container{top:0 !important}` - which did not exist at the time of
+    // that attempt - pins it. The re-measure is kept regardless: it costs one
+    // rect read and it is the difference between "did not move this time" and
+    // "cannot move".
+    let r = g.getBoundingClientRect();
+    let moved = null;
+    if (window.__nsbotFlushLeft && Math.abs(r.x) > 1) {
+      const host = window.__nsbotFlushHost();
+      if (host) {
+        if (!host.hasAttribute("data-nsbot-ml")) {
+          host.setAttribute("data-nsbot-ml", host.style.marginLeft || "");
+        }
+        // CONVERGE, DO NOT COMPUTE ONCE. The host is centred by the page, so
+        // marginLeft does not map 1:1 onto its position - setting it replaces
+        // whatever was centring it and the box JUMPS. Measured: one pass from
+        // x=380 overshot to -360, and a second landed on 0. Two passes is the
+        // normal case; three is the bound.
+        for (let i = 0; i < 3; i++) {
+          const x = g.getBoundingClientRect().x;
+          if (Math.abs(x) <= 1) break;
+          const cur = parseFloat(getComputedStyle(host).marginLeft) || 0;
+          host.style.marginLeft = Math.round(cur - x) + "px";
+        }
+        moved = "x";
+      }
+      r = g.getBoundingClientRect();     // the reflow invalidated the old one
     }
-    const cur = parseFloat(getComputedStyle(g).marginTop) || 0;
-    g.style.marginTop = Math.round(cur - r.y) + "px";
-    return "realigned";
+    if (Math.abs(r.y) > 1) {
+      if (!g.hasAttribute("data-nsbot-mt")) {
+        g.setAttribute("data-nsbot-mt", g.style.marginTop || "");
+      }
+      const cur = parseFloat(getComputedStyle(g).marginTop) || 0;
+      g.style.marginTop = Math.round(cur - r.y) + "px";
+      moved = moved ? "xy" : "y";
+    }
+    return moved ? ("realigned:" + moved) : "aligned";
+  };
+
+  // TURNING IT OFF MUST UNDO IT. Removing the code that SETS a margin does
+  // not clear a margin already applied - that is the second trap the reverted
+  // attempt hit, where a stale inline offset persisted in the DOM and the
+  // game stayed broken until it was explicitly cleared.
+  // SHIFT THE OUTERMOST CENTRED BOX, NOT THE GAME ITSELF.
+  //
+  // Moving the iframe is what broke this the first time AND the second. The
+  // iframe sits inside `div.iframe-clipper`, which is `overflow:hidden` and
+  // does NOT move with it - so a marginLeft on the iframe slides the game out
+  // from under its own clipper and the left 380 CSS px are simply cut off.
+  // Measured, and it is not subtle once you score for it: `lobby_logo` went
+  // 1.000 -> 0.260 and `mission_room_entry` 1.000 -> 0.651, while
+  // `lobby_rail_fortune` stayed 1.000 because it lives on the RIGHT of the
+  // game and survived the crop. A half-visible game that still matches some
+  // anchors is the worst possible failure - it looks like a perception bug.
+  //
+  // The centring happens far above: the chain is
+  //   iframe.game-iframe -> div.iframe-clipper(hidden) -> #game-container
+  //   -> #panels-wrapper -> main.main-content -> div.site-wrapper
+  //   -> #content-container (full width)
+  // so the thing to move is the outermost box NARROWER than the page.
+  // DEFAULTED HERE, so a reload comes back already correct. The browser
+  // re-runs this bootstrap on every new document and Python is not told, so
+  // a flag Python has to re-assert is wrong for however long it takes the
+  // main loop to come round - which during a task is minutes, and during an
+  // in-task relog is exactly when it matters.
+  if (window.__nsbotFlushLeft === undefined) {
+    window.__nsbotFlushLeft = __FLUSHLEFT__;
+  }
+
+  window.__nsbotFlushHost = () => {
+    const g = gameEl();
+    if (!g) return null;
+    const vw = document.documentElement.clientWidth;
+    let host = g, el = g.parentElement;
+    while (el && el !== document.body) {
+      if (el.getBoundingClientRect().width < vw - 1) host = el;
+      el = el.parentElement;
+    }
+    return host === g ? null : host;
+  };
+
+  // TURNING IT OFF MUST UNDO IT. Removing the code that SETS a margin does
+  // not clear a margin already applied - the trap the first attempt left in
+  // the DOM, and one walked into again here: with the flag merely skipped
+  // rather than asserted, a stale -380px survived a restart and the game
+  // stayed shifted and clipped with nothing left to explain it. So the
+  // caller asserts this every cycle with a boolean, never by not calling.
+  window.__nsbotSetFlushLeft = (on) => {
+    window.__nsbotFlushLeft = !!on;
+    const g = gameEl();
+    if (!on) {
+      for (const el of document.querySelectorAll("[data-nsbot-ml]")) {
+        el.style.marginLeft = el.getAttribute("data-nsbot-ml");
+        el.removeAttribute("data-nsbot-ml");
+      }
+      if (g) g.style.marginLeft = "";     // belt and braces: an older build
+                                          // put the margin on the iframe
+    }
+    if (window.__nsbotAlign) window.__nsbotAlign();
+    const r = g ? g.getBoundingClientRect() : null;
+    return JSON.stringify({flushLeft: window.__nsbotFlushLeft,
+                           x: r ? Math.round(r.x) : null,
+                           y: r ? Math.round(r.y) : null});
   };
 
   // Renders by UPDATING values, never by rewriting the panel.
@@ -434,6 +586,31 @@ _BOOTSTRAP = r"""
       `<div class="d" id="v_skills" style="margin-bottom:5px"></div>` +
       `<div class="g4" id="v_slots"></div>` +
       `<div style="margin-top:5px">` + btn("skill_clear", "Clear order") + `</div>` +
+      // A SECOND ROTATION FOR THE HUNTS. Hunting House and Eudemon bosses are
+      // a different fight from a story mission, so they carry their own order
+      // - the same arrangement the reference bot uses (HHSkill, EudemonSkill).
+      // Empty means "use the main order", which is why the label says so
+      // rather than leaving the operator to infer it.
+      `<h4>Hunt skill order (Hunting House / Eudemon)</h4>` +
+      `<div class="d" id="v_hskills" style="margin-bottom:5px"></div>` +
+      `<div class="g4" id="v_hslots"></div>` +
+      `<div style="margin-top:5px">` + btn("hskill_clear", "Clear hunt order") + `</div>` +
+      // EUDEMON BLACKLIST, with its own SCAN button directly above it.
+      //
+      // The scan belongs HERE rather than in the task row because it is what
+      // fills the list underneath it - the two are one control surface, and
+      // an operator looking at a stale or empty list should not have to know
+      // that the fix lives somewhere else. It runs on click (`run_task`)
+      // when nothing else is going, since it answers a question rather than
+      // starting a shift.
+      //
+      // Every boss is clickable, event bosses included: the scan keeps this
+      // list current, so the old SS lock protected nothing.
+      `<h4>Eudemon bosses (click to skip)</h4>` +
+      `<div style="margin-bottom:5px">` +
+        btn("run_task", "Scan bosses now", "eudemon_scan") + `</div>` +
+      `<div class="d" id="v_eu_none" style="margin-bottom:4px"></div>` +
+      `<div class="g4" id="v_eudemon"></div>` +
       `<h4>View</h4><div style="margin-top:2px">` +
         btn("focus", "Focus mode") +
       `</div>` +
@@ -600,15 +777,44 @@ _BOOTSTRAP = r"""
     });
   };
 
-  const fillSlots = (slots) => {
+  // One filler for both banks - the hunt row is the same buttons sending a
+  // different command, so a slot added to one list can never leak into the
+  // other by copy-paste drift.
+  const fillSlotRow = (host, slots, cmd) => {
     const key = (slots || []).join(",");
-    if (!V.v_slots || V.v_slots.dataset.key === key) return;
-    V.v_slots.dataset.key = key;
-    V.v_slots.innerHTML = "";
+    if (!host || host.dataset.key === key) return;
+    host.dataset.key = key;
+    host.innerHTML = "";
     (slots || []).forEach(k => {
       const b = document.createElement("button");
-      b.dataset.cmd = "skill"; b.dataset.arg = k; b.textContent = k;
-      V.v_slots.appendChild(b);
+      b.dataset.cmd = cmd; b.dataset.arg = k; b.textContent = k;
+      host.appendChild(b);
+    });
+  };
+
+  const fillSlots = (slots) => {
+    fillSlotRow(V.v_slots, slots, "skill");
+    fillSlotRow(V.v_hslots, slots, "hskill");
+  };
+
+  const fillEudemon = (list) => {
+    const key = (list || []).map(e => e.key + ":" + (e.name || "")
+        + (e.skipped ? "!" : "")).join(",");
+    if (!V.v_eudemon || V.v_eudemon.dataset.key === key) return;
+    V.v_eudemon.dataset.key = key;
+    V.v_eudemon.innerHTML = "";
+    setText("v_eu_none", (list || []).length ? ""
+        : "(none seen yet - run the hunt once and they appear here)");
+    (list || []).forEach(e => {
+      const b = document.createElement("button");
+      b.textContent = (e.name ? e.key + " " + e.name : e.key)
+          + (e.skipped ? " x" : "");
+      // EVERY boss is skippable now, event bosses included - the scan
+      // keeps this list current, so the old SS lock protected nothing.
+      b.dataset.cmd = "eu_skip"; b.dataset.arg = e.key;
+      if (e.rank === "SS") b.title = "event boss - limited attempts";
+      setOn(b, !!e.skipped);
+      V.v_eudemon.appendChild(b);
     });
   };
 
@@ -662,10 +868,15 @@ _BOOTSTRAP = r"""
     setText("v_pin", s.pin || "highest unlocked");
     el.querySelectorAll('[data-cmd="grade"]').forEach(b =>
       setOn(b, b.dataset.arg === (s.grade || "auto")));
+    fillEudemon(s.eudemon);
     const ord = (s.skills || []);
     setText("v_skills", ord.length
         ? ord.map((k, i) => `${i + 1}. ${k}`).join("   ")
         : "(none - Attack only)");
+    const hord = (s.hunt_skills || []);
+    setText("v_hskills", hord.length
+        ? hord.map((k, i) => `${i + 1}. ${k}`).join("   ")
+        : "(none - the main order above is used)");
 
     const mode = s.mode || "idle";
     setText("v_pill", mode,
@@ -724,6 +935,20 @@ class Dock:
     def __init__(self, cdp, log=None, width=WIDTH):
         self.cdp, self.log, self.width = cdp, log, width
         self._script_id = None
+        # BAKED INTO THE BOOTSTRAP, not asserted from Python afterwards.
+        #
+        # The bootstrap is re-run by the BROWSER on every new document
+        # (`Page.addScriptToEvaluateOnNewDocument`), and Python is not told.
+        # A flag defaulted in the script therefore comes back correct on a
+        # reload without a round trip - which is the only way it can be right
+        # during a relog that happens INSIDE a task, where `ensure_focus` (the
+        # thing that re-asserts it between cycles) does not run for minutes.
+        #
+        # Measured the hard way: an in-task relog came back with flush-left
+        # off, so at the 1340 viewport the game re-centred to 190..1150 under
+        # a panel starting at 960 - a 190 px OVERLAP - and the bot sat
+        # re-clicking a control the panel was covering.
+        self.flush_left_default = False
 
     # -- install -----------------------------------------------------------
     def _source(self):
@@ -731,6 +956,8 @@ class Dock:
         return (_BOOTSTRAP
                 .replace("__ID__", PANEL_ID)
                 .replace("__BINDING__", BINDING)
+                .replace("__FLUSHLEFT__",
+                         "true" if self.flush_left_default else "false")
                 .replace("__CSS__", json.dumps(css)))
 
     def install(self, verify=True):
@@ -842,9 +1069,25 @@ class Dock:
             "  ? 'ok' : 'empty')")
 
     def align(self):
-        """Re-assert top alignment once the layout has settled."""
+        """Re-assert top (and, when asked, left) alignment once settled."""
         return self.cdp.evaluate(
             "(window.__nsbotAlign ? window.__nsbotAlign() : 'no-panel')")
+
+    def flush_left(self, on=True):
+        """Pull the game to x=0, removing the dead strip beside it.
+
+        ASK THE PAGE rather than remembering, for the same reason focus mode
+        does: a reload re-injects the bootstrap on the new document with the
+        flag back at its default, and a Python-side belief would then be
+        wrong without anything raising. `align` re-asserts it every cycle.
+
+        Turning it OFF restores the margin it saved - removing the code that
+        sets a margin does not clear one already applied, which is the trap
+        the first attempt at this left behind in the DOM.
+        """
+        return self.cdp.evaluate(
+            "(window.__nsbotSetFlushLeft ? window.__nsbotSetFlushLeft(%s)"
+            " : 'no-panel')" % ("true" if on else "false"))
 
     def scroll_lock(self, on=True):
         """Remove the page scroll (or restore it). Renderer-independent.

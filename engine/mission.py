@@ -56,7 +56,7 @@ import numpy as np
 
 import battle as battle_mod
 import perceive
-from gate import Stopped, template as cond_template
+from gate import Condition, Stopped, template as cond_template
 from geometry import BattleGeometry
 
 
@@ -111,6 +111,20 @@ REQUIRED_TEMPLATES = {
         "frame classify as 'cutscene'. It must be RE-CUT before use."),
 }
 
+
+
+def _eudemon_reward(frame_bgr):
+    """The Eudemon payout panel's close X, or None. Never raises.
+
+    Imported lazily and defensively: `mission.py` is the generic runner and
+    must not hard-depend on the Eudemon module, and a detector that throws
+    would take down a gate poll rather than simply not firing.
+    """
+    try:
+        import eudemon as _eu
+        return _eu.reward_panel(frame_bgr)
+    except Exception:
+        return None
 
 class MissionOutcome:
     SUCCESS = "success"
@@ -197,6 +211,29 @@ class MissionRunner:
                 c[key] = cond_template(key, t[key])
         if "loading_text" in t:
             c["loading"] = cond_template("loading", t["loading_text"])
+        # A EUDEMON WIN IS AN ENDING THE GATE DID NOT KNOW.
+        #
+        # A boss pays out on a TALL PORTRAIT panel closed by a RED X, not the
+        # wide banner with a green check that the farm and TP use - so none of
+        # `result_panel`, `mission_success` or `cutscene_continue` matches it
+        # and the turn gate waited out its FULL timeout for a command bar that
+        # could never come. Measured live:
+        #
+        #     13:14:26  mission: unknown -> command_bar (step 2)
+        #     13:17:03  mission: battle 1 -> stalled {'rounds': 4}
+        #     13:17:03  eudemon: close the reward panel (X, never Share)
+        #
+        # 2m37s of a WON fight sitting on its reward screen, then filed as a
+        # stall. From outside that is simply "the bot is stuck on the reward
+        # screen", which is exactly how it was reported.
+        #
+        # `eudemon.reward_panel` is a positive reading - it returns None
+        # whenever the garden LIST is on screen - so this cannot fire on the
+        # boss list, and a story mission never draws this panel at all.
+        c["eudemon_reward"] = Condition(
+            "eudemon_reward",
+            lambda bgr, _gray: _eudemon_reward(bgr),
+            note="the Eudemon boss payout panel (red X, no green check)")
         # The lobby anchor. Needed to confirm a mission actually CLOSED OUT: the
         # run is not finished when the Mission Success panel appears, only once
         # its green check has been acknowledged and the game has returned here.
@@ -235,9 +272,19 @@ class MissionRunner:
             command bar, so a finished fight would otherwise read as "my turn".
           * loading fairly early — a loading screen hides everything else, and
             mistaking it for "unknown" burns the step budget.
+          * eudemon_reward LAST, and that is a COST decision, not a priority
+            one. Nothing else matches that panel (measured on the payout
+            fixture: mission_success 0.266, result_panel 0.524, mission_start
+            0.668, all under their gates), so its position cannot change an
+            answer — but it costs a `plates()` scan plus a find, and every
+            farm step would pay that on a frame one of the cheap anchors was
+            always going to claim. Asked last, it only runs on the frames that
+            would otherwise read "unknown", which is exactly the case it is
+            for. Same ordering-by-cost reasoning as `farm.in_mission`.
         """
         order = ("mission_success", "result_panel", "loading", "command_bar",
-                 "mission_start", "cutscene_continue", "mission_room", "lobby")
+                 "mission_start", "cutscene_continue", "mission_room", "lobby",
+                 "eudemon_reward")
         for name in order:
             cond = self.conditions.get(name)
             if cond is None:
@@ -277,6 +324,47 @@ class MissionRunner:
                 last_state, repeats = state, 0
             if repeats >= self.cfg.get("mission", {}).get("max_repeats", 25):
                 self.log.error("mission: stuck in %r for %d steps", state, repeats)
+                return MissionOutcome.STALLED, self.stats
+
+            if state == "eudemon_reward":
+                # A EUDEMON PAYOUT IS AN ENDING THIS LOOP CANNOT ACT ON, and
+                # failing to say so cost 2-10 MINUTES PER BOSS, live.
+                #
+                # The battle gate already returns VICTORY on this panel, so the
+                # fight is over and won. Control then came back here, `classify`
+                # had no entry for it, and the panel read "unknown" - which
+                # `looks_like_mission_scene` cannot veto either, so the runner
+                # TRAVERSED ON TOP OF THE REWARD PANEL until the 25-repeat guard
+                # fired. Measured across five bosses: 8:09, 8:15, 8:14, 2:07 and
+                # ~10:00 of dead ends, with the "character" and the "enemy" both
+                # at byte-identical coordinates every pass - the static-object
+                # signature this file names elsewhere. Worse than the delay, it
+                # was ~25 BLIND CLICKS on a panel that carries a `Share` button.
+                #
+                # This is the SIXTH instance of the negative-definition shape
+                # (mission list, battle-between-turns, seal dialog, Level Up,
+                # webgl Mission Success, and now this), and the second time this
+                # panel specifically was taught to one caller and not the other:
+                # the gate learned it, `classify` did not.
+                #
+                # THE PANEL IS DELIBERATELY NOT DISMISSED HERE. Closing it is
+                # the lap's job (`eudemon.close_out`), and that dismissal is the
+                # measurement that banks the boss - doing it here would consume
+                # the evidence, which is the same mistake as the double
+                # close-out that filed a won SS mission as a failure.
+                #
+                # The OUTCOME IS UNCHANGED (still STALLED) on purpose. The only
+                # caller that can reach this state is the Eudemon lap, which
+                # DISCARDS `play_combat()`'s return entirely and banks through
+                # its own close-out - so the value cannot matter to it, and
+                # inventing a new one, or reusing SUCCESS (which is defined as
+                # "green check acknowledged AND lobby regained", neither of
+                # which happened), would change semantics under a name that
+                # already means something. What changes is the TIME: one step
+                # instead of twenty-five.
+                self.log.info("mission: the Eudemon payout panel is up - the "
+                              "boss is down and the lap will bank it; stopping "
+                              "rather than walking on a reward screen")
                 return MissionOutcome.STALLED, self.stats
 
             if state == "mission_success":

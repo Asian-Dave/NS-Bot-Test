@@ -31,15 +31,67 @@ class Actor:
         # but "should never fire" is exactly what was believed about the fixed
         # card grid right before it clicked into the weapon Shop.
         self.no_click_zones = list(no_click_zones)
+        # POINTS the bot must never click, as (x, y, radius, why). Unlike the
+        # dock's rectangle these move with the game, so the owner re-arms them
+        # each time it has fresh geometry rather than storing a stale spot.
+        #
+        # The senjutsu toggle is the reason this exists: pressing it swaps the
+        # whole skill bar, so every later S1..S8 click plays a jutsu nobody
+        # chose - and a mis-scoped safety check pressed it twice in one fight.
+        # Refusing beats recovering, because a recovery has to press the same
+        # button back and can only run once something has already gone wrong.
+        self.no_click_points = []
+
+    def guard_point(self, x, y, radius, why):
+        """Forbid clicks within `radius` of (x, y). Replaces any same-`why`."""
+        self.no_click_points = [p for p in self.no_click_points if p[3] != why]
+        self.no_click_points.append((int(x), int(y), int(radius), why))
+
+    def allow_point(self, why):
+        """Lift a guard, for the one caller entitled to press it."""
+        self.no_click_points = [p for p in self.no_click_points if p[3] != why]
 
     def _sleep(self, rng):
         time.sleep(random.uniform(*rng))
 
     def blocked_by(self, px, py):
-        """The no-click zone containing this point, if any."""
+        """The no-click zone or guarded point covering this click, if any.
+
+        TWO SPACES MEET HERE, AND THEY ARE NOT THE SAME ONE.
+
+        * ZONES come from the live DOM (`dock_rect`), so they are REAL page
+          pixels. The point arrives in REFERENCE space, off a normalised
+          frame, so the POINT is converted - not the zone.
+        * POINTS (`no_click_points`, e.g. the senjutsu orb) are derived from
+          battle geometry measured ON a normalised frame, so they are already
+          in reference space and are compared as they are.
+
+        CONVERTING AT COMPARISON TIME, RATHER THAN STORING A SHIFTED ZONE, is
+        deliberate and was arrived at the hard way. A stored zone is a cached
+        belief, and this one was cached from a measurement taken mid-reload -
+        when the game is briefly scrolled and the shift reads (380, -602)
+        instead of (760, 0). That transient was stored, the refresh that would
+        have corrected it only runs BETWEEN cycles, and the resume ladder
+        spins inside a task - so the bad zone stood and the bot refused the
+        Play button forever:
+
+            REFUSING click (2406,1061) resume:play - it lands on the control
+            dock (2300, -602, 760, 1800)
+
+        Read live, a transient costs at most one mis-judged click instead of
+        wedging the run.
+        """
+        try:
+            dx, dy = self.capture.norm_shift()
+        except Exception:
+            dx = dy = 0
+        rx, ry = px - dx, py - dy
         for (zx, zy, zw, zh) in self.no_click_zones:
-            if zx <= px < zx + zw and zy <= py < zy + zh:
+            if zx <= rx < zx + zw and zy <= ry < zy + zh:
                 return (zx, zy, zw, zh)
+        for (gx, gy, r, why) in self.no_click_points:
+            if (px - gx) ** 2 + (py - gy) ** 2 <= r * r:
+                return why
         return None
 
     def click_pixel(self, px, py, why=""):
@@ -50,10 +102,14 @@ class Actor:
         """
         zone = self.blocked_by(px, py)
         if zone is not None:
+            # NAME THE REAL REASON. This used to say "(the control dock)"
+            # whatever had blocked it, which would have misdescribed every
+            # point guard - and a guard that reports the wrong cause sends
+            # the next investigation to the wrong module.
+            what = zone if isinstance(zone, str) else f"the control dock {zone}"
             self.log.warning(
-                "REFUSING click (%.0f,%.0f) %s - it lands in a no-click zone %s "
-                "(the control dock). A bot click there would press the "
-                "operator's own buttons.", px, py, why, zone)
+                "REFUSING click (%.0f,%.0f) %s - it lands on %s, which the "
+                "bot must never press.", px, py, why, what)
             return None
         cx, cy = self.capture.to_click_coords(px, py)
         self._sleep(self.click_delay)
@@ -65,13 +121,6 @@ class Actor:
         self.log.info("CLICK px=(%.0f,%.0f) css=(%d,%d) %s", px, py, ax, ay, why)
         self._sleep(self.post_click)
         return ax, ay
-
-    def click_match(self, match, why=""):
-        if not match.found:
-            self.log.warning("refusing to click %s: not found", match.name)
-            return None
-        return self.click_pixel(*match.center, why=why or match.name)
-
 
 class Controls:
     """Pause / stop switch.

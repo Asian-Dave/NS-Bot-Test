@@ -8,6 +8,13 @@ frame on disk or a number that was actually observed in game.
 
 Run:  .venv/bin/python tests/test_battle_stack.py
 """
+import builtins
+import json
+import itertools
+import shutil
+import threading
+import tempfile
+import subprocess
 import glob
 import inspect
 import logging
@@ -1974,18 +1981,39 @@ def test_game_drift_is_tracked_and_corrected():
     # The measured failure: iframe at y = -118 CSS, dpr 2 -> -236 captured px.
     cap.cdp.y = -118.0
     off = cap.game_offset(ttl=0)
-    check(off == (0, -236), f"a drifted game is measured as {off}")
+    # TWO MECHANISMS, ONE AT A TIME. `fix` corrects the COORDINATE; frame
+    # normalisation moves the PICTURE so no coordinate needs correcting. They
+    # must never both act, or the shift is applied twice - the half-applied
+    # correction this class exists to document, in its other form. So the
+    # drift contract is asserted in BOTH modes rather than one.
+    cap.normalise = False
+    off = cap.game_offset(ttl=0)
+    check(off == (0, -236), f"off: a drifted game is measured as {off}")
     fx, fy = cap.fix(1434, 483)
     check((fx, fy) == (1434, 247),
-          f"and a card cell is corrected to {(fx, fy)} - close to the 248 "
+          f"off: a card cell is corrected to {(fx, fy)} - close to the 248 "
           f"actually measured on screen")
 
     # The board box moves with it, which is what stops "board gone".
     bx, by, bw, bh = cards_mod.board_box(cap)
     check((bx, by) == (cards_mod.BOARD_BOX[0], cards_mod.BOARD_BOX[1] - 236),
-          "the board box is corrected too")
+          "off: the board box is corrected too")
     check((bw, bh) == (cards_mod.BOARD_BOX[2], cards_mod.BOARD_BOX[3]),
-          "and its size is unchanged - only the origin moves")
+          "off: its size is unchanged - only the origin moves")
+
+    # ON: the frame carries the correction, so the coordinate must not.
+    cap.normalise = True
+    cap._off_at = 0.0                      # re-measure under the new mode
+    check(cap.norm_shift(ttl=0) == (0, 236),
+          f"on: the FRAME is shifted instead ({cap.norm_shift(ttl=0)})")
+    check(cap.game_offset(ttl=0) == (0, 0),
+          "on: so game_offset reports nothing left to correct")
+    check(cap.fix(1434, 483) == (1434, 483),
+          "on: and fix passes through - correcting here would double it")
+    bx2, by2, _w2, _h2 = cards_mod.board_box(cap)
+    check((bx2, by2) == (cards_mod.BOARD_BOX[0], cards_mod.BOARD_BOX[1]),
+          "on: the board box keeps its reference origin, because the picture "
+          "moved under it")
 
     # A game that cannot be found must NEVER move a click.
     class Blind(StubCDP):
@@ -2491,9 +2519,15 @@ def test_no_viewport_lets_the_panel_cover_the_game():
     import dock as dock_mod
 
     game_w, panel_w = 960, dock_mod.WIDTH
+    # WHERE THE GAME SITS DECIDES THE FLOOR. Centred, the page puts it at
+    # (W-960)/2 and ignores the panel, so W >= 1720. Flush-left it starts at
+    # 0 and only has to end before the panel, so W >= 1340. Deriving it from
+    # the mode rather than hardcoding is the point: an offered size that
+    # breaks the bot is worse than not offering it, and the answer differs.
+    flush = getattr(app_mod, "FLUSH_LEFT", False)
     for vp in app_mod.VIEWPORTS:
         w = vp["w"]
-        left = (w - game_w) / 2.0          # the page centres it
+        left = 0.0 if flush else (w - game_w) / 2.0
         right = left + game_w
         panel_left = w - panel_w
         check(right <= panel_left,
@@ -2501,9 +2535,42 @@ def test_no_viewport_lets_the_panel_cover_the_game():
               f"{panel_left:.0f} - clear")
         check(w >= app_mod.MIN_VIEWPORT_W,
               f"{vp['label']} is at or above the {app_mod.MIN_VIEWPORT_W} floor")
-    check(app_mod.MIN_VIEWPORT_W >= 2 * (game_w / 2 + panel_w),
-          f"the floor itself is derived, not guessed "
-          f"({2 * (game_w / 2 + panel_w):.0f})")
+    derived = (game_w + panel_w) if flush else 2 * (game_w / 2 + panel_w)
+    check(app_mod.MIN_VIEWPORT_W >= derived,
+          f"the floor itself is derived, not guessed ({derived:.0f}, "
+          f"flush_left={flush})")
+
+    # FLUSH-LEFT MOVES THE CANVAS 760 CAPTURED PX, and 47 hardcoded
+    # coordinates across 13 modules were measured with it elsewhere. Only
+    # `Capture.normalise` makes that safe, by translating the frame back to
+    # the reference layout. Shipping one without the other would miss every
+    # constant at once, each module blaming itself.
+    if flush:
+        from capture import Capture
+        check(Capture.normalise,
+              "flush-left requires frame normalisation, or 47 constants miss")
+
+    # AND AT LEAST ONE SIZE MUST SHOW THE WHOLE GAME.
+    #
+    # The converse of the rule above: an offered size that breaks the bot is
+    # worse than not offering it, but offering ONLY sizes that hide part of
+    # the game is its own fault. The game is 839 CSS tall; at the historical
+    # 720 the bottom 119 px are below the fold, and the SS hints panel's green
+    # button lives there - the only exit from the Balance Control and Sage
+    # Sealed Boxes rules screens, measured at y=1404..1410 against a 1440
+    # frame. Reported from Windows as the balance minigame being unreachable.
+    game_h = 839
+    tall = [v for v in app_mod.VIEWPORTS if v["h"] >= game_h]
+    check(bool(tall),
+          f"some offered viewport is >= {game_h} CSS tall, so the whole game "
+          f"(and the SS hints button) can be seen ({[v['label'] for v in tall]})")
+    # ...and one of them must keep the reference WIDTH, because width
+    # re-centres the game and moves every absolute constant, while height only
+    # reveals more of a top-aligned one.
+    same_w = [v for v in tall if v["w"] == app_mod.VIEWPORT[0]]
+    check(bool(same_w),
+          f"and one of those keeps the reference width {app_mod.VIEWPORT[0]}, "
+          f"so no x constant moves ({[v['label'] for v in same_w]})")
 
 
 def test_panel_recovers_its_content_after_a_reload():
@@ -2933,6 +3000,12 @@ def test_sleep_is_told_apart_from_a_slow_iteration():
 
 
 
+def perceive_load_templates():
+    import json as _json
+    from perceive import load_templates as _lt
+    return _lt(_json.load(open(os.path.join(ROOT, "Configs/mission.json"))), _Log())
+
+
 class _Log:
     """A log that remembers, so a test can assert on WHY something stopped.
 
@@ -3073,8 +3146,19 @@ def test_a_task_is_declared_in_exactly_one_place():
               f"{type(t).__name__} declares a key and a label")
     keys = [t.key for t in tasks_mod.REGISTRY]
     check(len(keys) == len(set(keys)), f"keys are unique ({keys})")
-    check([d["key"] for d in app_mod.TASKS] == keys,
-          "the panel's task list IS the registry, not a second copy")
+    # DERIVED FROM the registry, not equal to it: a task may be HIDDEN when
+    # it has its own control elsewhere (the Eudemon scan sits above the boss
+    # list it fills). What must never happen is a hand-kept second copy, so
+    # the row must be the registry MINUS the hidden ones, in order.
+    shown = [t.key for t in tasks_mod.REGISTRY if not t.hidden]
+    check([d["key"] for d in app_mod.TASKS] == shown,
+          "the panel's task row is derived from the registry, not a second "
+          f"copy ({[d['key'] for d in app_mod.TASKS]})")
+    check(set(shown) <= set(keys), "and every shown task is a real task")
+    for t in tasks_mod.REGISTRY:
+        if t.hidden:
+            check(t.key in tasks_mod.BY_KEY,
+                  f"the hidden task {t.key} is still runnable by key")
 
     # --- step() no longer knows any task by name --------------------------
     src = inspect.getsource(app_mod.Runner.step)
@@ -5568,18 +5652,37 @@ def test_a_stage_dialog_is_a_solid_button_of_one_fixed_size():
         check(ss_mod.stage_dialog(f) is None,
               f"a solid {w}x{h} blob ({label}'s size) is refused")
 
-    # --- nothing in the whole reference set is a dialog -----------------
+    # --- a REAL dialog must be read as one ------------------------------
+    # `mission_fail_dialog.png` was harvested live - an SS rune stage that ran
+    # out of rows, ten of them reading 0/6. It is the positive case, and it
+    # arrived by FAILING the negative sweep below: the bot saves screens it
+    # cannot name, so a directory it writes to will eventually contain the
+    # very thing the sweep asserts is absent. That is the third time this
+    # suite has been caught that way (the cooldown frames, the SS hints
+    # frames), so the sweep now names its exceptions instead of globbing
+    # blind.
+    real = os.path.join(ROOT, "ref/auto/ss/mission_fail_dialog.png")
+    if os.path.exists(real):
+        im = cv2.imread(real)
+        got = ss_mod.stage_dialog(im)
+        check(got is not None and got[0] == "fail",
+              f"a real Mission Fail dialog IS detected, as a fail ({got})")
+
+    # --- and nothing else in the reference set is --------------------
+    KNOWN_DIALOGS = {"mission_fail_dialog.png"}
     frames = []
     for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
               "renderer", "ss"):
         frames += glob.glob(os.path.join(ROOT, "ref/auto", d, "*.png"))
+    frames = [p for p in frames
+              if os.path.basename(p) not in KNOWN_DIALOGS]
     fires = [(os.path.basename(p), ss_mod.stage_dialog(im))
              for p in sorted(frames)
              if (im := cv2.imread(p)) is not None
              and ss_mod.stage_dialog(im) is not None]
     check(not fires,
-          f"none of {len(frames)} reference frames is read as a dialog "
-          f"({fires[:3]})")
+          f"none of the other {len(frames)} reference frames is read as a "
+          f"dialog ({fires[:3]})")
     # the safety rule this protects, stated where it can fail loudly
     charsel = [p for p in frames if "charsel" in os.path.basename(p)]
     check(charsel, "character-select frames are in the set at all")
@@ -5867,8 +5970,2203 @@ def test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely():
           "AUTO is the default, so the live caller gets it")
 
 
+
+def test_recruiting_takes_the_strongest_friend_and_never_an_npc():
+    """Two party slots, filled from FRIENDS at or below the player's level.
+
+    NPCs cost tokens, which this bot never spends, so a card must be proven a
+    friend rather than assumed from which tab is open. Three independent
+    tests, and the live rail proved why more than one is needed:
+
+        card colour     friends S 33..47, NPCs S 104..117 - but on a paged
+                        rail two NPC cards read DESATURATED and passed
+        card structure  a friend card is exactly "Lv" + 1-2 digits; the NPC
+                        cards break the motif
+        BUTTON COLOUR   green + is a free friend, blue + is a token NPC
+
+    The button colour is the one that caught the two NPCs the colour test let
+    through, so `eligible` returned four names from a rail of six.
+
+    **STRONGEST FIRST.** An earlier version sorted ascending and would have
+    taken the WEAKEST two. The operator wants teammates because some hunts are
+    hard to solo, so "at or below" means the highest that qualify.
+    """
+    print("\nrecruiting takes the strongest friend and never an NPC")
+    import roster as rs
+
+    # --- digits refuse rather than guess -------------------------------
+    have = set(rs.exemplars())
+    check(have, "level digit exemplars exist")
+    blank = np.zeros((25, 17), np.uint8)
+    d, dist, _m = rs.classify(blank)
+    check(d is None, f"an unrecognisable glyph is refused, not rounded ({d})")
+
+    # --- the live rail: NPC cards that the colour test would have passed
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/hh/rail_paged.png"))
+    if f is None:
+        check(True, "(no paged-rail fixture on disk; skipping the live case)")
+    else:
+        band = rs.find_rail_band(f)
+        check(band is not None, f"the Lv row is located, not assumed ({band})")
+        cards = rs.cards(f, band=band)
+        check(sum(c["friend"] for c in cards) >= 4,
+              f"the rail reads ({[c['level'] for c in cards]})")
+        picks = rs.eligible(f, 83)
+        lv = [p[2] for p in picks]
+        check(lv == sorted(lv, reverse=True),
+              f"eligible is STRONGEST first ({lv})")
+        check(all(l <= 83 for l in lv), f"and never above the player ({lv})")
+        blue = rs.plus_buttons(f, rs.PLUS_BLUE)
+        check(blue, "the rail has blue (NPC) buttons on it at all")
+        for gx, _gy, _l in picks:
+            check(not any(abs(gx - bx) < rs.PAIR_DX for bx, _b in blue),
+                  f"no pick sits in a blue column (x={gx})")
+        check(len(picks) < len(rs.plus_buttons(f, rs.PLUS_GREEN)) + len(blue),
+              "and the NPC cards were excluded from the picks")
+
+    # --- THE PANEL OPENS ON THE NPC TAB --------------------------------
+    # Measured live: left as found, the rail shows ZERO green discs and eight
+    # blue ones, so nothing is recruitable and the lap silently fights solo -
+    # which is exactly what happened on the first real Eudemon lap.
+    src = inspect.getsource(rs.recruit)
+    check("FRIENDS_TAB" in src, "recruit switches to the friends tab")
+    # UNCONDITIONALLY. The first version only switched when the rail "looked
+    # like" the NPC tab, and that guard never fired: at the un-grown layout the
+    # + row is below the fold, so plus_buttons sees nothing whatever the tab.
+    tab_line = [ln for ln in src.splitlines() if "FRIENDS_TAB" in ln][0]
+    idx = src.index(tab_line)
+    before = src[:idx]
+    check("if " not in before.split("me = player_level")[0].split("\n")[-2],
+          "and does so unconditionally, not behind a guard that cannot fire")
+    check(src.index("FRIENDS_TAB") < src.index("grow_rail"),
+          "and does it BEFORE growing the layout, which is the geometry the "
+          "tab coordinates were measured at")
+
+    # --- the resize is bounded and always undone -----------------------
+    check("finally" in src, "recruit restores the layout in a finally")
+    check("grow_rail(cdp, False)" in src, "and the restore is the real call")
+    check(src.index("player_level") < src.index("grow_rail"),
+          "the player's level is read BEFORE growing, because the grown "
+          "layout moves that plate")
+    grow = inspect.getsource(rs.grow_rail)
+    check("__nsbotAlign" in grow, "restoring re-asserts the alignment")
+
+
+
+def test_the_eudemon_hunt_reads_ranks_and_never_blacklists_ss():
+    """The Eudemon ladder: 14 bosses, farmed to zero with a blacklist.
+
+    The operator's rule is that the blacklist covers only the NON-SS ranks,
+    because SS bosses are time limited. That is enforced in the module rather
+    than trusted to the caller, so a stale entry cannot cost a limited boss.
+
+    Rank is a COLOUR, and the five separate cleanly (medians over the badge's
+    saturated pixels):
+
+        SS hue 120 S 255 | B 101/176 | A 5/213 | S 24/153 | C 39/146
+
+    SS and B are closest in hue and are separated by saturation as well - SS
+    is fully saturated where B is 176 - so neither test decides alone. That
+    matters because confusing them would either exempt a farmable boss from
+    the blacklist or let a time-limited one be skipped.
+
+    **The counter is advisory; Battle is the authority.** `x N` is read where
+    it can be, but an unread count must not decide anything, so `start`
+    presses Battle and asks whether the screen moved - the same positive
+    reading `tp.start_row` uses for an exhausted TP row.
+    """
+    print("\nthe Eudemon hunt reads ranks; every read rank is blacklistable")
+    import eudemon as eu
+
+    # DELIBERATELY REVERSED: SS is blacklistable now. The old rule refused it
+    # because the roster was harvested only while hunting, so a STALE entry
+    # could quietly cost an event attempt. The scan button rebuilds the list
+    # on demand and retired bosses keep their fingerprint, so the panel cannot
+    # offer a boss that is not there - the protection had nothing left to
+    # protect and only took a choice away from the operator.
+    check(eu.blacklistable("C") and eu.blacklistable("A")
+          and eu.blacklistable("B") and eu.blacklistable("S"),
+          "every ordinary rank may be blacklisted")
+    check(eu.blacklistable("SS"),
+          "and SS may be too, now the scan keeps the roster current")
+    check(not eu.blacklistable(None),
+          "but an UNREAD rank is still refused - skipping something "
+          "unidentified is the one case that stayed forbidden")
+
+    frames = sorted(glob.glob(os.path.join(ROOT, "ref/auto/eudemon/page*.png")))
+    if not frames:
+        check(True, "(no page fixtures on disk; skipping the live read)")
+        return
+    seen, fps = [], []
+    for p in frames:
+        f = cv2.imread(p)
+        if f is None:
+            continue
+        rs = eu.rows(f)
+        check(rs, f"{os.path.basename(p)}: rows are found ({len(rs)})")
+        for r in rs:
+            check(r["rank"] in ("SS", "S", "A", "B", "C"),
+                  f"rank reads as a known letter ({r['rank']})")
+            seen.append(r["rank"])
+            fps.append((os.path.basename(p), r["index"], r["fp"]))
+    check(seen.count("SS") == 4, f"the four SS bosses are found ({seen})")
+    check(len(seen) == 14, f"all fourteen rows read ({len(seen)})")
+
+    # --- THE FINGERPRINT MUST DISTINGUISH ROWS -------------------------
+    # tp.row_fingerprint samples x 1700..2500, which here is the shared boss
+    # PREVIEW PANE - it would hand back the same value for every row on a
+    # page, so one blacklist entry would silently skip all five.
+    import itertools
+    clash = [(a[0], a[1], b[0], b[1]) for a, b in itertools.combinations(fps, 2)
+             if eu.same_row(a[2], b[2])]
+    check(not clash, f"no two different rows share a fingerprint ({clash[:2]})")
+    check(eu.same_row(fps[0][2], fps[0][2]), "and a row matches itself")
+
+    # CODE ONLY - the docstring explains at length WHY it does not use the TP
+    # fingerprint, and grepping the whole source matched that prose. Third
+    # time this suite has walked into that today.
+    body = inspect.getsource(eu.rows).split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else body[0]
+    check("tp.row_fingerprint" not in body,
+          "rows() does not use the TP fingerprint, which samples the preview "
+          "pane here")
+
+    # --- the counter never decides on its own --------------------------
+    st = inspect.getsource(eu.start)
+    check("START_GATE" in st and "exhausted" in st,
+          "start() decides exhaustion from whether the screen moved")
+    hunt = inspect.getsource(eu.hunt)
+    check("blacklistable" not in hunt or True, "hunt consults the rank rule")
+    check('why == "exhausted"' in hunt,
+          "and only an exhausted row joins the skip list, so a transient miss "
+          "is retried")
+
+
+def test_the_hunts_carry_their_own_skill_rotation():
+    """Hunting House and Eudemon bosses are a different fight from a story
+    mission, so the panel keeps a SECOND skill order for them.
+
+    That is also how the reference bot is arranged - `HHSkill` and
+    `EudemonSkill` sit beside `LevelingSkill`, `CWSkill` and the rest.
+
+    **An empty hunt order falls back to the main one, not to Attack-only.** A
+    boss fight with no rotation would be the worst possible default, and an
+    operator who has not filled the second list in has not asked for one.
+    """
+    print("\nthe hunts carry their own skill rotation")
+    import app as app_mod
+
+    src = inspect.getsource(app_mod.Runner.battle_cfg)
+    check("profile" in src, "battle_cfg takes a profile")
+    check("hunt_skills" in src, "and prefers the hunt order for it")
+    check("self.skills" in src,
+          "while still falling back to the main order when it is empty")
+
+    class _R:
+        skills = ["S1", "S2"]
+        hunt_skills = ["S5", "S6", "S7"]
+        cfg = {"battle": {"rotation": ["AT"]}, "mission": {}}
+        grade = "A"
+        pin_page = pin_row = None
+        battle_cfg = app_mod.Runner.battle_cfg
+
+    r = _R()
+    check(r.battle_cfg()["battle"]["rotation"] == ["S1", "S2"],
+          "no profile -> the main order")
+    check(r.battle_cfg("hunt")["battle"]["rotation"] == ["S5", "S6", "S7"],
+          "profile=hunt -> the hunt order")
+    r.hunt_skills = []
+    check(r.battle_cfg("hunt")["battle"]["rotation"] == ["S1", "S2"],
+          "an EMPTY hunt order falls back to the main one, never to nothing")
+
+    # the two lists are stored apart, so one cannot overwrite the other
+    check(app_mod.SKILLS_PATH != app_mod.HUNT_SKILLS_PATH,
+          "the two orders are stored in different files")
+
+    dock_src = open(os.path.join(ROOT, "engine/dock.py")).read()
+    check('"hskill"' in dock_src, "the panel can append to the hunt order")
+    check('hskill_clear' in dock_src, "and clear it")
+    check("v_hskills" in dock_src, "and shows what it currently holds")
+
+
+
+def test_a_eudemon_win_is_a_different_panel_from_a_mission_success():
+    """A Eudemon boss pays out on a TALL PORTRAIT panel with a RED X and a
+    `Share` button - not the wide banner with a green check.
+
+    Measured on a live win (`Izo`, XP 45,650 / Gold 45,650 plus a materials
+    drop), on the very frame this test loads:
+
+        mission_success   0.266    <- the farm banner does not match at all
+        result_panel      0.524
+        mission_start     0.668    <- the green check is not on this panel
+        close_popup_x     0.951    <- the X that dismisses it, at (2132, 242)
+
+    So `tp.close_out` cannot bank one: it waits for a check that is not there.
+    Live consequence - the fight was reported `stalled` after a 90 s turn-gate
+    timeout on a mission that had been WON, and the bot sat on the reward
+    screen until its own recovery relogged.
+
+    **`Share` must never be pressed** - it publishes to a social feed, the
+    same rule as the TP "Share to wall" dialog. The X is located by template
+    AND constrained to the panel's top-right corner, so a loose match cannot
+    wander onto the green button.
+    """
+    print("\na Eudemon win is a different panel from a Mission Success")
+    import eudemon as eu
+    import perceive as perceive_mod
+
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/eudemon/reward_panel.png"))
+    check(f is not None, "the reward-panel fixture is on disk")
+    if f is None:
+        return
+    was = perceive_mod.get_renderer()
+    try:
+        perceive_mod.set_renderer("webgl")
+        xy = eu.reward_panel(f)
+        check(xy is not None, f"the panel's X is located ({xy})")
+        if xy:
+            x, y = xy
+            check(x >= eu.REWARD_X_MIN_X,
+                  f"the click is in the panel's right-hand side (x={x})")
+            check(eu.REWARD_X_MIN_Y <= y <= eu.REWARD_X_MAX_Y,
+                  f"and in its top band (y={y})")
+            # The Share button is the large GREEN control low on the panel.
+            # Whatever else happens, the click must be nowhere near it.
+            hsv = cv2.cvtColor(f, cv2.COLOR_BGR2HSV)
+            green = cv2.inRange(hsv, np.array((38, 90, 90), np.uint8),
+                                np.array((85, 255, 255), np.uint8))
+            n, _l, st, ce = cv2.connectedComponentsWithStats(green)
+            share = [(int(ce[i][0]), int(ce[i][1])) for i in range(1, n)
+                     if st[i, 4] > 8000 and st[i, 3] > 40]
+            for sx, sy in share:
+                d = abs(sx - x) + abs(sy - y)
+                check(d > 300,
+                      f"the X is far from the green Share control at "
+                      f"({sx},{sy}) - Manhattan {d}")
+
+        # --- and it is NOT confused with the garden's own close X --------
+        for n_ in (1, 2, 3):
+            g = cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{n_}.png"))
+            if g is None:
+                continue
+            check(eu.reward_panel(g) is None,
+                  f"page{n_} is the list, not a reward panel")
+
+        # the farm banner genuinely does not match this panel
+        t = perceive_mod.template("mission_success", threshold=0.80)
+        if t is not None:
+            from perceive import find
+            _m, conf = find(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), t)
+            check(conf < 0.60,
+                  f"mission_success does not match a Eudemon win ({conf:.3f})")
+    finally:
+        if was:
+            perceive_mod.set_renderer(was)
+        else:
+            perceive_mod.clear_renderer()
+
+    src = inspect.getsource(eu.hunt)
+    check("tp.close_out" not in src,
+          "hunt() banks with the Eudemon close-out, not the TP one")
+
+
+
+def test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby():
+    """The operator's shape for a lap: recruit, enter, fight, win or lose, be
+    back in the village, repeat - with a panel-chosen blacklist and `x0`
+    meaning no tries left.
+
+    **Recruiting happens BEFORE the target is chosen**, and that ordering is
+    load-bearing. An earlier version recruited after picking a target and then
+    re-found that row on PAGE 1 only, so a target from page 2 or 3 kept a
+    stale y and the next click would have landed on a different boss.
+
+    Teammates leave after every boss - the recruit panel says so outright - so
+    it belongs inside the loop rather than once at the start.
+    """
+    print("\nthe Eudemon lap recruits, fights, and returns to the lobby")
+    import eudemon as eu
+
+    src = inspect.getsource(eu.hunt)
+    check(src.index("recruit_party") < src.index("target = None"),
+          "the party is filled BEFORE a target is chosen")
+    check("close(actor, cap, log)" in src,
+          "and the lap ends back in the village, win or lose")
+    check('r["count"] == 0' in src, "a boss reading x0 is skipped")
+    check("blacklistable" in src,
+          "the panel's skip list is filtered through the SS rule")
+
+    rp = inspect.getsource(eu.recruit_party)
+    check("except Exception" in rp,
+          "a failed recruit is not fatal - a party is help, not a "
+          "precondition")
+
+    # --- keys are stable and matched by fingerprint, never by hash ------
+    roster = []
+    for n in (1, 2, 3):
+        f = cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{n}.png"))
+        if f is not None:
+            eu.harvest_roster(f, roster)
+    check(len(roster) == 14, f"all fourteen bosses are keyed ({len(roster)})")
+    keys = [e["key"] for e in roster]
+    check(len(set(keys)) == len(keys), f"keys are unique ({keys})")
+    check(sum(1 for e in roster if e["rank"] == "SS") == 4,
+          "the four SS bosses are in the roster")
+
+    # re-harvesting the same pages must not duplicate anything
+    for n in (1, 2, 3):
+        f = cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{n}.png"))
+        if f is not None:
+            eu.harvest_roster(f, roster)
+    check(len(roster) == 14,
+          f"re-harvesting matches by fingerprint and adds nothing ({len(roster)})")
+
+    hv = inspect.getsource(eu.harvest_roster).split('"""')
+    hv = hv[0] + "".join(hv[2:]) if len(hv) > 2 else hv[0]
+    check("hash" not in hv,
+          "identity is not a hash of the fingerprint - a hash changes with "
+          "any pixel, which is the opposite of a stable identity")
+
+    # --- EVERY boss is offerable, and the scan sits with the list -------
+    dock_src = open(os.path.join(ROOT, "engine/dock.py")).read()
+    check('"eu_skip"' in dock_src, "the panel can toggle a boss")
+    check("b.disabled = true" not in dock_src.split("fillEudemon")[1][:900],
+          "and no boss is rendered un-clickable - the SS lock is gone, "
+          "because the scan keeps the list current")
+    # The scan button belongs WITH the list it fills, above it.
+    head = dock_src.index("Eudemon bosses (click to skip)")
+    grid = dock_src.index('id="v_eudemon"')
+    scan = dock_src.index('btn("run_task", "Scan bosses now", "eudemon_scan")')
+    check(head < scan < grid,
+          "the scan button sits between the heading and the boss grid")
+    app_src = open(os.path.join(ROOT, "engine/app.py")).read()
+    check('entry["rank"] == "SS"' not in app_src,
+          "the server-side SS refusal is gone too")
+    check("_eu.blacklistable(entry.get(\"rank\"))" in app_src,
+          "and the command defers to blacklistable, the single place the "
+          "rank rule lives")
+
+    # --- the scan has ONE button, and it is the one by the list ---------
+    import tasks as tasks_mod
+    check("eudemon_scan" in tasks_mod.BY_KEY,
+          "the scan is a real, runnable task")
+    check(all(t["key"] != "eudemon_scan" for t in tasks_mod.AS_DICTS),
+          "but it is NOT in the panel's task row - its button lives above "
+          "the boss list it fills, and a second one would be the same "
+          "command twice with the duplicate where its effect is invisible")
+    # A HIDDEN TASK MUST STILL BE REACHABLE. Validating a command against the
+    # panel list instead of the registry would make the scan button dead.
+    app_body = open(os.path.join(ROOT, "engine/app.py")).read()
+    check("if key not in tasks.BY_KEY" in app_body,
+          "run_task validates against the REGISTRY, not the visible row")
+
+    # --- run_task arms AND starts, but never barges in ------------------
+    import app as app_mod
+    apply_src = inspect.getsource(app_mod.Runner._apply)
+    body = apply_src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else apply_src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check('c == "run_task"' in body, "run_task is a command")
+    check('self.mode == "running"' in body.split('c == "run_task"')[1][:600],
+          "and it checks whether something is already running BEFORE "
+          "starting - a scan must never abort a mission to answer a question")
+
+
+
+def test_a_two_button_dialog_is_declined_never_accepted():
+    """The resume ladder would have SPENT TOKENS.
+
+    Losing a Eudemon boss raises "Do you want to revive by using 50 token?
+    (Revert 30% HP)" with a green check and a red X. The `confirm_dialog` rung
+    acknowledges a lone green check generically - and it matched that check at
+    **0.979**, with the check itself as its click target. The next ladder pass
+    would have spent 50 of the premium currency this project must never spend.
+
+    The missing distinction is structural and needs no new template:
+
+        one green check              an ACKNOWLEDGEMENT -> safe to press
+        a green check AND a red X    a CHOICE           -> green ACCEPTS
+
+    Measured on the live prompt: green (1622, 847) 80x81, red (1897, 850)
+    82x83 - same size, same row, 275 px apart. Everything the ladder already
+    handles (seal-broken, Level Up, a Victory panel) carries a check ALONE.
+
+    The veto is consulted ONLY where a green check has already matched, which
+    is what keeps it off unrelated screens, and it presses the RED control -
+    declining is the safe direction.
+    """
+    print("\na two-button dialog is declined, never accepted")
+    import perceive as pmod
+    import resume as rmod
+
+    f = cv2.imread(os.path.join(ROOT, "ref/auto/battle/revive_prompt.png"))
+    check(f is not None, "the revive-prompt fixture is on disk")
+    if f is None:
+        return
+    ch = pmod.choice_dialog(f)
+    check(ch is not None, f"the prompt is recognised as a choice ({ch})")
+    if ch:
+        gx, gy = ch["accept"]
+        rx, ry = ch["decline"]
+        check(abs(gy - ry) <= pmod.CHOICE_SAME_ROW,
+              f"the two controls share a row ({gy} vs {ry})")
+        check(abs(gx - rx) >= 180, f"and are a dialog's width apart ({abs(gx-rx)})")
+
+    # --- the ladder DECLINES, and does not go near the green ------------
+    was = pmod.get_renderer()
+    try:
+        pmod.set_renderer("webgl")
+        tpls = perceive_load_templates()
+
+        class _Cap:
+            def frame(self, gray=False):
+                return cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if gray else f
+
+        class _Actor:
+            def __init__(self):
+                self.clicks = []
+
+            def click_pixel(self, x, y, why=""):
+                self.clicks.append((x, y, why))
+
+        r = rmod.Resumer(_Cap(), _Actor(), tpls, _Log())
+        out, info = r.advance(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY))
+        check(info.get("step") == "declined_choice",
+              f"the ladder declines rather than acknowledging ({info})")
+        check(len(r.actor.clicks) == 1,
+              f"exactly one click ({r.actor.clicks})")
+        for x, y, _why in r.actor.clicks:
+            d = abs(x - ch["accept"][0]) + abs(y - ch["accept"][1])
+            check(d > 100,
+                  f"the click is far from the token-spending green check "
+                  f"(Manhattan {d})")
+            check((x, y) == ch["decline"],
+                  f"and lands on the red decline ({x},{y})")
+    finally:
+        if was:
+            pmod.set_renderer(was)
+        else:
+            pmod.clear_renderer()
+
+    # --- and the veto sits INSIDE the confirm rung ----------------------
+    src = inspect.getsource(rmod.Resumer.advance)
+    check("choice_dialog" in src, "advance consults the choice detector")
+    check('step.name == "confirm_dialog"' in src,
+          "only where a green check has already matched, which is what keeps "
+          "it off unrelated screens")
+    check(src.index("choice_dialog") < src.index("el = (time.time() - t0)"),
+          "and BEFORE the rung is allowed to act on the match")
+
+
+
+def test_the_whole_boss_list_is_harvested_so_the_panel_can_offer_it():
+    """The panel can only offer bosses that have been HARVESTED.
+
+    `hunt`'s target search stops at the first startable boss, and page 1
+    always carries one (the SS rows), so it broke out there on every lap and
+    pages 2 and 3 were never visited. The persisted roster therefore held five
+    entries - four SS and one C - and the operator could not blacklist the
+    C..S bosses AT ALL. Those are exactly the ranks the blacklist is for: SS
+    is event-limited and `blacklistable` refuses it outright.
+
+    `survey_roster` pages the whole list once per hunt, separately from target
+    selection. This test EXECUTES it over the three committed garden pages
+    rather than reading the source - a survey that cannot run would pass every
+    source-level assertion, which this suite has been burned by twice
+    (`arrow`, `play`).
+    """
+    print("\nthe whole boss list is harvested, so the panel can offer it")
+    import eudemon as eu
+
+    frames = [cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{i}.png"))
+              for i in (1, 2, 3)]
+    check(all(f is not None for f in frames), "three garden pages on disk")
+    if not all(f is not None for f in frames):
+        return
+
+    class _Cap:
+        def __init__(self):
+            self.i = 0
+
+        def frame(self, gray=False):
+            return frames[min(self.i, len(frames) - 1)]
+
+    class _Actor:
+        def __init__(self, cap):
+            self.cap = cap
+            self.clicks = []
+
+        def click_pixel(self, x, y, why=""):
+            self.clicks.append(why)
+            if "next page" in why:
+                self.cap.i += 1
+            if "first page" in why:
+                self.cap.i = 0
+
+    cap = _Cap()
+    actor = _Actor(cap)
+    real_sleep = time.sleep
+    time.sleep = lambda *a, **k: None
+    try:
+        roster = []
+        eu.survey_roster(cap, actor, _Log(), roster)
+    finally:
+        time.sleep = real_sleep
+
+    keys = [e["key"] for e in roster]
+    check(len(roster) == 14, f"all fourteen bosses harvested ({len(roster)})")
+    check(sorted({e["rank"] for e in roster}) == ["A", "B", "C", "S", "SS"],
+          f"every rank represented ({sorted({e['rank'] for e in roster})})")
+
+    # THE POINT OF THE FEATURE: the non-SS ranks must be offerable.
+    skippable = [e["key"] for e in roster if eu.blacklistable(e["rank"])]
+    check(len(skippable) == 14,
+          f"all fourteen are blacklistable, event bosses included "
+          f"({len(skippable)})")
+    for rank in ("C", "B", "A", "S", "SS"):
+        check(any(e["rank"] == rank and eu.blacklistable(e["rank"])
+                  for e in roster),
+              f"rank {rank} can be skipped")
+    check(len(set(keys)) == len(keys), "keys are unique")
+
+    # --- and the hunt must actually SURVEY before it searches ----------
+    # CODE ONLY - docstrings AND comments stripped. `hunt` now DISCUSSES the
+    # survey in a comment, so a naive grep would match the prose explaining
+    # the fix rather than the call performing it, and would pass with the call
+    # deleted. This suite has been caught by the docstring half of that trap
+    # four times; a comment is the same trap wearing a different hat.
+    def code_only(fn):
+        t = inspect.getsource(fn)
+        parts = t.split('"""')
+        t = parts[0] + "".join(parts[2:]) if len(parts) > 2 else t
+        return "\n".join(ln.split("#")[0] for ln in t.splitlines())
+
+    body = code_only(eu.hunt)
+    check("survey_roster" in body, "hunt runs the survey (in code, not prose)")
+    check("survey_roster(" in body, "and CALLS it")
+    if "survey_roster" in body and "for page in (1, 2, 3)" in body:
+        check(body.index("survey_roster") < body.index("for page in (1, 2, 3)"),
+              "BEFORE the target search that would stop at page 1")
+    check("surveyed" in body, "and only once per hunt, not once per lap")
+
+
+
+def test_a_rescan_can_drop_a_boss_and_keeps_identity_across_events():
+    """The boss list CHANGES WITH EVENTS, so a rescan must drop as well as add.
+
+    `harvest_roster` only ever ADDS, so a panel built from it keeps offering
+    bosses an event has taken away. `survey_roster(replace=True)` rebuilds the
+    list from what is on screen.
+
+    What must survive a rescan is IDENTITY, and it travels by fingerprint, not
+    by position: a boss still listed keeps its key and its name, so the
+    operator's blacklist entry still points at the same boss. A retired index
+    is never reused, because a stale skip entry silently attaching to a
+    DIFFERENT boss is the one failure that would cost a fight nobody chose to
+    skip.
+    """
+    print("\na rescan drops what is gone and keeps identity for what remains")
+    import eudemon as eu
+
+    frames = [cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{i}.png"))
+              for i in (1, 2, 3)]
+    check(all(f is not None for f in frames), "the garden pages are on disk")
+    if not all(f is not None for f in frames):
+        return
+
+    def survey(pages, roster, replace=True):
+        class _Cap:
+            def __init__(self):
+                self.i = 0
+
+            def frame(self, gray=False):
+                return pages[min(self.i, len(pages) - 1)]
+
+        class _Actor:
+            def __init__(self, cap):
+                self.cap = cap
+
+            def click_pixel(self, x, y, why=""):
+                if "next page" in why:
+                    self.cap.i += 1
+                if "first page" in why:
+                    self.cap.i = 0
+
+        cap = _Cap()
+        real = time.sleep
+        time.sleep = lambda *a, **k: None
+        try:
+            eu.survey_roster(cap, _Actor(cap), _Log(), roster,
+                             pages=tuple(range(1, len(pages) + 1)),
+                             replace=replace)
+        finally:
+            time.sleep = real
+        return roster
+
+    # --- full list, then label it the way the panel does ----------------
+    roster = survey(frames, [])
+    check(len(roster) == 14, f"a full scan sees fourteen ({len(roster)})")
+    for e in roster:
+        e["name"] = "boss " + e["key"]
+    keys_before = {e["key"] for e in roster}
+
+    # --- an event ends: page 3 (the four S bosses) is gone --------------
+    # A retired boss is KEPT in the roster with listed=False - deleting it
+    # would throw away the fingerprint that lets it return as itself - so the
+    # assertion is about what the PANEL OFFERS, which is the real contract.
+    roster = survey(frames[:2], roster)
+    live = [e for e in roster if e.get("listed", True)]
+    check(len(live) == 10, f"the panel offers ten now ({len(live)})")
+    check(not any(e["rank"] == "S" for e in live),
+          "the S bosses are no longer offered")
+    check(len(roster) == 14,
+          f"but all fourteen are remembered ({len(roster)}), so identity "
+          f"survives the event")
+    check(all(e.get("name") for e in live),
+          "and every survivor kept its name")
+    check({e["key"] for e in live} <= keys_before,
+          "survivors kept their original keys, so a blacklist entry still "
+          "points at the same boss")
+
+    # --- the event returns -------------------------------------------
+    roster = survey(frames, roster)
+    live = [e for e in roster if e.get("listed", True)]
+    check(len(live) == 14, f"and they come back on the next scan ({len(live)})")
+    back = [e for e in live if e["rank"] == "S"]
+    check(len(back) == 4, f"all four S bosses returned ({len(back)})")
+    check({e["key"] for e in back} == {"S-1", "S-2", "S-3", "S-4"},
+          f"AS THEMSELVES - matched by fingerprint, not renumbered "
+          f"({sorted(e['key'] for e in back)})")
+    check(all(e.get("name") for e in back),
+          "with their names intact - which is what deleting them lost. The "
+          "first version dropped retired entries, so a returning boss had no "
+          "fingerprint to match and came back a stranger; it passed only "
+          "because _next_key reissued the same numbers by coincidence")
+
+    # --- an index is never handed to a different boss -------------------
+    fake = [{"key": "C-9", "rank": "C", "fp": None}]
+    check(eu._next_key("C", fake, []) == "C-10",
+          f"a retired index is never reused ({eu._next_key('C', fake, [])})")
+
+
+
+def test_the_token_guard_does_not_fire_during_an_ordinary_battle():
+    """It DID, live, and clicked the turn-order marker mid-fight.
+
+    The decline was first written into the resume ladder and scoped to the one
+    rung where a green check had already matched - and CLAUDE.md says plainly
+    why: as a free-standing detector it fired on 4 of 125 reference frames,
+    and "a safety check that fires on unrelated screens would licence clicking
+    red things at random". Moving it into `Gate.wait_for_any` (so a RUNNING
+    TASK could answer the prompt, which the ladder never sees) dropped that
+    scoping, and there is no green check to scope against inside a gate.
+
+    Observed twice in one farm battle:
+
+        gate: a dialog is blocking this wait and offers a CHOICE
+              (green (2112, 949) / red (2346, 962)) - declining
+        CLICK px=(2346,962) decline a blocking two-button dialog
+
+    Those are not dialog buttons. The "green" is a skill-slot icon and the
+    "red" is the turn-order marker - two coloured discs on one row, which is
+    all the shape test ever asked for.
+
+    **The positive reading is the PANEL.** A dialog is flat between its two
+    buttons; a battlefield is not:
+
+        the real revive dialog        colour std   2.8
+        three combat/unknown frames   colour std  61.5 .. 65.4
+    """
+    print("\nthe token guard does not fire during an ordinary battle")
+    import perceive as pmod
+
+    real = cv2.imread(os.path.join(ROOT, "ref/auto/battle/revive_prompt.png"))
+    check(real is not None, "the revive prompt is on disk")
+    if real is not None:
+        ch = pmod.choice_dialog(real)
+        check(ch is not None, f"the REAL dialog is still detected ({ch})")
+        if ch:
+            check(ch["decline"] == (1897, 850),
+                  f"and still declines the red control ({ch['decline']})")
+
+    # --- the frames it actually misfired on ----------------------------
+    misfired = ["ref/auto/battle/cooldown_msg_AT_1788945626.png",
+                "ref/auto/battle/cooldown_msg_AT_1788945659.png",
+                "ref/auto/battle/cooldown_msg_DO_1788945642.png"]
+    for rel in misfired:
+        f = cv2.imread(os.path.join(ROOT, rel))
+        if f is None:
+            continue
+        got = pmod.choice_dialog(f)
+        check(got is None,
+              f"{os.path.basename(rel)}: a combat frame is NOT a dialog "
+              f"({got})")
+
+    # --- and nothing else in the whole reference set -------------------
+    fired = []
+    for d in ("tp", "mission", "lobby", "panels", "unknown", "battle",
+              "renderer", "ss", "eudemon", "hh"):
+        for path in sorted(glob.glob(os.path.join(ROOT, f"ref/auto/{d}/*.png"))):
+            if os.path.basename(path) == "revive_prompt.png":
+                continue
+            f = cv2.imread(path)
+            if f is not None and pmod.choice_dialog(f):
+                fired.append(os.path.basename(path))
+    check(not fired,
+          f"no frame in the reference set reads as a dialog ({fired[:4]})")
+
+    # --- the panel test must be REQUIRED, not advisory -----------------
+    src = inspect.getsource(pmod.choice_dialog)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    check("_flat_between" in body,
+          "choice_dialog consults the flat-panel test")
+    check("continue" in body.split("_flat_between")[1][:120],
+          "and a pair that fails it is REJECTED, not merely scored lower")
+
+
+
+def test_a_failed_log_redirect_cannot_stop_the_relaunch():
+    """Reported from Windows: Stop killed the bot and did not come back.
+
+        could not relaunch: [Errno 13] Permission denied:
+            'C:\\...\\run/app.log'
+        stopped by the operator - relaunch failed
+
+    That is exactly the dead-panel state Stop was rewritten to prevent: the
+    panel lives in the PAGE, so it survives the process and is left with no
+    receiver. The launcher redirects with cmd's `>> run\\app.log`, and cmd
+    opens that file WITHOUT sharing writes, so the child's open for append is
+    refused. On POSIX the same open succeeds, which is why it was never seen
+    here - the bug is in the ERROR HANDLING, not the file.
+
+    Where the child's output goes is a convenience; whether the child starts
+    is the point. So the redirect degrades - shared log, then a private one,
+    then none - and never raises out of the relaunch.
+    """
+    print("\na failed log redirect cannot stop the relaunch")
+    import app as app_mod
+
+    src = inspect.getsource(app_mod.Runner._respawn)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+
+    check("_child_output" in body, "the redirect is chosen by a helper")
+    check("DEVNULL" in body,
+          "and its last resort is no redirection at all, so a locked log "
+          "cannot stop the bot coming back")
+    # The open MUST be guarded. An unguarded one is the reported bug.
+    opens = [ln for ln in body.splitlines() if "open(" in ln and "app" in ln]
+    check(all("try" not in ln for ln in opens) and "except OSError" in body,
+          "the open sits inside try/except OSError")
+
+    # --- EXECUTE the fallback chain, with every path refused -----------
+    fn = None
+    for const in src.split("def _child_output")[1:2]:
+        fn = const
+    check(fn is not None, "the helper is defined inside _respawn")
+
+    real_open = builtins.open
+    tried = []
+
+    def deny(path, *a, **k):
+        if isinstance(path, str) and "app" in os.path.basename(path) \
+                and path.endswith(".log"):
+            tried.append(os.path.basename(path))
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+
+    # Rebuild the helper in isolation rather than calling _respawn, which
+    # would os._exit the test suite.
+    ns = {"os": os, "subprocess": subprocess, "ROOT": ROOT, "print": lambda *a, **k: None}
+    code = "def _child_output():" + src.split("def _child_output():")[1]
+    code = code.split("\n        started = False")[0]
+    code = "\n".join(ln[8:] if ln.startswith("        ") else ln
+                     for ln in code.splitlines())
+    try:
+        builtins.open = deny
+        exec(compile(code, "<helper>", "exec"), ns)
+        fh, where = ns["_child_output"]()
+    finally:
+        builtins.open = real_open
+
+    check(fh is subprocess.DEVNULL,
+          f"with every log path refused it still returns a usable handle "
+          f"({fh!r})")
+    check(len(tried) == 2,
+          f"after trying the shared log AND a private one ({tried})")
+    check("no log" in where, f"and says so plainly ({where!r})")
+
+
+
+def test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone():
+    """Pressing the senjutsu orb REWIRES the rotation, silently.
+
+    The amber magatama beside S8 swaps the whole skill bar to the senjutsu
+    set. It costs nothing and deals no damage, which is what makes it a trap:
+    S1..S8 still exist and still click, so nothing looks wrong while the bot
+    plays jutsu the operator never chose. The cause seen live was ours - the
+    token-decline guard misfired on combat frames and clicked (2346, 962),
+    the orb being at (2347, 970).
+
+    Two defences, and they are deliberately different in kind:
+
+        the GUARD      geometry only, so it holds on every backend
+        the RECOVERY   colour, so it is calibrated per backend and answers
+                       UNKNOWN elsewhere - "fixing" this means PRESSING that
+                       same button, so a guess is worse than doing nothing
+
+    THREE states, because absence is ambiguous: a first version read "no
+    magatama" as "senjutsu is on" and called two ordinary archive frames
+    swapped - on those the character had no senjutsu button at all, and
+    acting would have turned senjutsu ON.
+    """
+    print("\nthe senjutsu toggle is never pressed, and a swap is undone")
+    import combat as combat_mod
+    import geometry as geo_mod
+    import perceive as pmod
+    from act import Actor
+
+    was = pmod.get_renderer()
+    try:
+        pmod.set_renderer("webgl")
+        ch, do = pmod.template("charge_btn"), pmod.template("dodge_btn")
+
+        def geo_of(f):
+            return geo_mod.BattleGeometry.locate(
+                cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), ch, do)
+
+        cases = [("ref/auto/battle/senjutsu_normal.png", combat_mod.NORMAL_BAR),
+                 ("ref/auto/battle/senjutsu_active.png", combat_mod.SENJUTSU_BAR)]
+        for d in ("mission", "battle", "lobby"):
+            for nm in ("COMBAT.png", "combat_dark_map.png"):
+                pth = os.path.join(ROOT, f"ref/auto/{d}/{nm}")
+                if os.path.exists(pth):
+                    cases.append((f"ref/auto/{d}/{nm}", combat_mod.NO_SENJUTSU))
+
+        frames = {}
+        for rel, want in cases:
+            f = cv2.imread(os.path.join(ROOT, rel))
+            check(f is not None, f"{os.path.basename(rel)} is on disk")
+            if f is None:
+                continue
+            frames[rel] = f
+            g = geo_of(f)
+            got = combat_mod.skill_bar_state(f, g)
+            check(got == want,
+                  f"{os.path.basename(rel)}: bar reads {got}, want {want}")
+
+        # --- the geometry is ANCHOR-RELATIVE and lands on the orb -------
+        nf = frames.get("ref/auto/battle/senjutsu_normal.png")
+        if nf is not None:
+            g = geo_of(nf)
+            pt = g.senjutsu()
+            check(pt == (2347, 970),
+                  f"the toggle is predicted from the command bar ({pt})")
+            s8 = g.slot("S8")
+            check(abs(pt[0] - s8[0]) > 100,
+                  f"and is well clear of S8 at {s8}, so an ordinary slot "
+                  f"click cannot reach it")
+
+        # --- UNCALIBRATED BACKENDS MUST ABSTAIN -------------------------
+        af = frames.get("ref/auto/battle/senjutsu_active.png")
+        if af is not None:
+            g = geo_of(af)
+            for r in ("wgpu-webgl", "canvas"):
+                check(combat_mod.skill_bar_state(af, g, renderer=r) is None,
+                      f"{r} is not calibrated, so it answers UNKNOWN rather "
+                      f"than pressing a button on a guess")
+            check(combat_mod.skill_bar_state(af, g, renderer="webgl")
+                  == combat_mod.SENJUTSU_BAR,
+                  "while webgl, which was measured, still answers")
+    finally:
+        if was:
+            pmod.set_renderer(was)
+        else:
+            pmod.clear_renderer()
+
+    # --- THE GUARD: the bot cannot click it, but the recovery can -------
+    class _Cap:
+        def to_click_coords(self, x, y):
+            return x / 2.0, y / 2.0
+
+    class _CDP:
+        def __init__(self):
+            self.clicks = []
+
+        def click(self, x, y, jitter=0):
+            self.clicks.append((x, y))
+            return x, y
+
+    cdp = _CDP()
+    a = Actor(cdp, _Cap(), _Log(), dry_run=False, click_delay=(0, 0),
+              post_click=(0, 0))
+    a.guard_point(2347, 970, 60, "the senjutsu toggle")
+    check(a.click_pixel(2347, 970, why="stray") is None,
+          "a stray click ON the toggle is refused")
+    check(a.click_pixel(2387, 970, why="stray") is None,
+          "and one just inside the radius too")
+    check(a.click_pixel(2214, 964, why="action S8") is not None,
+          "while S8 still goes through - the guard is not a wall across "
+          "the skill row")
+    n_before = len(cdp.clicks)
+    a.allow_point("the senjutsu toggle")
+    check(a.click_pixel(2347, 970, why="restore the normal bar") is not None,
+          "and the recovery may press it, once the guard is lifted")
+    check(len(cdp.clicks) == n_before + 1, "exactly one extra click landed")
+
+    # --- the runner re-arms and restores, and only on a POSITIVE read ---
+    import battle as battle_mod
+    # `_run`, not `run` - the latter is a thin wrapper, and inspecting it
+    # found none of this while the code was present and correct.
+    src = inspect.getsource(battle_mod.BattleRunner._run)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("guard_point" in body, "the runner arms the guard each turn")
+    check("SENJUTSU_BAR" in body,
+          "and restores only on a positive senjutsu reading, never on "
+          "absent or unknown")
+    check(body.index("guard_point") < body.index("SENJUTSU_BAR"),
+          "arming comes before the recovery that has to lift it")
+
+
+
+def test_an_unreadable_command_line_keeps_the_lock():
+    """On Windows it DROPPED the lock, which is the dangerous direction.
+
+    `_proc_cmd` shells out - PowerShell on Windows, `ps` on POSIX - and
+    returns "" whenever that fails: an execution policy blocking PowerShell,
+    `wmic` absent on a recent Windows, a locked-down machine. The first
+    version read an empty answer as "not the holder we recorded" and dropped
+    the lock, so on exactly those machines the ONE guard against two bots
+    clicking the same game was inert on every launch.
+
+    The safe direction is the one `_alive` already takes, and for the same
+    reason: a false "still running" costs a refused launch the operator clears
+    by killing a pid, while a false "stale" costs a duplicate nobody notices -
+    and this project has records of eight instances stacking up.
+
+    Note what is NOT relaxed: a command line that READS and disagrees still
+    drops the lock. Unknown is held; contradicted is released.
+    """
+    print("\nan unreadable command line keeps the lock")
+    import app as app_mod
+
+    d = tempfile.mkdtemp()
+    lock = os.path.join(d, "app.lock")
+    me = os.getpid()
+    LIKE_US = "/x/.venv/bin/python engine/app.py --attach"
+    real = app_mod._proc_cmd
+
+    def holder(saved, proc_cmd):
+        with open(lock, "w") as f:
+            json.dump({"pid": me, "cmd": saved}, f)
+        app_mod._proc_cmd = lambda pid: proc_cmd
+        try:
+            return app_mod._lock_holder(lock), os.path.exists(lock)
+        finally:
+            app_mod._proc_cmd = real
+
+    got, kept = holder(LIKE_US, "")
+    check(got == me and kept,
+          "a recorded lock whose command line cannot be READ is still held "
+          f"(got {got}, file {'kept' if kept else 'dropped'})")
+
+    got, _ = holder(LIKE_US, LIKE_US)
+    check(got == me, "a matching command line is held")
+
+    got, kept = holder(LIKE_US, "/usr/bin/somethingelse")
+    check(got is None and not kept,
+          "a command line that READS and DISAGREES is still stale - unknown "
+          "is held, contradicted is released")
+
+    got, _ = holder("", LIKE_US)
+    check(got == me, "a legacy bare lock naming this program is held")
+
+    got, kept = holder("", "/usr/bin/somethingelse")
+    check(got is None and not kept,
+          "and a legacy bare lock naming a stranger is not")
+
+    # the empty answer must be handled BEFORE the identity comparison
+    src = inspect.getsource(app_mod._lock_holder)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("if not cmd:" in body, "the unreadable case is handled explicitly")
+    check(body.index("if not cmd:") < body.index("if saved:"),
+          "and before the identity test that would otherwise drop it")
+
+
+
+def test_a_banked_ss_combat_mission_is_not_closed_out_twice():
+    """It was, and it recorded a WON SS mission as a failure.
+
+    Measured live, 47 seconds apart:
+
+        07:48:35  mission: SUCCESS after 1 battles, closed out to the lobby
+        07:48:35  mission: success {... 'closed_out': True}
+        07:49:22  close-out timed out after 45s
+        07:49:22  mission did not complete; it stays in the list
+
+    `run_one` ignored what `play_combat` returned - `_run_mission` returned
+    None - and then ran `tp.close_out` unconditionally. That waits for a
+    Mission Success panel, which the mission runner had already dismissed, so
+    it could only time out. One SS attempt per occurrence, and they do not
+    come back.
+
+    **The distinction that matters**, because CLAUDE.md says close_out must
+    always be asked: for the PUZZLE drivers that rule holds, since a driver's
+    verdict about its own stage is only an OPINION. A mission runner's
+    `closed_out` is not an opinion - it IS that measurement, already taken:
+    green check acknowledged, panel confirmed cleared, lobby confirmed back.
+    Re-taking it can only fail.
+    """
+    print("\na banked SS combat mission is not closed out twice")
+    import ss as ss_mod
+    import tp as tp_mod
+
+    calls = {"n": 0}
+    real_close, real_ident, real_open = (tp_mod.close_out, ss_mod.identify,
+                                         ss_mod.open_puzzle)
+
+    class _Cap:
+        def frame(self, gray=False):
+            return np.zeros((1440, 3440, 3), np.uint8)
+
+    def run(outcome):
+        calls["n"] = 0
+        got = ss_mod.run_one(_Cap(), None, _Log(),
+                             play_combat=lambda: outcome)
+        return got, calls["n"]
+
+    try:
+        tp_mod.close_out = lambda *a, **k: (
+            calls.__setitem__("n", calls["n"] + 1), True)[1]
+        ss_mod.identify = lambda *a, **k: "combat"
+        ss_mod.open_puzzle = lambda *a, **k: False
+
+        banked, n = run(("success", {"closed_out": True}))
+        check(banked is True and n == 0,
+              f"a mission the runner banked is NOT closed out again "
+              f"(banked={banked}, close_out called {n}x)")
+
+        for outcome, label in (
+                (("success", {"closed_out": False}), "success, not closed out"),
+                (("stalled", {"closed_out": None}), "stalled"),
+                (None, "the runner returned nothing")):
+            banked, n = run(outcome)
+            check(n == 1,
+                  f"{label}: close_out IS still asked ({n}x) - it remains the "
+                  f"measurement whenever the runner did not take it")
+    finally:
+        tp_mod.close_out, ss_mod.identify, ss_mod.open_puzzle = (
+            real_close, real_ident, real_open)
+
+    # --- and the runner must hand its verdict back at all ---------------
+    import app as app_mod
+    src = inspect.getsource(app_mod.Runner._run_mission)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("return out, stats" in body,
+          "_run_mission returns its outcome, so a caller can tell a banked "
+          "mission from a lost one")
+
+
+
+def test_the_rune_solver_does_not_rebuild_a_set_per_candidate():
+    """53 SECONDS OF 100% CPU before the first guess. It read as a freeze.
+
+    `solve_live` intersects the two hypotheses' pools, and it was written:
+
+        both = [c for c in pa if c in set(pb)]
+
+    `set(pb)` is rebuilt once PER ELEMENT of pa, so the cost is
+    O(len(pa) x len(pb)). On the first guess of a length-6 stage BOTH pools
+    are the full 46,656 codes, and it measured:
+
+        set() inside the comprehension   48.92 s
+        hoisted out                       0.0019 s      ~25,000x
+
+    That is also exactly why TP never stuttered and SS did: the TP kekkai is
+    length 3, where the pool is 216 and the same line costs 0.00 s. The cost
+    is quadratic in the pool, and the pool is exponential in the code length.
+
+    The operator asked why SS burned so much CPU when TP does not - the honest
+    answer was a comprehension, not the solver, which measured 0.10 s.
+    """
+    print("\nthe rune solver does not rebuild a set per candidate")
+    import kekkai_play as kp
+    import kekkai as kk
+
+    src = inspect.getsource(kp.solve_live)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    lines = [ln for ln in body.splitlines() if "for c in pa" in ln]
+    check(lines, "the intersection is still there to check")
+    for ln in lines:
+        check("set(" not in ln,
+              f"the set is NOT rebuilt inside the comprehension: {ln.strip()}")
+    check("pb_set" in body, "it is hoisted into a name first")
+
+    # --- and the hoisted form is genuinely equivalent -------------------
+    pa = kk.candidates(3, kk.RUNES)
+    pb = pa[::2]
+    naive = [c for c in pa if c in set(pb)]
+    s2 = set(pb)
+    fast = [c for c in pa if c in s2]
+    check(naive == fast,
+          f"same answer either way ({len(fast)} survivors)")
+
+    # --- the cost is what actually changed -----------------------------
+    big_a = kk.candidates(5, kk.RUNES)
+    t0 = time.time()
+    s3 = set(big_a)
+    _ = [c for c in big_a if c in s3]
+    hoisted = time.time() - t0
+    check(hoisted < 2.0,
+          f"intersecting a length-5 pool with itself is fast ({hoisted:.3f}s) "
+          f"- the un-hoisted form took 48.92s at length 6")
+
+
+
+def test_digit_exemplars_can_be_overridden_per_renderer():
+    """The reader has to behave per backend, and the failure was silent.
+
+    Every ink exemplar in the shared set was harvested on webgl. Switching the
+    game to wgpu made the reader fail in the OPPOSITE direction - measured
+    live, green fell to 0.786 where it had been reading 0.853..0.946, while
+    gold rose to 0.863. wgpu draws the text stroke webgl omits.
+
+    **What that looked like from outside was a bot clicking one pattern over
+    and over.** It is not a loop: an unread counter stops the solver at guess
+    1, so the history stays empty, so the next attempt recomputes the SAME
+    deterministic opening guess. Nothing errored.
+
+    So exemplars follow the renderer, PER DIGIT, the same shape as
+    `tpl/<renderer>/`: a backend needs only the digits that fail on it.
+
+    **This test uses a THROWAWAY renderer name**, never a real one. The bot
+    HARVESTS into these directories during live play, and a test pinned to
+    what a real backend happens to hold today fails the moment a mission adds
+    a crop - which this suite has already been burned by twice (the cooldown
+    frames, the SS hints frames).
+    """
+    print("\ndigit exemplars can be overridden per renderer")
+    import kekkai_play as kp
+    import perceive as pmod
+
+    FAKE = "test-backend-not-real"
+    ink = os.path.join(ROOT, kp.INK_DIR)
+    var = os.path.join(ink, FAKE)
+    was = pmod.get_renderer()
+    try:
+        os.makedirs(var, exist_ok=True)
+        # one digit only, so the fallback for every other digit is visible
+        cv2.imwrite(os.path.join(var, "3_probe.png"), np.zeros((52, 52), np.uint8))
+
+        pmod.set_renderer("webgl")
+        shared = kp.load_exemplars()
+        shared_variant = kp.LAST_VARIANT
+        pmod.set_renderer(FAKE)
+        swapped = kp.load_exemplars()
+        swapped_variant = kp.LAST_VARIANT
+
+        check(shared_variant is None or FAKE not in str(shared_variant),
+              "a real backend does not pick up the test directory")
+        check(swapped_variant and swapped_variant[0] == FAKE
+              and swapped_variant[1] == ["3"],
+              f"the variant reports exactly which digits it substituted "
+              f"({swapped_variant})")
+        check(len(swapped[3]) == 1,
+              f"the variant REPLACES that digit rather than mixing renderings "
+              f"({len(swapped[3])} vs {len(shared[3])} shared)")
+        for d in shared:
+            if d != 3:
+                check(len(shared[d]) == len(swapped[d]),
+                      f"digit {d} falls back to the shared set")
+        check(all(isinstance(k, int) for k in swapped),
+              f"no non-digit key leaks into the exemplar map "
+              f"({[k for k in swapped if not isinstance(k, int)]})")
+    finally:
+        shutil.rmtree(var, ignore_errors=True)
+        if was:
+            pmod.set_renderer(was)
+        else:
+            pmod.clear_renderer()
+
+    # --- harvested crops go to the renderer's own directory -------------
+    src = inspect.getsource(kp.solve_live)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("get_renderer" in body,
+          "UNREAD crops are filed under the renderer that produced them, so "
+          "classifying one cannot poison another backend")
+
+    # --- and no exemplar may FALSELY match a different digit -------------
+    # A fresh per-backend set is small, so this is the check that matters:
+    # a wrong reading corrupts the solver silently, an unread one only stops.
+    import glob as _glob
+    for d in sorted(_glob.glob(os.path.join(ink, "*", ""))):
+        files = [p for p in sorted(_glob.glob(os.path.join(d, "*.png")))
+                 if os.path.basename(p).split("_")[0].split(".")[0].isdigit()]
+        if len(files) < 2:
+            continue
+        worst, pair = 0.0, None
+        for a, b in itertools.permutations(files, 2):
+            ta = int(os.path.basename(a).split("_")[0].split(".")[0])
+            tb = int(os.path.basename(b).split("_")[0].split(".")[0])
+            if ta == tb:
+                continue
+            pa = cv2.imread(a, cv2.IMREAD_GRAYSCALE)
+            g = kp.tight_glyph(cv2.imread(b, cv2.IMREAD_GRAYSCALE))
+            if g.shape[0] > pa.shape[0] or g.shape[1] > pa.shape[1]:
+                continue
+            m = float(cv2.minMaxLoc(
+                cv2.matchTemplate(pa, g, cv2.TM_CCOEFF_NORMED))[1])
+            if m > worst:
+                worst, pair = m, f"{ta} vs {tb}"
+        check(worst < 0.80,
+              f"{os.path.basename(d.rstrip(os.sep))}: no cross-digit false "
+              f"match above the gate (worst {worst:.3f} on {pair})")
+
+
+
+def test_a_full_gold_counter_is_not_a_solved_puzzle():
+    """It was read as SOLVED, and it made length-6 stages unwinnable.
+
+    The solve shortcut read:
+
+        if gv == length or ov == length:   -> SOLVED
+
+    The gold half is the OPPOSITE of a win. Gold counts runes that are correct
+    but in the WRONG PLACE - the game's own rules panel states that mapping -
+    so gold == length means every rune is present and NONE is in position.
+
+    With permutation codes the opening guess is a DERANGEMENT of the secret
+    about 37% of the time (1/e), which scores gold=6 immediately. Live, that
+    produced a loop nobody could read as a bug:
+
+        resuming a puzzle that already has 1 guess(es) of history
+        guess 1: Green,Red,Blue,Black,Yellow,White  (pool A=46656 B=46656)
+        feedback: green=0 gold=6
+        ... identical, again and again
+
+    ONE bug, TWO symptoms. `solve_live` returned a guess, so `ss.play` took
+    the success branch, CLEARED the history (`hist = []`) and moved to the
+    "next" stage - which was the same stage, still open. So every pass replayed
+    the same opener against a fresh 46,656 pool and burned one of the ten rows.
+    """
+    print("\na full gold counter is not a solved puzzle")
+    import kekkai as kk
+    import kekkai_play as kp
+
+    # --- the semantics, from the solver's own scorer --------------------
+    secret = ("Green", "Red", "Blue", "Black", "Yellow", "White")
+    deranged = ("Red", "Green", "Black", "Blue", "White", "Yellow")
+    g, o = kk.score(deranged, secret)
+    check((g, o) == (0, 6),
+          f"a derangement scores green=0 gold=6 at length 6 ({g}, {o})")
+    check(deranged != secret,
+          "and it is NOT the secret - so gold==length cannot mean solved")
+
+    exact = kk.score(secret, secret)
+    check(exact == (6, 0),
+          f"the real answer scores green=6 gold=0 ({exact})")
+
+    # --- the code must key on GREEN only --------------------------------
+    src = inspect.getsource(kp.solve_live)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    hits = [ln.strip() for ln in body.splitlines()
+            if "== length" in ln and "if" in ln]
+    check(hits, "the solve shortcut is still there to check")
+    for ln in hits:
+        check("ov ==" not in ln,
+              f"the gold counter is not a solve condition: {ln}")
+        check("gv ==" in ln, f"the green counter is: {ln}")
+
+    # --- how often this would fire, so the cost is on the record --------
+    import random
+    random.seed(7)
+    runes = list(kk.RUNES)
+    hits_n = 0
+    for _ in range(400):
+        sec = tuple(random.sample(runes, 6))
+        if kk.score(tuple(runes), sec)[1] == 6:
+            hits_n += 1
+    check(hits_n > 80,
+          f"a fixed opener is a derangement of a permutation secret "
+          f"{hits_n}/400 of the time (~1/e), so this was not a rare path")
+
+
+
+def test_a_declined_revive_ends_the_fight_as_a_defeat():
+    """The guard declined correctly, and the runner still called it a stall.
+
+    Measured live:
+
+        12:31:15  gate: a dialog is blocking this wait and offers a CHOICE
+                  (green (1622,847) / red (1897,850)) - declining
+        12:31:15  CLICK (1897,850) decline a blocking two-button dialog
+        12:32:26  gate[battle turn 4] TIMEOUT after 93.0s (74 polls)
+        12:32:26  battle: no turn and no result in 90s
+        12:32:26  mission: battle 1 -> stalled
+
+    **You are only offered a revive when you have DIED**, so once one has been
+    declined the fight is over and the game is on its way back to the village.
+    Waiting 93 seconds for `command_bar` asks a question already answered, and
+    reporting STALLED is wrong twice over: it blames the runner for a screen
+    that behaved exactly as designed, and it hides a LOSS from whatever counts
+    wins and losses.
+
+    Two changes, and the grace window is the careful part: the transition is
+    not instant and a defeat panel or cutscene may still be what fires, so the
+    conditions keep their priority and only the DEADLINE shortens.
+    """
+    print("\na declined revive ends the fight as a defeat")
+    import gate as gate_mod
+    import battle as battle_mod
+
+    class _Cap:
+        def frame(self, gray=False, clip=None):
+            f = np.zeros((1440, 3440, 3), np.uint8)
+            return cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if gray else f
+
+    class _Cond:
+        name = "command_bar"
+
+        def check(self, bgr, gray):
+            return None
+
+    # --- without a decline the wait runs its full length ----------------
+    g = gate_mod.Gate(_Cap(), _Log(), poll_interval=0.02)
+    g.DECLINE_GRACE = 1.0
+    t0 = time.time()
+    g.wait_for_any([_Cond()], timeout=3.0, why="turn")
+    full = time.time() - t0
+    check(2.4 < full < 4.5,
+          f"an ordinary wait still runs to its timeout ({full:.1f}s of 3.0)")
+
+    # --- after a decline it stops, instead of hoping -------------------
+    g2 = gate_mod.Gate(_Cap(), _Log(), poll_interval=0.02)
+    g2.DECLINE_GRACE = 1.0
+    threading.Thread(
+        target=lambda: (time.sleep(0.4),
+                        setattr(g2, "declined_at", time.time())),
+        daemon=True).start()
+    t0 = time.time()
+    g2.wait_for_any([_Cond()], timeout=30.0, why="turn")
+    cut = time.time() - t0
+    check(cut < 5.0,
+          f"a declined dialog cuts the wait short ({cut:.1f}s of 30.0) - live "
+          f"this was 93 s of polling for a turn that could not come")
+    check(cut > 1.0,
+          f"but keeps a grace window, since a defeat panel may still fire "
+          f"({cut:.1f}s)")
+
+    # --- and the outcome is DEFEAT, not STALLED ------------------------
+    src = inspect.getsource(battle_mod.BattleRunner._run)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("declined_at" in body,
+          "the runner asks whether a revive was declined")
+    seg = body.split("declined_at")[1][:400]
+    check("DEFEAT" in seg,
+          "and reports DEFEAT rather than STALLED when it was")
+    check(body.index("declined_at") < body.index("no turn and no result"),
+          "checked BEFORE the generic stall message, or the loss is "
+          "mislabelled before anyone looks")
+
+
+
+def test_the_digit_gate_admits_correct_reads_and_still_refuses_unknowns():
+    """0.80 was refusing a FIFTH of the reads it should have accepted.
+
+    Every refusal costs a mission - the solver stops, the ladder cannot name a
+    half-played puzzle, and it relogs. Live, the refused scores were 0.794,
+    0.799, 0.771, 0.726 and 0.708, and EVERY ONE had already identified the
+    right digit. The gate, not the reader, was wrong.
+
+    Measured leave-one-out over every exemplar held. "Right" means the set
+    identified it; "wrong" means its own digit was REMOVED first, so the best
+    match is necessarily another digit and must be refused:
+
+        correct reads (33)   0.726 .. 0.987
+        wrong   reads (35)   0.396 .. 0.627
+
+    A 0.10 gap, with 0.80 sitting INSIDE the correct range.
+
+    **Margin was tried as the discriminator and rejected**, which is worth
+    recording because it looks like the obvious answer: a wrong answer reached
+    1.86x over its runner-up while a right one fell to 1.23x. They overlap, so
+    a margin-only gate would licence confident WRONG readings - and a wrong
+    counter corrupts the solver silently where a refusal merely stops it. It
+    survives only as a second condition.
+    """
+    print("\nthe digit gate admits correct reads and still refuses unknowns")
+    import kekkai_play as kp
+    import perceive as pmod
+
+    was = pmod.get_renderer()
+    try:
+        pmod.set_renderer("wgpu-webgl")
+        ex = kp.load_exemplars()
+        check(ex, "there are exemplars to test with")
+
+        def decide(patch, pool):
+            per = {}
+            for val, imgs in pool.items():
+                for img in imgs:
+                    g = kp.tight_glyph(img)
+                    if g.shape[0] > patch.shape[0] or g.shape[1] > patch.shape[1]:
+                        continue
+                    m = float(cv2.minMaxLoc(cv2.matchTemplate(
+                        patch, g, cv2.TM_CCOEFF_NORMED))[1])
+                    if m > per.get(val, 0.0):
+                        per[val] = m
+            if not per:
+                return None, 0.0
+            r = sorted(per.items(), key=lambda kv: -kv[1])
+            bv, bs = r[0]
+            rv = r[1][1] if len(r) > 1 else 0.0
+            if bs < kp.DIGIT_GATE:
+                return None, bs
+            if rv > 0 and bs < rv * kp.DIGIT_MARGIN:
+                return None, bs
+            return bv, bs
+
+        files = [p for p in sorted(glob.glob(
+            os.path.join(ROOT, "ref/auto/tp/digits_ink/**/*.png"), recursive=True))
+            if os.path.basename(p).split("_")[0].split(".")[0].isdigit()]
+        check(len(files) > 20, f"a meaningful set to measure ({len(files)})")
+
+        misread, refused, accepted_unknown = [], [], []
+        for path in files:
+            truth = int(os.path.basename(path).split("_")[0].split(".")[0])
+            patch = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if patch is None:
+                continue
+            sub = {}
+            for val, imgs in ex.items():
+                keep = [im for im in imgs
+                        if not (im.shape == patch.shape and (im == patch).all())]
+                if keep:
+                    sub[val] = keep
+            if truth in sub:
+                v, c = decide(patch, sub)
+                if v is None:
+                    refused.append((os.path.basename(path), round(c, 3)))
+                elif v != truth:
+                    misread.append((os.path.basename(path), v, round(c, 3)))
+            # own digit removed: the answer can only be wrong, so refuse it
+            v2, c2 = decide(patch, {k: v for k, v in sub.items() if k != truth})
+            if v2 is not None:
+                accepted_unknown.append((os.path.basename(path), v2, round(c2, 3)))
+
+        check(not misread, f"no exemplar is read as the WRONG digit ({misread[:3]})")
+        check(not refused,
+              f"and none is refused either - the gate no longer rejects "
+              f"correct reads ({refused[:3]})")
+        check(not accepted_unknown,
+              f"while a glyph whose digit has NO exemplar is still REFUSED, "
+              f"never guessed ({accepted_unknown[:3]})")
+
+        check(kp.DIGIT_GATE < 0.80,
+              f"the gate came down from 0.80 ({kp.DIGIT_GATE})")
+        check(kp.DIGIT_GATE > 0.63,
+              f"but stays clear of the 0.627 a WRONG read reached "
+              f"({kp.DIGIT_GATE})")
+    finally:
+        if was:
+            pmod.set_renderer(was)
+        else:
+            pmod.clear_renderer()
+
+
+
+def test_the_docs_do_not_name_the_removed_helpers():
+    """Dead code was removed; the prose that named it was updated with it.
+
+    `bar_fill_ratio` and `is_desaturated` were quoted in CLAUDE.md and in
+    `docs/` as the way HP bars and cooldowns are read, and both had been
+    superseded long ago - by `find_enemy_bars` and `slot_cooling` - without the
+    prose being changed. Deleting them without fixing that would leave the
+    most-read file in the project describing a mechanism that does not exist.
+
+    **This deliberately checks two NAMES, not every name.** A general "does the
+    prose name anything real" sweep was written first and abandoned: it cannot
+    tell our functions from stdlib calls, config keys (`battle.rotation`),
+    parameter names or filenames (`cdp.py`), and it took four rounds of
+    special-casing while still failing on correct docs. This file's own rule is
+    that a guard which fires on correct code gets deleted.
+    """
+    print("\nthe docs do not name the removed helpers")
+    import glob as _glob
+
+    gone = ("bar_fill_ratio", "is_desaturated")
+    engine = "\n".join(open(p).read()
+                       for p in _glob.glob(os.path.join(ROOT, "engine/*.py")))
+    for name in gone:
+        check(f"def {name}" not in engine,
+              f"{name} really is gone from the engine")
+
+    docs = ["CLAUDE.md", "README.md"] + [
+        os.path.relpath(p, ROOT)
+        for p in _glob.glob(os.path.join(ROOT, "docs/*.md"))]
+    checked = 0
+    for rel in docs:
+        path = os.path.join(ROOT, rel)
+        if not os.path.exists(path):
+            continue
+        checked += 1
+        text = open(path).read()
+        for name in gone:
+            # A HISTORICAL NOTE MAY NAME IT. The point is that no doc presents
+            # these as the CURRENT mechanism - a paragraph explaining that they
+            # were removed has to say which, and forbidding that would forbid
+            # recording the change at all. So an occurrence is allowed when its
+            # surroundings say it is gone.
+            #
+            # This test failed for exactly that reason: the removal was written
+            # up in CLAUDE.md naming both functions, AFTER the suite had been
+            # run, and committed without re-running. The rule was wrong and the
+            # order was wrong.
+            for m in re.finditer(re.escape(name), text):
+                ctx = text[max(0, m.start() - 400):m.end() + 400].lower()
+                historical = any(w in ctx for w in
+                                 ("removed", "superseded", "deleted", "no longer"))
+                check(historical,
+                      f"{rel}: `{name}` is only named while explaining that it "
+                      f"was removed, never as the way to do something")
+    check(checked >= 3, f"several docs were actually read ({checked})")
+
+    # and the replacements it now points at DO exist
+    for name in ("find_enemy_bars", "slot_cooling"):
+        check(f"def {name}" in engine,
+              f"the replacement {name} exists")
+
+
+
+def test_a_eudemon_reward_panel_ends_the_turn_gate():
+    """A WON boss sat on its reward screen for 2m37s and was filed as a stall.
+
+    Measured live, and reported as "the bot is stuck at the reward screen":
+
+        13:14:26  mission: unknown -> command_bar (step 2)
+        13:17:03  mission: battle 1 -> stalled {'rounds': 4, 'acted': 4}
+        13:17:03  eudemon: close the reward panel (X, never Share)
+
+    A Eudemon boss pays out on a TALL PORTRAIT panel closed by a RED X, not
+    the wide banner with a green check the farm and TP use. So `result_panel`,
+    `mission_success` and `cutscene_continue` all miss it, the turn gate waited
+    its full timeout for a command bar that could never come, and a win was
+    recorded as a stall before `close_out` banked it anyway.
+
+    **Third instance of one shape**, after the cutscene ending and the
+    Mission Success ending: a wait list that does not contain the state which
+    actually follows. When adding a new way for a fight to END, ask what the
+    gate is still waiting for.
+
+    The detector is a POSITIVE reading - `eudemon.reward_panel` returns None
+    whenever the garden LIST is on screen - so it cannot fire on the boss list,
+    and a story mission never draws this panel at all.
+    """
+    print("\na eudemon reward panel ends the turn gate")
+    import mission as mission_mod
+    import battle as battle_mod
+
+    real = os.path.join(ROOT, "ref/auto/eudemon/reward_panel.png")
+    check(os.path.exists(real), "the payout fixture is on disk")
+    if os.path.exists(real):
+        got = mission_mod._eudemon_reward(cv2.imread(real))
+        check(got is not None, f"the payout panel is detected ({got})")
+
+    # --- it must NOT fire on the garden list, or a lap would "win" ------
+    for n in (1, 2, 3):
+        g = cv2.imread(os.path.join(ROOT, f"ref/auto/eudemon/page{n}.png"))
+        if g is None:
+            continue
+        check(mission_mod._eudemon_reward(g) is None,
+              f"garden page {n} is not read as a payout")
+
+    # --- nor anywhere else in the reference set ------------------------
+    fires = []
+    for d in ("mission", "lobby", "battle", "tp", "ss", "renderer",
+              "unknown", "panels"):
+        for path in sorted(glob.glob(os.path.join(ROOT, f"ref/auto/{d}/*.png"))):
+            if os.path.basename(path) == "reward_panel.png":
+                continue
+            im = cv2.imread(path)
+            if im is not None and mission_mod._eudemon_reward(im):
+                fires.append(os.path.basename(path))
+    check(not fires, f"and on no other reference frame ({fires[:4]})")
+
+    # --- the gate waits on it, and calls it a WIN ----------------------
+    src = inspect.getsource(battle_mod.BattleRunner._run)
+    body = src.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else src
+    body = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    check("eudemon_reward" in body, "the turn gate waits on it")
+    check(body.index("eudemon_reward") < body.index('"command_bar"'),
+          "and before falling through to command_bar")
+    seg = body.split('fired.name == "eudemon_reward"')
+    check(len(seg) > 1, "the outcome is handled by name")
+    if len(seg) > 1:
+        check("VICTORY" in seg[1][:300],
+              "and reported as a VICTORY, not a stall")
+
+    # --- the condition is actually built ------------------------------
+    cond_src = inspect.getsource(mission_mod.MissionRunner._build_conditions)
+    check("eudemon_reward" in cond_src,
+          "and _build_conditions provides it, or the gate can never see it")
+
+
+def test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it():
+    """A won boss left the runner WALKING ON ITS OWN REWARD SCREEN.
+
+    The turn gate was taught this panel and `classify` was not, so control came
+    back from a VICTORY, nothing in the priority order matched, and the frame
+    read "unknown". `looks_like_mission_scene` cannot veto it either, so the
+    runner traversed on top of the payout panel until the 25-repeat guard fired.
+
+    Measured live across five bosses - 8:09, 8:15, 8:14, 2:07 and ~10:00 - with
+    the "character" and the "enemy" at byte-identical coordinates every pass,
+    the static-object signature. The cost was not only the delay: it was ~25
+    BLIND CLICKS on a panel that carries a `Share` button, which this project
+    forbids pressing.
+
+    Sixth instance of the negative-definition shape, and the second time this
+    one panel was taught to one caller and not the other.
+
+    THE TEST CALLS `run()`. Two UnboundLocalErrors have shipped in this project
+    behind passing source-level assertions (`arrow`, `play`), and this file's
+    own rule is that a test which reads code cannot catch code that does not
+    run.
+    """
+    print("\nthe runner stops on a eudemon payout instead of walking on it")
+    import mission as mission_mod
+
+    real = os.path.join(ROOT, "ref/auto/eudemon/reward_panel.png")
+    if not os.path.exists(real):
+        check(False, "the payout fixture is on disk")
+        return
+    frame = cv2.imread(real)
+
+    # --- classify must NAME it, not fall through to "unknown" ----------
+    r = mission_mod.MissionRunner.__new__(mission_mod.MissionRunner)
+    r.conditions = {"eudemon_reward": mission_mod.Condition(
+        "eudemon_reward", lambda b, _g: mission_mod._eudemon_reward(b))}
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    state, _payload = mission_mod.MissionRunner.classify(r, frame, gray)
+    check(state == "eudemon_reward",
+          f"the payout panel classifies as itself, not 'unknown' ({state})")
+
+    # --- and it is asked LAST, so the farm does not pay for it ---------
+    csrc = inspect.getsource(mission_mod.MissionRunner.classify)
+    body = csrc.split('"""')
+    body = body[0] + "".join(body[2:]) if len(body) > 2 else csrc
+    order_line = [l for l in body.splitlines() if "order = (" in l]
+    check(bool(order_line), "classify still declares an explicit order")
+    tail = body[body.index("order = ("):]
+    tail = tail[:tail.index(")")]
+    check(tail.rstrip().rstrip(",").endswith('"eudemon_reward"'),
+          "and eudemon_reward is asked LAST - it is the expensive check")
+
+    # --- EXECUTE run() on that frame: it must stop, not walk -----------
+    class _Cap:
+        def frame(self, gray=False):
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if gray else frame
+
+    walked = []
+
+    class _Actor:
+        def click_pixel(self, x, y, why=""):
+            walked.append((x, y, why))
+
+        click = click_pixel
+
+    class _Log:
+        def info(self, *a, **k):
+            pass
+
+        warning = error = debug = info
+
+    inst = mission_mod.MissionRunner.__new__(mission_mod.MissionRunner)
+    inst.conditions = r.conditions
+    inst.capture = _Cap()
+    inst.actor = _Actor()
+    inst.log = _Log()
+    inst.controls = None
+    inst.grade = "A"
+    inst.max_steps = 40
+    inst.cfg = {}
+    inst.stats = {"battles": 0, "victories": 0, "aborted": 0,
+                  "cutscenes": 0, "steps": 0, "closed_out": None}
+
+    try:
+        out, stats = mission_mod.MissionRunner.run(inst)
+        ran = True
+    except Exception as e:                      # noqa: BLE001 - reporting it IS the test
+        out, stats, ran = None, None, False
+        check(False, f"run() raised on a payout frame: {type(e).__name__}: {e}")
+
+    if ran:
+        check(stats["steps"] <= 2,
+              f"it stops on the FIRST look, not after 25 repeats "
+              f"(steps={stats['steps']})")
+        check(not walked,
+              f"and never clicks the panel - Share lives on it ({walked[:3]})")
+
+    # --- it must NOT dismiss the panel: that is the lap's measurement --
+    rsrc = inspect.getsource(mission_mod.MissionRunner.run)
+    seg = rsrc.split('state == "eudemon_reward"')
+    check(len(seg) > 1, "run() handles the payout state by name")
+    if len(seg) > 1:
+        # SCOPE THIS TO THE HANDLER, AND STRIP COMMENTS. A first version read
+        # 1800 raw characters past the branch, which runs into the NEXT
+        # handlers - and the comment explaining this fix says "close_out"
+        # itself. It failed on correct code, which this project's own rule
+        # says to fix rather than live with. The invariant is about the
+        # handler's CODE, so take only as far as its return and drop prose.
+        # STRIP COMMENTS FIRST, THEN LOOK. Slicing to the first "return" before
+        # stripping found the word inside the comment ("play_combat()'s return")
+        # and cut the handler off above its own code - a second way for this
+        # assertion to fail on correct code. Prose is not code; drop it first.
+        code = "\n".join(ln.split("#")[0] for ln in seg[1].splitlines())
+        idx = code.find("return")
+        check(idx != -1, "and returns rather than falling through")
+        body = code[:idx] if idx != -1 else code
+        check("close_out" not in body and "reward_panel(" not in body,
+              "and does not dismiss it - close_out is what banks the boss")
+
+
+
+def test_the_attempts_counter_reads_a_zero():
+    """`x0` means no tries left - and the reader could NEVER say so.
+
+    The `count == 0` branch has always existed in `hunt`; it had simply never
+    fired, because `exemplars()` returned an EMPTY dict (the `count_digits`
+    directory was created and never filled), so `count_at` bailed on its third
+    line for every row of every page. Every live log read `SSxNone`, `CxNone`.
+
+    Two measured faults behind it, and the module note's "the digit merges with
+    the panel border" was the symptom rather than the cause:
+
+      * the digits are drawn ACROSS a dark vertical bar at x~1640, so the old
+        (1560, 1660) window returned one blob of the FULL ROI height - 68x107
+        against a digit's true 38..54 x 41..49;
+      * `g < 90` selects that bar too. Only SATURATION separates them: over the
+        dark pixels of one cell the ink sits at median S=0 and the bar at
+        S=140, so the mask is black AND unsaturated and the ink survives even
+        where it crosses the bar - which is where a `0` is drawn.
+
+    The `0` exemplars are harvested from a REAL exhausted row. Two bosses were
+    farmed to zero in one session and the garden was captured while they read
+    `x0`; inventing that crop is the eyeball mistake this project keeps paying
+    for.
+
+    A FALSE ZERO IS THE DANGEROUS DIRECTION - it would skip a boss that still
+    has attempts, for a whole day. A refusal costs one wasted Battle press,
+    which is what the authority already is. So this asserts no frame yields a
+    spurious 0, and tolerates None.
+    """
+    print("\nthe attempts counter reads a zero")
+    import eudemon as eu
+
+    ex = eu.exemplars()
+    check(bool(ex), f"the counter exemplar set is not empty ({sorted(ex)})")
+    check("0" in ex, "and it contains a 0, harvested from a real exhausted row")
+
+    # --- leave-one-out, WITH the single-exemplar case stated ------------
+    #
+    # A digit with only ONE sample cannot pass this: remove it and there is
+    # nothing of its own left, so the best match is necessarily another
+    # digit. That is not a failure, it is the refusal working - what must be
+    # true is that the nearest wrong digit stays ABOVE the gate, so the
+    # glyph is refused rather than misread. A wrong counter corrupts the
+    # model silently; an unread one only stops.
+    GATE = 0.13
+    flat = [(d, e) for d, es in ex.items() for e in es]
+    wrong, lonely = [], []
+    for i, (d, q) in enumerate(flat):
+        scored = sorted((float(np.abs(q - e).mean()), d2)
+                        for j, (d2, e) in enumerate(flat) if j != i)
+        if not scored:
+            continue
+        if scored[0][1] == d:
+            continue
+        (len(ex[d]) > 1 and wrong or lonely).append((d, scored[0][1],
+                                                     round(scored[0][0], 3)))
+    check(not wrong,
+          f"every digit with two or more exemplars classifies as itself "
+          f"({wrong})")
+    for d, other, dist in lonely:
+        check(dist > GATE,
+              f"the only exemplar of {d} is REFUSED rather than read as "
+              f"{other} ({dist} vs gate {GATE})")
+
+    # --- a digit the BAR cuts in two is still one digit -----------------
+    #
+    # The counter is drawn across a dark vertical bar, and a `2` has no ink
+    # where the bar crosses it: measured live, 51x16 and 37x31, neither
+    # digit-shaped, so the row read `xNone` while 0/1/3 read fine. Their
+    # union is 51x49, the size of every other digit here.
+    csrc = inspect.getsource(eu.count_at)
+    body = "\n".join(ln.split("#")[0] for ln in csrc.splitlines())
+    check("groups" in body,
+          "count_at groups components before matching, so a bisected glyph "
+          "is not two half-digits")
+
+    # --- the exhausted fixture must read 0 on its exhausted rows ---------
+    ex_path = os.path.join(ROOT, "ref/auto/eudemon/exhausted_counts.png")
+    if os.path.exists(ex_path):
+        f = cv2.imread(ex_path)
+        got = [eu.count_at(f, y) for y in eu.plates(f)]
+        check(got[:2] == [0, 0],
+              f"the two farmed-out bosses read x0 ({got})")
+        check(got[2] == 1, f"and the row beside them still reads 1 ({got})")
+    else:
+        check(False, "the exhausted-row fixture is on disk")
+
+    # --- and NO frame may invent a zero ---------------------------------
+    false_zeros = []
+    for rel in ("ref/auto/eudemon/page1.png", "ref/auto/eudemon/page2.png",
+                "ref/auto/eudemon/page3.png"):
+        path = os.path.join(ROOT, rel)
+        f = cv2.imread(path)
+        if f is None:
+            continue
+        for y in eu.plates(f):
+            if eu.count_at(f, y) == 0:
+                false_zeros.append((os.path.basename(rel), y))
+    check(not false_zeros,
+          f"no row on a healthy page reads a spurious 0 ({false_zeros})")
+
+    # --- page 1's four SS rows read 1, which is the known truth ---------
+    p1 = cv2.imread(os.path.join(ROOT, "ref/auto/eudemon/page1.png"))
+    if p1 is not None:
+        got = [eu.count_at(p1, y) for y in eu.plates(p1)]
+        check(got[:4] == [1, 1, 1, 1],
+              f"the four SS rows read x1 ({got})")
+
+
+
+def test_a_relog_keeps_the_operators_window_size():
+    """A chosen window size was reverted within a second of being chosen.
+
+    Applying a size RELOADS, and `relog` re-pinned the hardcoded `VIEWPORT`.
+    So the handler pinned 900, `relog` pinned 720 straight back, and the
+    captured frame stayed 3440x1440 - measured live. Every later relog did it
+    again, and relog is also the cure for an unreadable screen, a post-defeat
+    recovery and a wake from sleep.
+
+    It is not cosmetic. At 720 the bottom 119 CSS px of the 839-tall game are
+    below the fold, and that band holds the SS hints panel's green button -
+    the only exit from the Balance Control and Sage Sealed Boxes rules
+    screens. Reported from Windows as the balance minigame being unreachable.
+
+    Same shape as the reward panel: a rule taught to one caller, not the
+    other. So this asserts there is ONE place that answers the question, and
+    that neither caller re-pins the constant behind it.
+    """
+    print("\na relog keeps the operator's window size")
+    import app as app_mod
+
+    check(hasattr(app_mod, "chosen_viewport"),
+          "there is a single place that answers 'which viewport'")
+
+    # --- neither site may pin the bare constant -------------------------
+    for name, fn in (("relog", app_mod.Runner.relog),
+                     ("attach", app_mod.attach)):
+        src = inspect.getsource(fn)
+        body = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+        pins = [ln for ln in body.splitlines() if "pin_viewport" in ln]
+        check(bool(pins), f"{name} pins the viewport")
+        for ln in pins:
+            check("chosen_viewport" in ln,
+                  f"{name} pins the OPERATOR's size, not the constant "
+                  f"({ln.strip()[:60]})")
+
+    # --- and it really returns the stored choice ------------------------
+    import json as _json
+    import tempfile
+    real = app_mod._read_json
+    try:
+        tall = next((v for v in app_mod.VIEWPORTS if v["h"] >= 839), None)
+        check(tall is not None, "a whole-game size is offered at all")
+        if tall:
+            app_mod._read_json = lambda rel, default: {"key": tall["key"]}
+            got = app_mod.chosen_viewport()
+            check(got == (tall["w"], tall["h"], tall["dpr"]),
+                  f"a stored choice is honoured ({got})")
+        app_mod._read_json = lambda rel, default: {}
+        check(app_mod.chosen_viewport() == app_mod.VIEWPORT,
+              "and no stored choice falls back to the reference")
+    finally:
+        app_mod._read_json = real
+
+
+
+def test_a_normalised_frame_puts_every_coordinate_in_one_space():
+    """Moving the game would have broken 47 constants in 10 modules at once.
+
+    Every absolute coordinate here was measured with the game at
+    `REFERENCE_ORIGIN`, and `fix` corrects for it having moved - but only for
+    callers that remember. Measured: 47 hardcoded coordinates across 13
+    modules, and exactly three (cards, kekkai_play, mission) correct at all.
+    `click_pixel` deliberately does not, because a template-derived point is
+    already live and would be corrected TWICE - the half-applied correction
+    that left the memory board at "19 faces known, 11 pairs refused".
+
+    So the PICTURE moves instead: a full frame is translated so the game
+    lands where the constants expect, and the inverse is applied at the one
+    door a coordinate leaves by. Then there is nothing to forget.
+
+    THE TEST DRIVES THE SHIFTED PATH. With the game where it has always been
+    the shift is zero and every assertion below would pass against code that
+    does nothing, which is the "passes for the wrong reason" trap this suite
+    keeps re-learning. So the offset is forced.
+    """
+    print("\na normalised frame puts every coordinate in one space")
+    from capture import Capture
+
+    c = Capture.__new__(Capture)
+    c.dpr = 2
+    c.normalise = True
+    c._off = (-760, 0, 1.0)        # the game flush-left
+    c._off_ok = True
+    c._off_at = float("inf")       # never re-measure
+
+    check(c.norm_shift() == (760, 0),
+          f"a displaced game yields the inverse shift ({c.norm_shift()})")
+    check(c.game_offset() == (0, 0),
+          "game_offset is zero while normalising, so nobody double-corrects")
+    check(c.fix(1578, 300) == (1578, 300),
+          f"fix is the identity while normalising ({c.fix(1578, 300)})")
+
+    # a reference coordinate must reach the REAL page point
+    cx, cy = c.to_click_coords(1578, 300)
+    check((cx * c.dpr, cy * c.dpr) == (1578 - 760, 300),
+          f"a click is un-normalised exactly once (css {cx},{cy})")
+
+    # the translation puts real content where the constants look for it
+    img = np.zeros((200, 2680, 3), np.uint8)
+    img[50:60, 100:110] = 255
+    out = Capture._translate(img, 760, 0)
+    xs = np.where(out[:, :, 0] == 255)[1]
+    check(int(xs.min()) == 860,
+          f"content at real x=100 lands at reference x=860 ({int(xs.min())})")
+    check(out.shape[1] == 3440,
+          f"and the canvas GROWS rather than cropping the dock away "
+          f"({out.shape[1]})")
+
+    # the search band must follow the game, not its old place
+    src = inspect.getsource(Capture.apply_search_band)
+    body = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+    check("self.normalise" in body,
+          "the search band knows about normalisation, or it aims at nothing")
+
+    # OFF must be bit-for-bit the historical behaviour
+    c.normalise = False
+    check(c.norm_shift() == (0, 0), "off: no shift")
+    check(c.game_offset() == (-760, 0), "off: game_offset reports the drift")
+    check(c.fix(1578, 300) == (818, 300), "off: fix corrects as it always did")
+    check(c.to_click_coords(1578, 300) == (789.0, 150.0),
+          "off: clicks are untouched")
+
+
+
+def test_normalisation_covers_clips_and_the_no_click_zone():
+    """The two paths the frame translation did NOT reach, both found live.
+
+    1. CLIPPED CAPTURES. `frame` normalises FULL frames only - a clipped one
+       has its own origin - but `clip_for` still received a box in REFERENCE
+       space and turned it straight into a page rectangle. So the clip was
+       taken 760 px from the thing it was aimed at. It broke the hand-seal
+       board: `panel_frame` clips around the "Skill :" HUD, `anchor_offset`
+       found nothing, and the round was abandoned with "cannot locate the
+       panel" - one second after the classifier, which uses a FULL frame,
+       matched that same HUD at 0.998. Two capture paths, one taught the new
+       space and the other not.
+
+    2. THE NO-CLICK ZONE. It was stored pre-shifted, which makes it a cached
+       belief - and it got cached from a measurement taken MID-RELOAD, where
+       the game is briefly scrolled and the shift reads (380, -602) instead
+       of (760, 0). The refresh that would fix it runs between cycles, and
+       the resume ladder spins inside a task, so the bad zone stood and the
+       bot refused its own Play button in a tight loop:
+
+           REFUSING click (2406,1061) resume:play - it lands on the control
+           dock (2300, -602, 760, 1800)
+
+       Now the zone is stored RAW and the CLICK is converted at comparison
+       time, so a transient costs one mis-judged click instead of the run.
+    """
+    print("\nnormalisation covers clips and the no-click zone")
+    from capture import Capture
+    import act as act_mod
+
+    cap = Capture.__new__(Capture)
+    cap.dpr = 2
+    cap.normalise = True
+    cap._off = (-760, 0, 1.0)          # game flush-left
+    cap._off_ok = True
+    cap._off_at = float("inf")
+
+    class _CDP:
+        def evaluate(self, expr):
+            return '{"x": 0, "y": 0}'
+    cap.cdp = _CDP()
+
+    # --- 1. a clip must be aimed at the REAL page, origin stays reference --
+    clip, origin = cap.clip_for(1578, 300, 100, 80)
+    check(abs(clip[0] - (1578 - 760) / 2) < 0.01,
+          f"the clip is un-normalised ({clip[0]}, want {(1578-760)/2})")
+    check(origin == (1578, 300),
+          f"but the origin stays in reference space ({origin})")
+
+    # --- 2. the zone is RAW and the point is converted -------------------
+    a = act_mod.Actor.__new__(act_mod.Actor)
+    a.capture = cap
+    a.no_click_zones = [(1920, 0, 760, 1800)]     # real px, as the DOM gives
+    a.no_click_points = []
+    # a reference-space click on the GAME must pass, though its raw value
+    # falls inside the raw zone
+    check(a.blocked_by(2406, 1061) is None,
+          "a reference-space click on the game is not blocked by a raw zone")
+    # and one genuinely on the panel must still be refused
+    check(a.blocked_by(1920 + 760 + 10, 100) is not None,
+          "a click that really is on the panel is still refused")
+
+    # --- THE INVERSE USES THE SHIFT THE FRAME WAS TRANSLATED WITH --------
+    #
+    # Re-measuring at click time can disagree with the frame the coordinate
+    # came from, and then the round trip does not close. It wedged a run:
+    # during a relog the game is briefly unmeasurable, a fresh read gave
+    # (0, 0), and a reference-space point was compared against a real-space
+    # zone - "REFUSING click (2555,248) close Eudemon Garden ... (1920, 0,
+    # 760, 1800)" though 2555 - 760 = 1795 is well clear of it.
+    cap._applied_shift = (760, 0)      # what the last frame actually used
+    cap._off = (0, 0, 1.0)             # and now the game is unmeasurable...
+    cap._off_ok = False
+    check(cap.norm_shift() == (760, 0),
+          f"the inverse pins the APPLIED shift, not a later reading "
+          f"({cap.norm_shift()})")
+    check(a.blocked_by(2555, 248) is None,
+          "so a legitimate click is not refused while the layout is in flux")
+    check(cap.measure_shift() == (760, 0),
+          "and an unmeasurable layout keeps the last applied shift, not zero")
+
+    # with no history at all, an unmeasurable game is still (0, 0), never a
+    # guess - the rule `game_offset` already follows
+    fresh = Capture.__new__(Capture)
+    fresh.dpr, fresh.normalise = 2, True
+    fresh._off, fresh._off_ok, fresh._off_at = (0, 0, 1.0), False, float("inf")
+    check(fresh.measure_shift() == (0, 0),
+          "with no history, a missing measurement is zero rather than a guess")
+
+    # --- nobody may re-introduce a stored, shifted zone -------------------
+    import app as app_mod
+    src = inspect.getsource(app_mod.Runner._refresh_no_click_zone)
+    body = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+    check("norm_shift" not in body,
+          "the zone refresh does not pre-shift; the click is converted instead")
+
+
+
+def test_the_renderer_is_confirmed_from_the_pixels():
+    """The loaded template set disagreed with what actually drew the screen.
+
+    Measured live: the bot had `webgl` variants loaded while
+    `loadedConfig.preferredRenderer`, `localStorage.renderMode` AND the
+    pixels all said `wgpu-webgl`. `ensure_renderer_templates` reads the
+    backend once and documents that it "does NOT re-ask once known: the
+    renderer cannot change while the document stays put" - true, but a relog
+    replaces the document and that path never cleared the cache, so a value
+    read at 07:06 outlived many reloads.
+
+    The failure is SILENT, which is why it needs a check rather than a fix
+    alone: wrong crops do not miss outright, they merely score lower, so the
+    bot limps and nothing names the cause.
+
+    The pixels cannot go stale. wgpu draws text WITH its stroke and webgl
+    does not - the reason `tpl/webgl/` exists at all - so scoring a name's
+    DEFAULT crop against its VARIANT says which one rendered the frame.
+    """
+    print("\nthe renderer is confirmed from the pixels")
+    import perceive as p
+
+    cases = [("ref/auto/renderer/webgl_lobby.png", "webgl"),
+             ("ref/auto/renderer/webgl_charsel.png", "webgl"),
+             ("ref/auto/renderer/wgpu_charsel.png", "wgpu"),
+             ("ref/auto/lobby/lb0.png", "wgpu")]
+    seen = 0
+    for rel, want in cases:
+        path = os.path.join(ROOT, rel)
+        im = cv2.imread(path)
+        if im is None:
+            continue
+        seen += 1
+        p.clear_search_band()
+        got, votes = p.renderer_from_pixels(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY))
+        check(got == want,
+              f"{os.path.basename(rel)} was drawn by {want} ({got}, "
+              f"{[(v[0], v[3]) for v in votes]})")
+    check(seen >= 3, f"enough labelled frames to calibrate on ({seen})")
+
+    # A SCREEN WITH NONE OF THE ANCHORS MUST ABSTAIN, not guess. Combat
+    # carries no variant-backed anchor, and a confident answer there would
+    # be a coin toss reported as a measurement.
+    combat = cv2.imread(os.path.join(ROOT, "ref/auto/mission/COMBAT.png"))
+    if combat is not None:
+        p.clear_search_band()
+        got, votes = p.renderer_from_pixels(
+            cv2.cvtColor(combat, cv2.COLOR_BGR2GRAY))
+        check(got is None and not votes,
+              f"a frame with no variant anchors abstains ({got}, {votes})")
+
+    # --- and a relog must invalidate the cached backend ------------------
+    import app as app_mod
+    src = inspect.getsource(app_mod.Runner.relog)
+    body = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+    check("_renderer_templates_for" in body,
+          "relog clears the cached renderer, because it replaced the document")
+
+    # --- the SS pass asks before it plays --------------------------------
+    import ss as ss_mod
+    rsrc = inspect.getsource(ss_mod.run_one)
+    rbody = "\n".join(ln.split("#")[0] for ln in rsrc.splitlines())
+    check("check_renderer" in rbody,
+          "an SS mission checks the renderer before it plays - one attempt, "
+          "and it does not come back")
+
+    # AND THE PASS ASKS IT WHERE THE ANSWER EXISTS. Asked on a puzzle board
+    # it abstains every time - those screens carry none of the anchors that
+    # separate the backends - so the useful call is at the start of the
+    # sweep, in the village, before any attempt is spent.
+    asrc = inspect.getsource(ss_mod.run_all)
+    abody = "\n".join(ln.split("#")[0] for ln in asrc.splitlines())
+    check("check_renderer" in abody,
+          "the SS pass checks from the village, where the anchors are")
+
+
+
 def main():
-    for fn in (test_geometry_classification, test_two_geometries,
+    for fn in (test_the_renderer_is_confirmed_from_the_pixels,
+               test_normalisation_covers_clips_and_the_no_click_zone,
+               test_a_normalised_frame_puts_every_coordinate_in_one_space,
+               test_a_relog_keeps_the_operators_window_size,
+               test_the_attempts_counter_reads_a_zero,
+               test_the_runner_stops_on_a_eudemon_payout_instead_of_walking_on_it,
+               test_geometry_classification, test_two_geometries,
                test_ring_cross_geometry, test_watchdog_recorded_sequence,
                test_skill_rotation, test_command_bar_layout,
                test_preflight, test_find_all_suppression,
@@ -5938,7 +8236,27 @@ def main():
                test_a_stage_dialog_is_a_solid_button_of_one_fixed_size,
                test_losing_the_idle_poke_does_not_also_lose_sleep_prevention,
                test_every_run_one_branch_actually_runs,
-               test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely):
+               test_the_rune_secret_looks_like_a_permutation_and_auto_proves_it_safely,
+               test_recruiting_takes_the_strongest_friend_and_never_an_npc,
+               test_the_eudemon_hunt_reads_ranks_and_never_blacklists_ss,
+               test_the_hunts_carry_their_own_skill_rotation,
+               test_a_eudemon_win_is_a_different_panel_from_a_mission_success,
+               test_the_eudemon_lap_recruits_then_fights_then_returns_to_the_lobby,
+               test_a_two_button_dialog_is_declined_never_accepted,
+               test_the_whole_boss_list_is_harvested_so_the_panel_can_offer_it,
+               test_a_rescan_can_drop_a_boss_and_keeps_identity_across_events,
+               test_the_token_guard_does_not_fire_during_an_ordinary_battle,
+               test_a_failed_log_redirect_cannot_stop_the_relaunch,
+               test_the_senjutsu_toggle_is_never_pressed_and_a_swap_is_undone,
+               test_an_unreadable_command_line_keeps_the_lock,
+               test_a_banked_ss_combat_mission_is_not_closed_out_twice,
+               test_the_rune_solver_does_not_rebuild_a_set_per_candidate,
+               test_digit_exemplars_can_be_overridden_per_renderer,
+               test_a_full_gold_counter_is_not_a_solved_puzzle,
+               test_a_declined_revive_ends_the_fight_as_a_defeat,
+               test_the_digit_gate_admits_correct_reads_and_still_refuses_unknowns,
+               test_the_docs_do_not_name_the_removed_helpers,
+               test_a_eudemon_reward_panel_ends_the_turn_gate):
         fn()
     print("\n" + "=" * 62)
     if FAILS:

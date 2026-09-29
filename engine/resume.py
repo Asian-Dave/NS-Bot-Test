@@ -334,6 +334,34 @@ class Resumer:
             if conf < limit:
                 continue
 
+            # A CHOICE IS NOT AN ACKNOWLEDGEMENT — and this rung would have
+            # SPENT TOKENS. Losing a Eudemon boss raises "Do you want to
+            # revive by using 50 token?" with a green check AND a red X, and
+            # `confirm_dialog` matched that check at 0.979 with the check as
+            # its click target. The veto is consulted only where a green check
+            # has ALREADY matched, which is what keeps it off every other
+            # screen; declining is the safe direction, so the red control is
+            # pressed instead.
+            if step.name == "confirm_dialog":
+                import perceive as _p
+                try:
+                    ch = _p.choice_dialog(self.capture.frame(gray=False))
+                except Exception:
+                    ch = None
+                if ch:
+                    self.log.warning(
+                        "resume: this dialog offers a CHOICE (green %s / red "
+                        "%s), not an acknowledgement - declining, because "
+                        "accepting can spend tokens",
+                        ch["accept"], ch["decline"])
+                    self.actor.click_pixel(*ch["decline"],
+                                           why="decline a two-button dialog "
+                                               "(never accept - it may cost "
+                                               "tokens)")
+                    self.unknown_streak = 0
+                    return WORKING, {"step": "declined_choice",
+                                     "at": ch["decline"]}
+
             # matched — short-circuit here
             el = (time.time() - t0) * 1000
             self.unknown_streak = 0
